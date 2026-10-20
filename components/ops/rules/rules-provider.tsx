@@ -4,35 +4,21 @@ import * as React from "react"
 import useSWR, { useSWRConfig } from "swr"
 import { toast } from "sonner"
 
-import type {
-  CreateRuleResponse,
-  RulesListResponse,
-  StormResponse,
-  SuppressResponse,
-  SuppressionSnapshot,
-  UpdateRuleResponse,
-} from "@/lib/ops/rules-api-types"
+import type { StormResponse, SuppressResponse, SuppressionSnapshot } from "@/lib/ops/rules-api-types"
 import {
   CLUSTER_ENDPOINT,
-  RULES_ENDPOINT,
   STORM_ENDPOINT,
   SUPPRESS_ENDPOINT,
   errorMessage,
   getJson,
   sendJson,
 } from "@/lib/ops/rules-client"
-import {
-  ALL_CHANNELS,
-  DEFAULT_CUSTOM_PROMPT,
-  INITIAL_DEDUP_METRICS,
-  INITIAL_INSPECTION_RULES,
-} from "@/lib/ops/rules-data"
-import type {
-  ChannelCooldown,
-  DeduplicationMetrics,
-  InspectionRule,
-  RuleActionKey,
-} from "@/lib/ops/rules-types"
+import { ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT, INITIAL_DEDUP_METRICS } from "@/lib/ops/rules-data"
+import type { ChannelCooldown, DeduplicationMetrics, InspectionRule } from "@/lib/ops/rules-types"
+
+import { type CustomRuleInput, useServerRules } from "./use-server-rules"
+
+export type { CustomRuleInput }
 
 const TICK_MS = 500
 const IDLE_POLL_MS = 5000
@@ -93,13 +79,6 @@ function projectCooldowns(snapshot: TimedSnapshot | undefined, now: number): Rec
   return result
 }
 
-export interface CustomRuleInput {
-  name: string
-  prompt: string
-  sensitivity: number
-  actions: Record<RuleActionKey, boolean>
-}
-
 interface RulesContextValue {
   rules: InspectionRule[]
   rulesError: boolean
@@ -133,10 +112,7 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
   const [customDialogOpen, setCustomDialogOpen] = React.useState(false)
   const [now, setNow] = React.useState(() => Date.now())
 
-  const { data: rulesData, error: rulesError, mutate: mutateRules } = useSWR<RulesListResponse>(
-    RULES_ENDPOINT,
-    getJson
-  )
+  const { rules, rulesError, updateRule, addCustomRule } = useServerRules()
   const {
     data: snapshot,
     error: snapshotError,
@@ -151,56 +127,12 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(interval)
   }, [])
 
-  const rules = rulesData?.rules ?? INITIAL_INSPECTION_RULES
   const cooldowns = React.useMemo(() => projectCooldowns(snapshot, now), [snapshot, now])
   const metrics = snapshot?.metrics ?? INITIAL_DEDUP_METRICS
 
   const refreshAfterTrigger = React.useCallback(async () => {
     await Promise.all([mutateSnapshot(), mutateGlobal(CLUSTER_ENDPOINT)])
   }, [mutateSnapshot, mutateGlobal])
-
-  const updateRule = React.useCallback(
-    async (id: string, patch: Partial<InspectionRule>) => {
-      try {
-        await mutateRules(
-          async () => {
-            const response = await sendJson<UpdateRuleResponse>(`${RULES_ENDPOINT}/${id}`, "PATCH", patch)
-            return { rules: response.rules }
-          },
-          {
-            optimisticData: (current) => ({
-              rules: (current?.rules ?? INITIAL_INSPECTION_RULES).map((rule) =>
-                rule.id === id ? { ...rule, ...patch } : rule
-              ),
-            }),
-            rollbackOnError: true,
-            populateCache: true,
-            revalidate: false,
-          }
-        )
-      } catch (error) {
-        toast.error("规则更新失败，已回滚", { description: errorMessage(error) })
-      }
-    },
-    [mutateRules]
-  )
-
-  const addCustomRule = React.useCallback(
-    async (input: CustomRuleInput) => {
-      try {
-        const response = await sendJson<CreateRuleResponse>(RULES_ENDPOINT, "POST", input)
-        await mutateRules({ rules: response.rules }, { revalidate: false })
-        toast.success("自定义语义规则已创建并启用", {
-          description: `${response.rule.id} 已写入服务端规则库，默认绑定全部通道，可在规则目录中继续调整。`,
-        })
-        return true
-      } catch (error) {
-        toast.error("规则创建失败", { description: errorMessage(error) })
-        return false
-      }
-    },
-    [mutateRules]
-  )
 
   const triggerOnce = React.useCallback(
     async (channelId: string) => {

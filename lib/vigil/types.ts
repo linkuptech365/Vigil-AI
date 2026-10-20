@@ -1,7 +1,14 @@
 import type { VlmAnalysisReport } from "@/lib/ops/vlm-api-types"
 import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
 
-export type RuleId = "violence" | "ppe" | "fire" | "intrusion"
+export type RuleId =
+  | "violence"
+  | "ppe"
+  | "fire"
+  | "intrusion"
+  | "gmpEsd"
+  | "gmpTransfer"
+  | "gmpClassA"
 
 export type Severity = "critical" | "high"
 

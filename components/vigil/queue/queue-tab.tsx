@@ -4,6 +4,7 @@ import { FlaskConical, ListX, Play } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { GMP_SUITE_LABEL } from "@/lib/ops/gmp-suite"
 import { useVigil } from "../vigil-provider"
 import { QueueTable } from "./queue-table"
 import { TerminalConsole } from "./terminal-console"
@@ -18,7 +19,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 }
 
 export function QueueTab() {
-  const { queue, addSamples, clearQueue, analyzeAll, batchRunning } = useVigil()
+  const { queue, loadGmpSuite, loadingGmp, scanning, clearQueue, analyzeAll, batchRunning } = useVigil()
 
   const pending = queue.filter((v) => v.status === "pending").length
   const alerts = queue.filter((v) => v.status === "alert").length
@@ -34,9 +35,17 @@ export function QueueTab() {
           <Stat label="正常安全" value={safe} tone="text-success" />
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={addSamples} disabled={batchRunning}>
-            <FlaskConical data-icon="inline-start" />
-            注入测试样本
+          <Button
+            variant="outline"
+            onClick={() => void loadGmpSuite()}
+            disabled={batchRunning || loadingGmp || scanning}
+          >
+            {loadingGmp || scanning ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <FlaskConical data-icon="inline-start" />
+            )}
+            {GMP_SUITE_LABEL}
           </Button>
           <Button
             variant="outline"

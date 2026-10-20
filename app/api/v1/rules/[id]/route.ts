@@ -1,11 +1,13 @@
 import type { UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
 import { ALL_CHANNELS, COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
-import type { RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
+import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
 import { listRules, updateRule } from "@/lib/ops/server/rule-engine"
-import { jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
+import { isRecord, jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
+
+const ACTION_KEYS: RuleActionKey[] = ["webhook", "dispatch", "siren"]
 
 const SEVERITIES: RuleSeverity[] = ["WARNING", "CRITICAL"]
 const SCHEDULES: RuleSchedule[] = ["24x7", "NIGHT_ONLY", "WORK_HOURS"]
@@ -47,6 +49,24 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       boundChannels.every((channel) => typeof channel === "string" && ALL_CHANNELS.includes(channel))
     if (!valid) return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是已知通道 ID 的数组")
     patch.boundChannels = Array.from(new Set(boundChannels as string[]))
+  }
+
+  const { sensitivity, actions } = body.value
+  if (sensitivity !== undefined) {
+    if (typeof sensitivity !== "number" || !Number.isFinite(sensitivity) || sensitivity < 0.3 || sensitivity > 0.99) {
+      return jsonError(400, "INVALID_REQUEST", "sensitivity 必须是 0.3~0.99 之间的数字")
+    }
+    patch.sensitivity = Math.round(sensitivity * 100) / 100
+  }
+  if (actions !== undefined) {
+    if (!isRecord(actions) || ACTION_KEYS.some((key) => typeof actions[key] !== "boolean")) {
+      return jsonError(400, "INVALID_REQUEST", "actions 必须同时包含 webhook / dispatch / siren 三个布尔值")
+    }
+    patch.actions = {
+      webhook: actions.webhook as boolean,
+      dispatch: actions.dispatch as boolean,
+      siren: actions.siren as boolean,
+    }
   }
 
   if (Object.keys(patch).length === 0) {

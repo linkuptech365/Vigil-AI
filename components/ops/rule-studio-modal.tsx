@@ -1,8 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { BellRing, FlaskConical, Siren, Video, WandSparkles } from "lucide-react"
-import { toast } from "sonner"
+import { BellRing, ClipboardList, Siren, WandSparkles } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -20,20 +19,41 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
-import { DEFAULT_RULE_PROMPT } from "@/lib/ops/data"
-import type { Rule, RuleActions } from "@/lib/ops/types"
+import { DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
+import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { type RuleStudioTab, useOps } from "./ops-provider"
+import { useServerRules } from "./rules/use-server-rules"
 
-const ACTIONS: { key: keyof RuleActions; label: string; icon: typeof BellRing }[] = [
-  { key: "notify", label: "钉钉/企微推送", icon: BellRing },
+const ACTIONS: { key: RuleActionKey; label: string; icon: typeof BellRing }[] = [
+  { key: "webhook", label: "钉钉/企微推送", icon: BellRing },
+  { key: "dispatch", label: "自动生成工单", icon: ClipboardList },
   { key: "siren", label: "声光报警器", icon: Siren },
-  { key: "record", label: "自动录制切片", icon: Video },
 ]
 
-function RuleRow({ rule }: { rule: Rule }) {
-  const { toggleRule, setRuleSensitivity, setRuleAction } = useOps()
+const DEFAULT_ACTIONS: Record<RuleActionKey, boolean> = {
+  webhook: true,
+  dispatch: true,
+  siren: false,
+}
+
+const TYPE_LABEL: Record<InspectionRule["type"], string> = {
+  GEOMETRIC: "几何规则",
+  THRESHOLD: "阈值规则",
+  PROMPT_SEMANTIC: "语义规则",
+}
+
+function RuleRow({ rule }: { rule: InspectionRule }) {
+  const { updateRule } = useServerRules()
   const switchId = `rule-switch-${rule.id}`
+  const serverSensitivity = rule.sensitivity
+  const [draft, setDraft] = React.useState(serverSensitivity)
+
+  React.useEffect(() => {
+    setDraft(serverSensitivity)
+  }, [serverSensitivity])
+
+  const actions = rule.actions ?? { webhook: false, dispatch: false, siren: false }
 
   return (
     <li
@@ -48,39 +68,47 @@ function RuleRow({ rule }: { rule: Rule }) {
             <label htmlFor={switchId} className="text-sm font-semibold">
               {rule.name}
             </label>
+            <Badge variant="outline" className="font-mono">
+              {rule.id}
+            </Badge>
+            <Badge variant="outline">{TYPE_LABEL[rule.type]}</Badge>
+            <Badge variant={rule.severity === "CRITICAL" ? "destructive" : "secondary"}>
+              {rule.severity}
+            </Badge>
             {rule.custom && (
               <Badge variant="outline" className="border-signal/40 text-signal">
                 自定义
               </Badge>
             )}
           </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {rule.description}
-          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{rule.prompt ?? rule.logic}</p>
         </div>
         <Switch
           id={switchId}
           checked={rule.enabled}
-          onCheckedChange={() => toggleRule(rule.id)}
+          onCheckedChange={(enabled) => void updateRule(rule.id, { enabled })}
           aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.name}`}
         />
       </div>
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-muted-foreground">灵敏度阈值</span>
-          <span className="font-mono text-signal">{rule.sensitivity.toFixed(2)}</span>
+      {draft !== undefined && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">灵敏度阈值</span>
+            <span className="font-mono text-signal">{draft.toFixed(2)}</span>
+          </div>
+          <Slider
+            value={[draft]}
+            min={0.3}
+            max={0.99}
+            step={0.01}
+            disabled={!rule.enabled}
+            onValueChange={([value]) => setDraft(value)}
+            onValueCommit={([value]) => void updateRule(rule.id, { sensitivity: value })}
+            aria-label={`${rule.name} 灵敏度`}
+          />
         </div>
-        <Slider
-          value={[rule.sensitivity]}
-          min={0.3}
-          max={0.99}
-          step={0.01}
-          disabled={!rule.enabled}
-          onValueChange={([v]) => setRuleSensitivity(rule.id, v)}
-          aria-label={`${rule.name} 灵敏度`}
-        />
-      </div>
+      )}
 
       <div className="flex flex-wrap gap-x-5 gap-y-2">
         {ACTIONS.map(({ key, label, icon: Icon }) => {
@@ -89,9 +117,11 @@ function RuleRow({ rule }: { rule: Rule }) {
             <div key={key} className="flex items-center gap-2">
               <Checkbox
                 id={id}
-                checked={rule.actions[key]}
+                checked={actions[key]}
                 disabled={!rule.enabled}
-                onCheckedChange={(v) => setRuleAction(rule.id, key, v === true)}
+                onCheckedChange={(value) =>
+                  void updateRule(rule.id, { actions: { ...actions, [key]: value === true } })
+                }
               />
               <label htmlFor={id} className="flex items-center gap-1.5 text-xs">
                 <Icon className="size-3.5 text-muted-foreground" aria-hidden="true" />
@@ -106,45 +136,24 @@ function RuleRow({ rule }: { rule: Rule }) {
 }
 
 function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
-  const { addRule } = useOps()
-  const [prompt, setPrompt] = React.useState(DEFAULT_RULE_PROMPT)
-  const [actions, setActions] = React.useState<RuleActions>({
-    notify: true,
-    siren: false,
-    record: true,
-  })
-  const [testing, setTesting] = React.useState(false)
-  const timer = React.useRef<number | null>(null)
-
-  React.useEffect(
-    () => () => {
-      if (timer.current) window.clearTimeout(timer.current)
-    },
-    []
-  )
+  const { addCustomRule } = useServerRules()
+  const [prompt, setPrompt] = React.useState(DEFAULT_CUSTOM_PROMPT)
+  const [actions, setActions] = React.useState(DEFAULT_ACTIONS)
+  const [submitting, setSubmitting] = React.useState(false)
 
   const valid = prompt.trim().length >= 8
 
-  const runTest = () => {
-    setTesting(true)
-    timer.current = window.setTimeout(() => {
-      setTesting(false)
-      toast.success("规则测试完成", {
-        description: "在最近 24 小时样本视频中命中 3 次，平均置信度 91%，预计误报率低于 4%。",
-      })
-    }, 1600)
-  }
-
-  const submit = () => {
+  const submit = async () => {
     const text = prompt.trim()
-    addRule({
+    setSubmitting(true)
+    const created = await addCustomRule({
       name: text.length > 18 ? `${text.slice(0, 18)}...` : text,
-      description: text,
       prompt: text,
       sensitivity: 0.85,
       actions,
     })
-    onCreated()
+    setSubmitting(false)
+    if (created) onCreated()
   }
 
   return (
@@ -161,7 +170,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
             placeholder="例如：当监控画面中出现..."
           />
           <p className="text-xs text-muted-foreground">
-            多模态大模型会把描述解析为检测目标、行为条件和持续时长，无需手动配置算法。
+            规则会写入服务端规则库，并由语义匹配引擎在每次评估时与研判结果比对。
           </p>
         </Field>
       </FieldGroup>
@@ -176,7 +185,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
                 <Checkbox
                   id={id}
                   checked={actions[key]}
-                  onCheckedChange={(v) => setActions((prev) => ({ ...prev, [key]: v === true }))}
+                  onCheckedChange={(value) => setActions((prev) => ({ ...prev, [key]: value === true }))}
                 />
                 <label htmlFor={id} className="flex items-center gap-1.5 text-sm">
                   <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
@@ -189,16 +198,8 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
       </fieldset>
 
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-        <Button type="button" variant="outline" disabled={!valid || testing} onClick={runTest}>
-          {testing ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
-            <FlaskConical data-icon="inline-start" />
-          )}
-          {testing ? "测试中..." : "测试规则"}
-        </Button>
-        <Button type="button" disabled={!valid} onClick={submit}>
-          <WandSparkles data-icon="inline-start" />
+        <Button type="button" disabled={!valid || submitting} onClick={() => void submit()}>
+          {submitting ? <Spinner data-icon="inline-start" /> : <WandSparkles data-icon="inline-start" />}
           创建并启用规则
         </Button>
       </div>
@@ -207,8 +208,9 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
 }
 
 export function RuleStudioModal() {
-  const { ruleStudio, setRuleStudioOpen, setRuleStudioTab, rules } = useOps()
-  const enabledCount = rules.filter((r) => r.enabled).length
+  const { ruleStudio, setRuleStudioOpen, setRuleStudioTab } = useOps()
+  const { rules, rulesError } = useServerRules()
+  const enabledCount = rules.filter((rule) => rule.enabled).length
 
   return (
     <Dialog open={ruleStudio.open} onOpenChange={setRuleStudioOpen}>
@@ -216,13 +218,15 @@ export function RuleStudioModal() {
         <DialogHeader>
           <DialogTitle>布控规则工作室</DialogTitle>
           <DialogDescription>
-            共 {rules.length} 条规则，{enabledCount} 条已启用。调整灵敏度与联动响应后即时生效。
+            {rulesError
+              ? "规则引擎服务暂时不可用，当前显示的是本地预置规则。"
+              : `服务端规则库共 ${rules.length} 条规则，${enabledCount} 条已启用。所有修改即时同步到规则引擎。`}
           </DialogDescription>
         </DialogHeader>
 
         <Tabs
           value={ruleStudio.tab}
-          onValueChange={(v) => setRuleStudioTab(v as RuleStudioTab)}
+          onValueChange={(value) => setRuleStudioTab(value as RuleStudioTab)}
           className="flex min-h-0 flex-1 flex-col gap-4"
         >
           <TabsList>

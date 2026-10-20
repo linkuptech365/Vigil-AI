@@ -2,11 +2,17 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { Library, MonitorPlay, Plus, Settings2, ShieldAlert, Volume2, VolumeX } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { FlaskConical, Library, MonitorPlay, Plus, Settings2, ShieldAlert, Volume2, VolumeX } from "lucide-react"
+import { toast } from "sonner"
+import { useSWRConfig } from "swr"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { provisionGmpSuite, queueGmpAutoscan } from "@/lib/ops/gmp-client"
+import { GMP_SUITE_LABEL } from "@/lib/ops/gmp-suite"
 import { shanghaiClock, shanghaiDate } from "@/lib/ops/utils"
 import { useOps } from "./ops-provider"
 
@@ -37,6 +43,27 @@ function LiveClock() {
 
 export function OpsHeader() {
   const { muted, toggleMuted, openRuleStudio } = useOps()
+  const router = useRouter()
+  const { mutate } = useSWRConfig()
+  const [loadingGmp, setLoadingGmp] = React.useState(false)
+
+  const loadGmp = React.useCallback(async () => {
+    setLoadingGmp(true)
+    try {
+      const suite = await provisionGmpSuite()
+      await mutate((key) => typeof key === "string" && key.startsWith("/api/v1/rules"))
+      queueGmpAutoscan(suite.directory)
+      toast.success(`已写入 ${suite.cases.length} 个 GMP 算例`, {
+        description: `${suite.directory} · 正在进入配置中心并扫描入队`,
+      })
+      router.push("/console")
+    } catch (error) {
+      toast.error("GMP 算例载入失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      })
+      setLoadingGmp(false)
+    }
+  }, [mutate, router])
 
   return (
     <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-border bg-card/60 px-4 py-3">
@@ -99,6 +126,27 @@ export function OpsHeader() {
           </TooltipTrigger>
           <TooltipContent>{muted ? "告警声音已静音" : "告警声音已开启"}</TooltipContent>
         </Tooltip>
+        <Button
+          type="button"
+          variant="outline"
+          className="hidden xl:inline-flex"
+          onClick={() => void loadGmp()}
+          disabled={loadingGmp}
+        >
+          {loadingGmp ? <Spinner data-icon="inline-start" /> : <FlaskConical data-icon="inline-start" />}
+          {GMP_SUITE_LABEL}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          aria-label={GMP_SUITE_LABEL}
+          className="xl:hidden"
+          onClick={() => void loadGmp()}
+          disabled={loadingGmp}
+        >
+          {loadingGmp ? <Spinner /> : <FlaskConical />}
+        </Button>
         <Button
           type="button"
           variant="outline"

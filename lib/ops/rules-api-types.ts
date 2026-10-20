@@ -193,6 +193,9 @@ export interface UpdateRuleRequest {
   cooldownSeconds?: number
   schedule?: RuleSchedule
   boundChannels?: string[]
+  /** 0.3~0.99 */
+  sensitivity?: number
+  actions?: Record<RuleActionKey, boolean>
 }
 
 export interface UpdateRuleResponse extends RulesListResponse {

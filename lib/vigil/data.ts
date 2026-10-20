@@ -54,7 +54,15 @@ export const DEFAULT_SETTINGS: Settings = {
   presetId: "fastapi",
   samplingFps: 2,
   threshold: 0.8,
-  rules: { violence: true, ppe: true, fire: true, intrusion: true },
+  rules: {
+    violence: true,
+    ppe: true,
+    fire: true,
+    intrusion: true,
+    gmpEsd: true,
+    gmpTransfer: true,
+    gmpClassA: true,
+  },
   folderPath: DEFAULT_FOLDER,
   recursive: true,
   formats: [...VIDEO_FORMATS],
@@ -219,7 +227,16 @@ const LOCAL_TRUTHS: Truth[] = [
   { ruleId: "fire", confidence: 0.88 },
 ]
 
+const GMP_TRUTHS: Record<string, Truth> = {
+  "case_bio_01_esd_shoes_violation.mp4": { ruleId: "gmpEsd", confidence: 0.93 },
+  "case_bio_02_aseptic_transfer_collision.mp4": { ruleId: "gmpTransfer", confidence: 0.95 },
+  "case_bio_03_class_a_zone_touch.mp4": { ruleId: "gmpClassA", confidence: 0.97 },
+  "case_bio_04_standard_gmp_operation.mp4": { ruleId: null, confidence: 0.99 },
+}
+
 export function truthForLocalFile(name: string): Truth {
+  const gmp = GMP_TRUTHS[name]
+  if (gmp) return gmp
   return LOCAL_TRUTHS[hashString(name) % LOCAL_TRUTHS.length]
 }
 

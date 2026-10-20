@@ -157,14 +157,31 @@ function seedState(): EngineState {
     events,
     pulseSeq: 100,
     eventSeq: events.length,
-    ruleSeq: rules.length,
+    ruleSeq: maxNumericRuleSeq(rules),
     lastIncidentTs: 0,
   }
 }
 
+function maxNumericRuleSeq(rules: InspectionRule[]) {
+  return rules.reduce((max, rule) => {
+    const match = /^RULE-(\d+)$/.exec(rule.id)
+    return match ? Math.max(max, Number(match[1])) : max
+  }, 0)
+}
+
 function engine(): EngineState {
   if (!globalStore.__vigilRuleEngine) globalStore.__vigilRuleEngine = seedState()
-  return globalStore.__vigilRuleEngine
+  const state = globalStore.__vigilRuleEngine
+  for (const seed of INITIAL_INSPECTION_RULES) {
+    if (!state.rules.some((rule) => rule.id === seed.id)) {
+      state.rules.push({
+        ...seed,
+        boundChannels: [...seed.boundChannels],
+        actions: seed.actions ? { ...seed.actions } : undefined,
+      })
+    }
+  }
+  return state
 }
 
 function windowKey(channelId: string, ruleId: string) {
@@ -218,6 +235,8 @@ export function updateRule(ruleId: string, patch: UpdateRuleRequest): Inspection
   if (patch.cooldownSeconds !== undefined) rule.cooldownSeconds = patch.cooldownSeconds
   if (patch.schedule !== undefined) rule.schedule = patch.schedule
   if (patch.boundChannels !== undefined) rule.boundChannels = [...patch.boundChannels]
+  if (patch.sensitivity !== undefined) rule.sensitivity = patch.sensitivity
+  if (patch.actions !== undefined) rule.actions = { ...patch.actions }
   return { ...rule, boundChannels: [...rule.boundChannels] }
 }
 

@@ -17,6 +17,7 @@ import type {
   ConnectionTestRequest,
   ConnectionTestResponse,
 } from "@/lib/ops/api-types"
+import { GMP_AUTOSCAN_KEY, provisionGmpSuite } from "@/lib/ops/gmp-client"
 import { postVideoApi } from "@/lib/ops/video-client"
 import {
   analyzeVlmOnce,
@@ -71,6 +72,8 @@ interface VigilContextValue {
   importLocalFiles: (files: FileList | null) => Promise<void>
   queue: VideoItem[]
   addSamples: () => void
+  loadGmpSuite: () => Promise<void>
+  loadingGmp: boolean
   clearQueue: () => void
   removeVideo: (id: string) => void
   analyzeOne: (video: VideoItem) => Promise<void>
@@ -175,6 +178,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [apiKey, setApiKeyState] = React.useState("")
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
+  const [loadingGmp, setLoadingGmp] = React.useState(false)
   const [lastScan, setLastScan] = React.useState<string | null>(null)
   const [scanInfo, setScanInfo] = React.useState<ScanInfo | null>(null)
   const [frameTest, setFrameTest] = React.useState<FrameTestState | null>(null)
@@ -639,6 +643,33 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     toast.success(`已注入 ${samples.length} 个测试样本`)
   }, [pushLog])
 
+  const loadGmpSuite = React.useCallback(async () => {
+    setLoadingGmp(true)
+    pushLog("req", "POST /api/v1/samples/provision  suite=vaccine-cleanroom-gmp")
+    try {
+      const suite = await provisionGmpSuite()
+      pushLog("ok", `200 OK  已写入 ${suite.cases.length} 个 GMP 算例至 ${suite.directory}，规则库已含 RULE-BIO-01~04。`)
+      settingsRef.current = { ...settingsRef.current, folderPath: suite.directory }
+      updateSettings({ folderPath: suite.directory })
+      setActiveTab("queue")
+      await scanFolder()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误"
+      pushLog("warn", `GMP 算例载入失败：${message}`)
+      toast.error("GMP 算例载入失败", { description: message })
+    } finally {
+      setLoadingGmp(false)
+    }
+  }, [pushLog, updateSettings, scanFolder])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    if (window.sessionStorage.getItem(GMP_AUTOSCAN_KEY) !== "1") return
+    window.sessionStorage.removeItem(GMP_AUTOSCAN_KEY)
+    setActiveTab("queue")
+    void scanFolder()
+  }, [hydrated, scanFolder])
+
   const clearQueue = React.useCallback(() => {
     setQueue([])
     pushLog("info", "检测队列已清空。")
@@ -671,6 +702,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       importLocalFiles,
       queue,
       addSamples,
+      loadGmpSuite,
+      loadingGmp,
       clearQueue,
       removeVideo,
       analyzeOne,
@@ -703,6 +736,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       importLocalFiles,
       queue,
       addSamples,
+      loadGmpSuite,
+      loadingGmp,
       clearQueue,
       removeVideo,
       analyzeOne,

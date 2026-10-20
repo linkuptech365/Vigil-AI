@@ -1,3 +1,4 @@
+import { GMP_RULE_SEEDS } from "./gmp-suite"
 import type {
   DeduplicationMetrics,
   EvidenceTrigger,
@@ -28,7 +29,7 @@ export const ACTION_LABEL: Record<RuleActionKey, string> = {
   siren: "现场声光报警",
 }
 
-export const INITIAL_INSPECTION_RULES: InspectionRule[] = [
+const BASE_INSPECTION_RULES: InspectionRule[] = [
   {
     id: "RULE-01",
     name: "电子围栏入侵与绊线越界",
@@ -85,6 +86,8 @@ export const INITIAL_INSPECTION_RULES: InspectionRule[] = [
     enabled: false,
   },
 ]
+
+export const INITIAL_INSPECTION_RULES: InspectionRule[] = [...BASE_INSPECTION_RULES, ...GMP_RULE_SEEDS]
 
 export const INITIAL_DEDUP_METRICS: DeduplicationMetrics = {
   rawTriggersCount: 184,

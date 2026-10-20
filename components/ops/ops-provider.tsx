@@ -3,19 +3,8 @@
 import * as React from "react"
 import { toast } from "sonner"
 
-import {
-  INITIAL_ALERTS,
-  INITIAL_RULES,
-  NEW_EVENT_TEMPLATES,
-  SEARCH_MOMENTS,
-} from "@/lib/ops/data"
-import type {
-  AlertEvent,
-  AlertStatus,
-  ReplayState,
-  Rule,
-  RuleActions,
-} from "@/lib/ops/types"
+import { INITIAL_ALERTS, NEW_EVENT_TEMPLATES, SEARCH_MOMENTS } from "@/lib/ops/data"
+import type { AlertEvent, AlertStatus, ReplayState } from "@/lib/ops/types"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 
 export type GridLayout = "grid" | "focus" | "single"
@@ -33,11 +22,6 @@ interface OpsContextValue {
   openAlert: (id: string) => void
   closeAlert: () => void
   setAlertStatus: (id: string, status: AlertStatus, note?: string, assignee?: string) => void
-  rules: Rule[]
-  toggleRule: (id: string) => void
-  setRuleSensitivity: (id: string, value: number) => void
-  setRuleAction: (id: string, key: keyof RuleActions, value: boolean) => void
-  addRule: (rule: Omit<Rule, "id" | "enabled" | "custom">) => void
   ruleStudio: { open: boolean; tab: RuleStudioTab }
   openRuleStudio: (tab?: RuleStudioTab) => void
   setRuleStudioOpen: (open: boolean) => void
@@ -55,19 +39,12 @@ export function useOps() {
   return ctx
 }
 
-const ACTION_LABEL: Record<keyof RuleActions, string> = {
-  notify: "钉钉/企微推送",
-  siren: "声光报警器",
-  record: "自动录制切片",
-}
-
 export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [layout, setLayoutState] = React.useState<GridLayout>("grid")
   const [focusId, setFocusId] = React.useState("CAM-02")
   const [muted, setMuted] = React.useState(false)
   const [alerts, setAlerts] = React.useState<AlertEvent[]>(INITIAL_ALERTS)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
-  const [rules, setRules] = React.useState<Rule[]>(INITIAL_RULES)
   const [ruleStudio, setRuleStudio] = React.useState<{ open: boolean; tab: RuleStudioTab }>({
     open: false,
     tab: "list",
@@ -140,41 +117,6 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     []
   )
 
-  const toggleRule = React.useCallback((id: string) => {
-    setRules((prev) =>
-      prev.map((r) => {
-        if (r.id !== id) return r
-        const enabled = !r.enabled
-        toast[enabled ? "success" : "info"](`${enabled ? "已启用" : "已停用"}规则`, {
-          description: r.name,
-        })
-        return { ...r, enabled }
-      })
-    )
-  }, [])
-
-  const setRuleSensitivity = React.useCallback((id: string, value: number) => {
-    setRules((prev) => prev.map((r) => (r.id === id ? { ...r, sensitivity: value } : r)))
-  }, [])
-
-  const setRuleAction = React.useCallback(
-    (id: string, key: keyof RuleActions, value: boolean) => {
-      setRules((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, actions: { ...r.actions, [key]: value } } : r))
-      )
-      toast.info(`${value ? "已开启" : "已关闭"}联动响应：${ACTION_LABEL[key]}`)
-    },
-    []
-  )
-
-  const addRule = React.useCallback<OpsContextValue["addRule"]>((rule) => {
-    setRules((prev) => [
-      ...prev,
-      { ...rule, id: `R-${String(prev.length + 1).padStart(2, "0")}`, enabled: true, custom: true },
-    ])
-    toast.success("布控规则已创建并启用", { description: rule.name })
-  }, [])
-
   const openRuleStudio = React.useCallback((tab: RuleStudioTab = "list") => {
     setRuleStudio({ open: true, tab })
   }, [])
@@ -209,11 +151,6 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       openAlert: setSelectedId,
       closeAlert: () => setSelectedId(null),
       setAlertStatus,
-      rules,
-      toggleRule,
-      setRuleSensitivity,
-      setRuleAction,
-      addRule,
       ruleStudio,
       openRuleStudio,
       setRuleStudioOpen: (open) => setRuleStudio((prev) => ({ ...prev, open })),
@@ -232,11 +169,6 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       alerts,
       selectedId,
       setAlertStatus,
-      rules,
-      toggleRule,
-      setRuleSensitivity,
-      setRuleAction,
-      addRule,
       ruleStudio,
       openRuleStudio,
       replay,

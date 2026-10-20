@@ -15,6 +15,7 @@ import {
   RESPONDERS,
   formatClock,
 } from "@/lib/ops/dispatch-data"
+import { buildGmpEvidenceArchive, triggerDownload } from "@/lib/ops/gmp-evidence-zip"
 import type {
   BroadcastChannelType,
   ChannelBroadcastStatus,
@@ -93,13 +94,11 @@ export function DispatchProvider({ children }: { children: React.ReactNode }) {
 
   const actionSeq = React.useRef(INITIAL_ACTIONS.length)
   const timers = React.useRef<number[]>([])
-  const packagingTimer = React.useRef<number | null>(null)
 
   React.useEffect(() => {
     const pending = timers.current
     return () => {
       pending.forEach((id) => window.clearTimeout(id))
-      if (packagingTimer.current !== null) window.clearInterval(packagingTimer.current)
     }
   }, [])
 
@@ -236,22 +235,36 @@ export function DispatchProvider({ children }: { children: React.ReactNode }) {
   const packageEvidence = React.useCallback(() => {
     if (packagingProgress !== null) return
     setPackagingProgress(0)
-    const steps = ["视频切片", "关键帧图谱", "研判报告", "元数据与哈希清单"]
-    let progress = 0
-    packagingTimer.current = window.setInterval(() => {
-      progress += 5
-      setPackagingProgress(Math.min(progress, 100))
-      if (progress >= 100) {
-        if (packagingTimer.current !== null) window.clearInterval(packagingTimer.current)
-        packagingTimer.current = null
-        setPackagingProgress(null)
-        logAction("值班调度员", "打包存证包", `已归档 ${steps.join("、")} 并生成 ${INITIAL_DOSSIER.dossierId}.zip。`)
-        toast.success("完整存证包已打包", {
-          description: `${INITIAL_DOSSIER.dossierId}.zip · 18.4 MB · 含 ${steps.length} 类证据资产`,
+    void (async () => {
+      try {
+        const archive = await buildGmpEvidenceArchive(
+          {
+            dossier,
+            keyframes: KEYFRAMES,
+            actions,
+            feedback,
+            falsePositiveLabel: feedback ? FALSE_POSITIVE_REASONS[feedback.reason] : null,
+          },
+          setPackagingProgress
+        )
+        triggerDownload(archive.blob, archive.fileName)
+        logAction(
+          "值班调度员",
+          "打包存证包",
+          `已生成 ${archive.fileName}（${archive.entries.join("、")}），SHA-256：${archive.sha256.slice(0, 16)}…`
+        )
+        toast.success("GMP 存证档案包已打包并下载至本地", {
+          description: `${archive.fileName} · SHA-256 ${archive.sha256.slice(0, 12)}…`,
         })
+      } catch (error) {
+        toast.error("存证包打包失败", {
+          description: error instanceof Error ? error.message : "未知错误",
+        })
+      } finally {
+        setPackagingProgress(null)
       }
-    }, 120)
-  }, [packagingProgress, logAction])
+    })()
+  }, [packagingProgress, dossier, actions, feedback, logAction])
 
   const downloadReport = React.useCallback(() => {
     const payload = {

@@ -32,6 +32,57 @@ interface FallbackScenario {
 }
 
 const SCENARIO_DEFS: Record<ScenarioKind, FallbackScenario> = {
+  gmpEsd: {
+    ruleTriggered: RULES.gmpEsd.ruleName,
+    severity: "WARNING",
+    confidence: 0.93,
+    summary: "操作人员更衣后未换穿防静电无尘鞋，穿着日常便鞋与破损鞋套跨过红线阻隔凳进入生产走廊。",
+    intent:
+      "洁净区人员卫生防护缺失。目标在阻隔凳处未停顿换鞋，足部无防静电无尘鞋的统一色块与鞋底特征，鞋套存在破损，轨迹与“坐凳 → 换鞋 → 转身入内”的规范流程不符，判定为非故意但必须纠正的卫生防护违规。",
+    steps: [
+      { from: 0, to: 2, text: "人员自更衣室出口走向红线阻隔凳，足部区域未检出防静电无尘鞋特征" },
+      { from: 3, to: 4, text: "到达阻隔凳后未坐凳换鞋，直接抬腿跨越，破损鞋套边缘外翻" },
+      { from: 5, to: 7, text: "着日常便鞋进入生产走廊并持续前行，未发生自行折返" },
+    ],
+    conclusion: "满足「更衣出口 + 阻隔凳未换鞋 + 足部防护缺失」，判定为洁净区防静电鞋穿戴违规。",
+    evidencePos: [1, 3, 5],
+    clauses: ["《药品生产质量管理规范》洁净室人员卫生防护附录 第18条"],
+    advice: "现场广播令其退回更衣区重新换鞋，对走廊地面取样评估，记录工号纳入偏差台账。",
+  },
+  gmpTransfer: {
+    ruleTriggered: RULES.gmpTransfer.ruleName,
+    severity: "CRITICAL",
+    confidence: 0.95,
+    summary: "无菌储液包与连接管路经传递窗转运时，外壁与门框发生剧烈刮擦碰撞，存在微孔破损风险。",
+    intent:
+      "关键物料转运偏差。操作人员单人搬运无菌储液包，动作幅度过大，包体外壁与窗框在同一位置两次接触并伴随形变，洁净度降级与微孔破损风险不可排除。",
+    steps: [
+      { from: 0, to: 2, text: "灭菌后的无菌储液包被搬至传递窗口，转运动作幅度偏大" },
+      { from: 3, to: 4, text: "包体外壁与门框发生首次刮擦碰撞，运动能量出现突变" },
+      { from: 5, to: 7, text: "再次碰撞并出现形变，转运未停止，管路随之晃动" },
+    ],
+    conclusion: "碰撞叠加形变，满足无菌器具转运偏差判定，需隔离该批次组件并启动偏差调查。",
+    evidencePos: [3, 4, 5],
+    clauses: ["无菌药品附录 关键物料单向流转与保护规定"],
+    advice: "隔离碰撞包体并暂停使用，通知 QA 启动偏差调查，复核传递窗互锁与门框防护。",
+  },
+  gmpClassA: {
+    ruleTriggered: RULES.gmpClassA.ruleName,
+    severity: "CRITICAL",
+    confidence: 0.97,
+    summary: "灌装机运转中，人员手臂违规伸入 A 级垂直层流罩并触碰未封口的瓶口轨道。",
+    intent:
+      "A 级关键控制区未授权触碰。设备处于运转状态，人员手臂穿过层流罩下沿，手部与未封口瓶口轨道接触，全程未使用长柄无菌工具，也无紧急故障排险的停机前置动作，属于重大无菌保障污染偏差。",
+    steps: [
+      { from: 0, to: 2, text: "灌装机运转正常，人员接近层流罩下沿，手臂抬起" },
+      { from: 3, to: 4, text: "手臂穿过层流罩进入 A 级受保护空间" },
+      { from: 5, to: 7, text: "手部触碰未封口瓶口轨道区域，设备仍在运转，未使用长柄无菌工具" },
+    ],
+    conclusion: "满足「设备运转 + 手部越界 + 触碰未封口瓶口」，判定为 A 级区重大无菌污染偏差。",
+    evidencePos: [2, 3, 4],
+    clauses: ["无菌药品附录 A 级区干预管理规定", "重大无菌保障污染偏差处置要求"],
+    advice: "立即紧急停机并隔离受影响区段，封存本批次，通知生产主管与 QA 启动重大偏差调查。",
+  },
   violence: {
     ruleTriggered: RULES.violence.ruleName,
     severity: "CRITICAL",
