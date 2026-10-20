@@ -21,6 +21,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE, suppressMediaError } from "@/lib/ops/media"
 import type { Camera } from "@/lib/ops/types"
 import {
   CLIP_DURATION,
@@ -31,6 +32,7 @@ import {
   rippleOrigin,
   SCENARIOS,
 } from "@/lib/ops/video-scenarios"
+import { LiveFeedPlayer } from "./live-feed-player"
 import { useOps } from "./ops-provider"
 import { OverlayBoxes } from "./overlay-boxes"
 import { useCameraPlayback } from "./use-camera-playback"
@@ -165,7 +167,19 @@ function Scrubber({
 }
 
 export function CameraTile({ camera, size, className }: CameraTileProps) {
-  const { focusId, layout, focusCamera, replay, stopReplay, seekTarget, showOverlays } = useOps()
+  const {
+    focusId,
+    layout,
+    focusCamera,
+    replay,
+    stopReplay,
+    seekTarget,
+    showOverlays: overlaysEnabled,
+    liveFeeds,
+    clearLiveFeed,
+  } = useOps()
+  const liveFeed = liveFeeds[camera.id]
+  const showOverlays = overlaysEnabled && !liveFeed
   const bitrate = useLiveBitrate(camera.bitrate)
   const rootRef = React.useRef<HTMLDivElement>(null)
   const onScreen = useOnScreen(rootRef)
@@ -239,26 +253,37 @@ export function CameraTile({ camera, size, className }: CameraTileProps) {
         className
       )}
     >
-      {playback.status === "fallback" ? (
+      {liveFeed ? (
+        <LiveFeedPlayer
+          key={liveFeed.pushedAt}
+          feed={liveFeed}
+          poster={camera.poster}
+          onExit={() => clearLiveFeed(camera.id)}
+        />
+      ) : playback.status === "fallback" || !hasMediaSrc(camera.video) ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={camera.image || "/placeholder.svg"}
+          src={hasMediaSrc(camera.image) ? camera.image : PLACEHOLDER_IMAGE}
           alt={`${camera.code} ${camera.name} 静态画面`}
           className="absolute inset-0 size-full object-cover"
           draggable={false}
+          onError={handleImageError}
         />
       ) : (
         <video
           ref={playback.videoRef}
           src={camera.video}
-          poster={camera.poster}
+          poster={hasMediaSrc(camera.poster) ? camera.poster : undefined}
           muted
           loop
           playsInline
           preload="auto"
           aria-label={`${camera.code} ${camera.name} 实时画面`}
           onLoadedData={playback.onLoadedData}
-          onError={playback.onError}
+          onError={(event) => {
+            suppressMediaError(event)
+            playback.onError()
+          }}
           className="absolute inset-0 size-full object-cover"
         />
       )}

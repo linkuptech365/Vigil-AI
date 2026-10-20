@@ -17,6 +17,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { FRAME_COUNT, candidateLabel, frameMark, frameTag } from "@/lib/ops/vlm-data"
 import { cn } from "@/lib/utils"
 import { useVlm } from "./vlm-provider"
@@ -197,8 +198,9 @@ function FrameStrip() {
               >
                 <div className="relative aspect-video overflow-hidden">
                   <img
-                    src={camera.image}
+                    src={hasMediaSrc(camera.image) ? camera.image : PLACEHOLDER_IMAGE}
                     alt=""
+                    onError={handleImageError}
                     className="size-full object-cover"
                     style={{
                       transform: `scale(${1.05 + index * 0.04})`,

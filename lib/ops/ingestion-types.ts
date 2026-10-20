@@ -64,6 +64,73 @@ export interface NewStreamInput {
   bitrate: number
 }
 
+/** Protocols the browser-side probe can actually pull. */
+export type LiveProtocol = "HLS" | "WEBRTC" | "RTSP" | "MP4"
+export type LivePhase = "idle" | "connecting" | "live" | "fallback" | "error"
+
+export interface LiveFeed {
+  channelId: string
+  protocol: LiveProtocol
+  url: string
+  label: string
+  fallbackSrc: string
+  pushedAt: number
+}
+
+/** Real-time telemetry sampled from the video element once per second. */
+export interface StreamQosMetrics {
+  bitrateMbps: number
+  fps: number
+  targetFps: number
+  droppedFrames: number
+  totalFrames: number
+  jitterMs: number
+  gopSeconds: number
+  gopFrames: number
+  bitrateSource: "measured" | "estimated"
+}
+
+export interface QosSeries {
+  bitrate: number[]
+  fps: number[]
+  jitter: number[]
+}
+
+/** Aggregated window handed to the diagnosis step. */
+export interface QosSnapshot {
+  protocol: LiveProtocol | null
+  usedFallback: boolean
+  samples: number
+  fpsAvg: number
+  targetFps: number
+  droppedFrames: number
+  totalFrames: number
+  jitterAvgMs: number
+  firstFrameMs: number
+  fragLoadMs: number
+  videoCodec?: string
+  audioCodec?: string
+  resolution: string
+  /** Present only when RTP statistics are available (WebRTC). */
+  rtpLossPct: number | null
+}
+
+export type LatencyGrade = "A" | "B" | "C" | "D"
+
+export interface StreamHealthReport {
+  codec: string
+  resolution: string
+  packetLossPct: number
+  packetLossLabel: string
+  lossBasis: "rtp" | "decoder"
+  latencyMs: number
+  latencyGrade: LatencyGrade
+  latencyLabel: string
+  score: number
+  verdict: "excellent" | "good" | "poor"
+  generatedAt: string
+}
+
 export const PROTOCOL_LABEL: Record<StreamProtocol, string> = {
   RTSP: "RTSP",
   RTMP: "RTMP",

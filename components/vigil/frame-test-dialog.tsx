@@ -17,6 +17,7 @@ import { Field, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { handleImageError } from "@/lib/ops/media"
 import type { ExtractedKeyframe } from "@/lib/ops/video-types"
 import type { SamplingFps } from "@/lib/ops/video-types"
 import { useVigil } from "./vigil-provider"
@@ -47,6 +48,7 @@ export function KeyframeGrid({
               alt={`关键帧 ${frame.index + 1}，时间码 ${frame.timecode}`}
               className="aspect-video w-full bg-secondary object-cover"
               loading="lazy"
+              onError={handleImageError}
             />
             <div className="flex items-center justify-between px-2 pb-2 font-mono text-xs">
               <span className={isTrigger ? "font-semibold text-destructive" : "text-muted-foreground"}>

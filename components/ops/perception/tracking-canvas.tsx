@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { allowedAngle, midpoint } from "@/lib/ops/perception-geometry"
 import type { RoiZone, TrackedEntity } from "@/lib/ops/perception-types"
 import { cn } from "@/lib/utils"
@@ -333,10 +334,11 @@ export function TrackingCanvas() {
       <div className="relative isolate aspect-[1408/768] w-full overflow-hidden bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={camera.image || "/placeholder.svg"}
+          src={hasMediaSrc(camera.image) ? camera.image : PLACEHOLDER_IMAGE}
           alt={`${camera.code} ${camera.name} 检测画面`}
           className="absolute inset-0 size-full object-cover"
           draggable={false}
+          onError={handleImageError}
         />
         {camera.maskTimestamp && (
           <div className="absolute left-0 top-0 h-[9%] w-[27%] bg-black/80 backdrop-blur-md" />

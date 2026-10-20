@@ -4,6 +4,7 @@ import * as React from "react"
 import { toast } from "sonner"
 
 import { INITIAL_ALERTS, NEW_EVENT_TEMPLATES, SEARCH_MOMENTS } from "@/lib/ops/data"
+import type { LiveFeed } from "@/lib/ops/ingestion-types"
 import type { AlertEvent, AlertStatus, ChannelId, ReplayState, SeekTarget } from "@/lib/ops/types"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 import { defaultIncidentSec, formatClock, isChannelId } from "@/lib/ops/video-scenarios"
@@ -27,6 +28,9 @@ interface OpsContextValue {
   locateIncident: (request: LocateRequest) => void
   showOverlays: boolean
   toggleOverlays: () => void
+  liveFeeds: Record<string, LiveFeed>
+  pushLiveFeed: (feed: Omit<LiveFeed, "pushedAt">) => void
+  clearLiveFeed: (channelId: string) => void
   muted: boolean
   toggleMuted: () => void
   alerts: AlertEvent[]
@@ -67,7 +71,21 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [replay, setReplay] = React.useState<ReplayState | null>(null)
   const [seekTarget, setSeekTarget] = React.useState<SeekTarget | null>(null)
   const [showOverlays, setShowOverlays] = React.useState(true)
+  const [liveFeeds, setLiveFeeds] = React.useState<Record<string, LiveFeed>>({})
   const seekNonce = React.useRef(0)
+
+  const pushLiveFeed = React.useCallback((feed: Omit<LiveFeed, "pushedAt">) => {
+    setLiveFeeds((prev) => ({ ...prev, [feed.channelId]: { ...feed, pushedAt: Date.now() } }))
+  }, [])
+
+  const clearLiveFeed = React.useCallback((channelId: string) => {
+    setLiveFeeds((prev) => {
+      if (!(channelId in prev)) return prev
+      const next = { ...prev }
+      delete next[channelId]
+      return next
+    })
+  }, [])
 
   const mutedRef = React.useRef(muted)
   React.useEffect(() => {
@@ -197,6 +215,9 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       locateIncident,
       showOverlays,
       toggleOverlays: () => setShowOverlays((prev) => !prev),
+      liveFeeds,
+      pushLiveFeed,
+      clearLiveFeed,
       muted,
       toggleMuted,
       alerts,
@@ -222,6 +243,9 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       seekTarget,
       locateIncident,
       showOverlays,
+      liveFeeds,
+      pushLiveFeed,
+      clearLiveFeed,
       muted,
       toggleMuted,
       alerts,

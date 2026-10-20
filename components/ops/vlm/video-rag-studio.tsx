@@ -10,6 +10,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Progress } from "@/components/ui/progress"
 import { RAG_INDEX, RAG_PRESETS, RAG_THRESHOLD, searchCorpus } from "@/lib/ops/vlm-data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import type { LocateOptions } from "@/lib/ops/types"
 import { defaultIncidentSec, isChannelId } from "@/lib/ops/video-scenarios"
 import type { RagSearchResult } from "@/lib/ops/vlm-types"
@@ -62,7 +63,12 @@ function ResultCard({
   return (
     <article className="flex flex-col overflow-hidden rounded-lg border border-border bg-background">
       <div className="relative aspect-video overflow-hidden bg-black">
-        <img src={result.thumbnail} alt={`${result.channelName} 检索命中关键帧`} className="size-full object-cover" />
+        <img
+          src={hasMediaSrc(result.thumbnail) ? result.thumbnail : PLACEHOLDER_IMAGE}
+          alt={`${result.channelName} 检索命中关键帧`}
+          className="size-full object-cover"
+          onError={handleImageError}
+        />
         <div className="cctv-scanlines pointer-events-none absolute inset-0" aria-hidden="true" />
         <span className="absolute top-2 left-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-xs text-white">
           #{rank}

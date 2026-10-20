@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Plug, PlugZap, Plus, Trash2 } from "lucide-react"
+import { Plug, PlugZap, Plus, Radio, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -18,11 +18,14 @@ import { maskUrl } from "@/lib/ops/ingestion-data"
 import { cn } from "@/lib/utils"
 import { AddStreamDialog } from "./add-stream-dialog"
 import { useIngestion } from "./ingestion-provider"
+import { LiveStreamProbeDialog } from "./live-stream-probe-dialog"
 import { ProtocolBadge, StreamStatusBadge } from "./stream-badges"
 
 export function StreamManager() {
   const { streams, selectedId, selectChannel, removeStream, toggleOffline } = useIngestion()
   const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [probeId, setProbeId] = React.useState<string | null>(null)
+  const probeStream = streams.find((s) => s.id === probeId) ?? null
 
   return (
     <Card className="gap-0 py-0">
@@ -107,6 +110,21 @@ export function StreamManager() {
                             type="button"
                             variant="ghost"
                             size="icon-sm"
+                            disabled={offline}
+                            aria-label={`拉流测通 ${stream.id}`}
+                            onClick={() => setProbeId(stream.id)}
+                          >
+                            <Radio />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>拉流测通</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
                             aria-label={offline ? `重连 ${stream.id}` : `模拟 ${stream.id} 断流`}
                             onClick={() => toggleOffline(stream.id)}
                           >
@@ -139,6 +157,7 @@ export function StreamManager() {
       </CardContent>
 
       <AddStreamDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+      <LiveStreamProbeDialog stream={probeStream} onOpenChange={(open) => !open && setProbeId(null)} />
     </Card>
   )
 }

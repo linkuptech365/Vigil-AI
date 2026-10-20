@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/input-group"
 import { Spinner } from "@/components/ui/spinner"
 import { CAMERAS, SEARCH_MOMENTS, SEARCH_PRESETS, SEARCH_PRESET_QUERY } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import type { SearchMoment } from "@/lib/ops/types"
 import { cn } from "@/lib/utils"
 import { useOps } from "./ops-provider"
@@ -47,9 +48,10 @@ function MatchCard({ moment }: { moment: SearchMoment }) {
       <div className="relative aspect-video overflow-hidden bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={camera?.image ?? ""}
+          src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
           alt={`${moment.cameraId} ${moment.title} 匹配画面`}
           className="absolute inset-0 size-full object-cover"
+          onError={handleImageError}
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
         <OverlayBoxes boxes={[moment.box]} labelSize="xs" />

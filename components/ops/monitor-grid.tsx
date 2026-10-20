@@ -5,6 +5,7 @@ import { Grid2x2, PanelLeft, ScanEye, Square } from "lucide-react"
 import { Toggle } from "@/components/ui/toggle"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { cn } from "@/lib/utils"
 import { CameraTile } from "./camera-tile"
 import { type GridLayout, useOps } from "./ops-provider"
@@ -99,8 +100,9 @@ export function MonitorGrid() {
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={camera.image || "/placeholder.svg"}
+                  src={hasMediaSrc(camera.image) ? camera.image : PLACEHOLDER_IMAGE}
                   alt=""
+                  onError={handleImageError}
                   className="aspect-video w-16 shrink-0 rounded object-cover sm:w-24"
                 />
                 <span className="flex min-w-0 flex-col">

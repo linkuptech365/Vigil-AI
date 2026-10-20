@@ -3,6 +3,7 @@
 import { CircularBufferView } from "./circular-buffer-view"
 import { DynamicFpsController } from "./dynamic-fps-controller"
 import { IngestionScorecards } from "./ingestion-scorecards"
+import { LiveStreamProbeCard } from "./live-stream-tester"
 import { StreamManager } from "./stream-manager"
 
 export function IngestionPipeline() {
@@ -16,6 +17,7 @@ export function IngestionPipeline() {
       </div>
       <IngestionScorecards />
       <StreamManager />
+      <LiveStreamProbeCard />
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <DynamicFpsController />
         <CircularBufferView />

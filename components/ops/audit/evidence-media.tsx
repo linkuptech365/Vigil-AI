@@ -4,6 +4,7 @@ import * as React from "react"
 
 import type { GmpDeviationRecord } from "@/lib/ops/audit-types"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, suppressMediaError } from "@/lib/ops/media"
 import { formatClock, isChannelId, resolveScenario } from "@/lib/ops/video-scenarios"
 import { cn } from "@/lib/utils"
 
@@ -137,8 +138,9 @@ export function EvidenceMedia({ record, className }: { record: GmpDeviationRecor
         {camera ? (
           <video
             ref={videoRef}
-            src={camera.video}
-            poster={camera.poster}
+            src={hasMediaSrc(camera.video) ? camera.video : undefined}
+            poster={hasMediaSrc(camera.poster) ? camera.poster : undefined}
+            onError={suppressMediaError}
             muted
             playsInline
             controls
@@ -181,7 +183,12 @@ export function EvidenceMedia({ record, className }: { record: GmpDeviationRecor
               >
                 {image ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={image} alt="" className="aspect-video w-full object-cover" />
+                  <img
+                    src={image}
+                    alt=""
+                    onError={handleImageError}
+                    className="aspect-video w-full object-cover"
+                  />
                 ) : (
                   <span className="block aspect-video w-full animate-pulse bg-secondary" />
                 )}

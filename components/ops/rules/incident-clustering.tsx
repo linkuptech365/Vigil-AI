@@ -18,6 +18,7 @@ import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import type { ClusteredIncidentResponse } from "@/lib/ops/rules-api-types"
 import { CLUSTER_ENDPOINT, getJson } from "@/lib/ops/rules-client"
 import type { EvidenceTrigger } from "@/lib/ops/rules-types"
@@ -145,8 +146,9 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
                   <figure className="flex min-w-0 flex-col gap-1.5">
                     <div className="relative aspect-video overflow-hidden rounded-md border border-border bg-black">
                       <img
-                        src={frame.thumbnail}
+                        src={hasMediaSrc(frame.thumbnail) ? frame.thumbnail : PLACEHOLDER_IMAGE}
                         alt={`${frame.channelId} ${camera?.name ?? ""} 同步关键帧`}
+                        onError={handleImageError}
                         className="size-full object-cover"
                       />
                       {KEYFRAME_BOX[frame.channelId] && (

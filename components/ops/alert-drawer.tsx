@@ -24,6 +24,7 @@ import {
 import { Slider } from "@/components/ui/slider"
 import { Textarea } from "@/components/ui/textarea"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import type { AlertEvent } from "@/lib/ops/types"
 import { cn } from "@/lib/utils"
 import {
@@ -67,9 +68,10 @@ function ClipPlayer({ alert }: { alert: AlertEvent }) {
       <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={camera?.image ?? ""}
+          src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
           alt={`${alert.cameraId} 事件回放画面`}
           className="absolute inset-0 size-full object-cover"
+          onError={handleImageError}
         />
         {camera?.maskTimestamp && (
           <div className="absolute left-0 top-0 h-[9%] w-[27%] bg-black/80 backdrop-blur-md" />

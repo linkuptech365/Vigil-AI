@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { CAMERAS } from "@/lib/ops/data"
+import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import type { AlertEvent } from "@/lib/ops/types"
 import { cn } from "@/lib/utils"
 import {
@@ -34,8 +35,9 @@ export function KeyframeThumb({
     <div className={cn("relative aspect-video overflow-hidden rounded-md bg-black", className)}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={camera?.image ?? ""}
+        src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
         alt={`${alert.cameraId} ${alert.type} 关键帧`}
+        onError={handleImageError}
         className="absolute inset-0 size-full object-cover"
       />
       {camera?.maskTimestamp && (
