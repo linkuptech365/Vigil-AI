@@ -1,8 +1,10 @@
 "use client"
 
-import { FolderOpen, ShieldAlert } from "lucide-react"
+import Link from "next/link"
+import { FolderOpen, MonitorPlay, ShieldAlert } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { shortFolder } from "@/lib/vigil/data"
 import { useVigil } from "./vigil-provider"
@@ -51,6 +53,12 @@ export function AppHeader() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        <Button asChild size="sm" variant="outline">
+          <Link href="/">
+            <MonitorPlay data-icon="inline-start" />
+            返回作业大屏
+          </Link>
+        </Button>
         <Badge
           variant="outline"
           className={cn(

@@ -40,6 +40,7 @@
     --color-background: var(--background);
     --color-success: var(--success);
     --color-warning: var(--warning);
+    --color-signal: var(--signal);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -68,6 +69,7 @@
     --destructive: #ef4444;
     --success: #22c55e;
     --warning: #f59e0b;
+    --signal: #06b6d4;
     --border: #1f2937;
     --input: #263244;
     --ring: #3b82f6;
@@ -98,6 +100,37 @@
     @apply font-sans;
     }
 }
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--input) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--input);
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cctv-scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.12) 0,
+    rgb(0 0 0 / 0.12) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+@keyframes cctv-sweep {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
 @keyframes terminal-caret {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
