@@ -4,8 +4,16 @@ import * as React from "react"
 import { toast } from "sonner"
 
 import { INITIAL_ALERTS, NEW_EVENT_TEMPLATES, SEARCH_MOMENTS } from "@/lib/ops/data"
-import type { AlertEvent, AlertStatus, ReplayState } from "@/lib/ops/types"
+import type { AlertEvent, AlertStatus, ChannelId, ReplayState, SeekTarget } from "@/lib/ops/types"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
+import { defaultIncidentSec, formatClock, isChannelId } from "@/lib/ops/video-scenarios"
+
+export interface LocateRequest {
+  channelId: string
+  timestampSec?: number
+  incidentId?: string
+  title?: string
+}
 
 export type GridLayout = "grid" | "focus" | "single"
 export type RuleStudioTab = "list" | "custom"
@@ -15,6 +23,10 @@ interface OpsContextValue {
   setLayout: (layout: GridLayout) => void
   focusId: string
   focusCamera: (cameraId: string, opts?: { single?: boolean }) => void
+  seekTarget: SeekTarget | null
+  locateIncident: (request: LocateRequest) => void
+  showOverlays: boolean
+  toggleOverlays: () => void
   muted: boolean
   toggleMuted: () => void
   alerts: AlertEvent[]
@@ -50,6 +62,9 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     tab: "list",
   })
   const [replay, setReplay] = React.useState<ReplayState | null>(null)
+  const [seekTarget, setSeekTarget] = React.useState<SeekTarget | null>(null)
+  const [showOverlays, setShowOverlays] = React.useState(true)
+  const seekNonce = React.useRef(0)
 
   const mutedRef = React.useRef(muted)
   React.useEffect(() => {
@@ -121,22 +136,53 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     setRuleStudio({ open: true, tab })
   }, [])
 
-  const startReplay = React.useCallback((momentId: string) => {
-    const moment = SEARCH_MOMENTS.find((m) => m.id === momentId)
-    if (!moment) return
-    setReplay({
-      momentId: moment.id,
-      cameraId: moment.cameraId,
-      start: moment.start,
-      end: moment.end,
-      title: moment.title,
-    })
-    setFocusId(moment.cameraId)
-    setLayoutState("single")
-    toast.success(`主播放器已跳转至 ${moment.cameraId}`, {
-      description: `${moment.start} - ${moment.end} · ${moment.title}`,
-    })
-  }, [])
+  const seekChannel = React.useCallback(
+    (channelId: ChannelId, timestampSec: number, extra?: { incidentId?: string; title?: string }) => {
+      seekNonce.current += 1
+      setSeekTarget({ channelId, timestampSec, nonce: seekNonce.current, ...extra })
+      setFocusId(channelId)
+      setLayoutState((prev) => (prev === "single" ? "single" : "focus"))
+    },
+    []
+  )
+
+  const locateIncident = React.useCallback(
+    (request: LocateRequest) => {
+      if (!isChannelId(request.channelId)) {
+        toast.error(`未找到通道 ${request.channelId}`)
+        return
+      }
+      const sec = request.timestampSec ?? defaultIncidentSec(request.channelId, request.title ?? "")
+      seekChannel(request.channelId, sec, { incidentId: request.incidentId, title: request.title })
+      toast.success(`已定位 ${request.channelId} · ${formatClock(sec)}`, {
+        description: request.title,
+      })
+    },
+    [seekChannel]
+  )
+
+  const startReplay = React.useCallback(
+    (momentId: string) => {
+      const moment = SEARCH_MOMENTS.find((m) => m.id === momentId)
+      if (!moment) return
+      setReplay({
+        momentId: moment.id,
+        cameraId: moment.cameraId,
+        start: moment.start,
+        end: moment.end,
+        title: moment.title,
+      })
+      if (isChannelId(moment.cameraId)) {
+        const text = `${moment.title} ${moment.rationale} ${moment.keywords.join(" ")}`
+        seekChannel(moment.cameraId, defaultIncidentSec(moment.cameraId, text), { title: moment.title })
+      }
+      setLayoutState("single")
+      toast.success(`主播放器已跳转至 ${moment.cameraId}`, {
+        description: `${moment.start} - ${moment.end} · ${moment.title}`,
+      })
+    },
+    [seekChannel]
+  )
 
   const value = React.useMemo<OpsContextValue>(
     () => ({
@@ -144,6 +190,10 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       setLayout,
       focusId,
       focusCamera,
+      seekTarget,
+      locateIncident,
+      showOverlays,
+      toggleOverlays: () => setShowOverlays((prev) => !prev),
       muted,
       toggleMuted,
       alerts,
@@ -164,6 +214,9 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       setLayout,
       focusId,
       focusCamera,
+      seekTarget,
+      locateIncident,
+      showOverlays,
       muted,
       toggleMuted,
       alerts,

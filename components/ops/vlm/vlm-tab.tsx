@@ -1,12 +1,13 @@
 "use client"
 
+import type { LocateOptions } from "@/lib/ops/types"
 import { CausalReasoningView } from "./causal-reasoning-view"
 import { VideoRagStudio } from "./video-rag-studio"
 import { VlmInferenceRunner } from "./vlm-inference-runner"
 import { VlmProvider } from "./vlm-provider"
 
 interface VlmTabProps {
-  onLocate: (channelId: string) => void
+  onLocate: (channelId: string, opts?: LocateOptions) => void
 }
 
 export function VlmTab({ onLocate }: VlmTabProps) {

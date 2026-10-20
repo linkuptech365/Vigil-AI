@@ -1,7 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { BellRing, CheckCheck, ChevronRight, ShieldCheck } from "lucide-react"
+import { BellRing, CheckCheck, ChevronRight, Crosshair, ShieldCheck } from "lucide-react"
+import { alertClipSec } from "@/lib/ops/video-scenarios"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -46,7 +47,7 @@ export function KeyframeThumb({
 }
 
 function EventCard({ alert }: { alert: AlertEvent }) {
-  const { openAlert, setAlertStatus } = useOps()
+  const { openAlert, setAlertStatus, locateIncident } = useOps()
   const critical = alert.severity === "CRITICAL"
   const resolved = isResolved(alert.status)
 
@@ -111,16 +112,35 @@ function EventCard({ alert }: { alert: AlertEvent }) {
             <CheckCheck data-icon="inline-start" />
             {alert.status === "open" ? "确认处置" : STATUS_LABEL[alert.status]}
           </Button>
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            className="text-muted-foreground"
-            onClick={() => openAlert(alert.id)}
-          >
-            研判详情
-            <ChevronRight data-icon="inline-end" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground"
+              onClick={() =>
+                locateIncident({
+                  channelId: alert.cameraId,
+                  timestampSec: alertClipSec(alert),
+                  incidentId: alert.id,
+                  title: `${alert.type} · ${alert.summary}`,
+                })
+              }
+            >
+              <Crosshair data-icon="inline-start" />
+              定位画面
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground"
+              onClick={() => openAlert(alert.id)}
+            >
+              研判详情
+              <ChevronRight data-icon="inline-end" />
+            </Button>
+          </div>
         </div>
       </article>
     </li>

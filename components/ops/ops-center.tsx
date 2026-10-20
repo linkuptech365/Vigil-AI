@@ -20,18 +20,24 @@ import { RuleStudioModal } from "./rule-studio-modal"
 import { RulesTab } from "./rules/rules-tab"
 import { VideoSearchBar } from "./video-search-bar"
 import { VlmTab } from "./vlm/vlm-tab"
+import type { LocateOptions } from "@/lib/ops/types"
+import { isChannelId } from "@/lib/ops/video-scenarios"
 
 function OpsShell() {
-  const { focusCamera } = useOps()
+  const { locateIncident, focusCamera } = useOps()
   const [tab, setTab] = React.useState("monitor")
 
   const locateInMonitor = React.useCallback(
-    (channelId: string) => {
-      focusCamera(channelId, { single: true })
+    (channelId: string, opts?: LocateOptions) => {
       setTab("monitor")
-      toast.success(`已在监控矩阵中定位 ${channelId}`)
+      if (isChannelId(channelId)) {
+        locateIncident({ channelId, timestampSec: opts?.timestampSec, title: opts?.label })
+        focusCamera(channelId, { single: true })
+      } else {
+        toast.error(`未找到通道 ${channelId}`)
+      }
     },
-    [focusCamera]
+    [locateIncident, focusCamera]
   )
 
   return (

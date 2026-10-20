@@ -1,7 +1,8 @@
 "use client"
 
-import { Grid2x2, PanelLeft, Square } from "lucide-react"
+import { Grid2x2, PanelLeft, ScanEye, Square } from "lucide-react"
 
+import { Toggle } from "@/components/ui/toggle"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { CAMERAS } from "@/lib/ops/data"
 import { cn } from "@/lib/utils"
@@ -9,7 +10,7 @@ import { CameraTile } from "./camera-tile"
 import { type GridLayout, useOps } from "./ops-provider"
 
 export function MonitorGrid() {
-  const { layout, setLayout, focusId, focusCamera } = useOps()
+  const { layout, setLayout, focusId, focusCamera, showOverlays, toggleOverlays } = useOps()
   const focused = CAMERAS.find((c) => c.id === focusId) ?? CAMERAS[0]
   const others = CAMERAS.filter((c) => c.id !== focused.id)
 
@@ -24,6 +25,17 @@ export function MonitorGrid() {
             {layout === "single" ? `${focused.code} 全屏` : `${CAMERAS.length} 路通道`}
           </span>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+        <Toggle
+          variant="outline"
+          size="sm"
+          pressed={showOverlays}
+          onPressedChange={toggleOverlays}
+          aria-label="显示 AI 识别标注层"
+        >
+          <ScanEye />
+          AI 标注层
+        </Toggle>
         <ToggleGroup
           type="single"
           variant="outline"
@@ -45,6 +57,7 @@ export function MonitorGrid() {
             单通道
           </ToggleGroupItem>
         </ToggleGroup>
+        </div>
       </div>
 
       {layout === "grid" && (

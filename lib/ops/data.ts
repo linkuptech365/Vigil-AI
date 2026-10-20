@@ -7,6 +7,8 @@ export const CAMERAS: Camera[] = [
     name: "厂区东门进出主通道",
     nameEn: "Gate East",
     image: "/ops/cam-01-gate.png",
+    video: "/ops/video/cam-01.mp4",
+    poster: "/ops/video/cam-01-poster.jpg",
     status: "normal",
     statusLabel: "正常监控中",
     fps: 25,
@@ -24,6 +26,8 @@ export const CAMERAS: Camera[] = [
     name: "1号重型机加工车间",
     nameEn: "Heavy Workshop 01",
     image: "/ops/cam-02-workshop.png",
+    video: "/ops/video/cam-02.mp4",
+    poster: "/ops/video/cam-02-poster.jpg",
     status: "alert",
     statusLabel: "预警中 · 未戴安全帽",
     fps: 25,
@@ -48,6 +52,8 @@ export const CAMERAS: Camera[] = [
     name: "化工储罐高危禁区",
     nameEn: "Hazard Chemical Tank",
     image: "/ops/cam-03-tank.png",
+    video: "/ops/video/cam-03.mp4",
+    poster: "/ops/video/cam-03-poster.jpg",
     status: "fence",
     statusLabel: "电子围栏布控中",
     fps: 25,
@@ -64,6 +70,8 @@ export const CAMERAS: Camera[] = [
     name: "仓储周转主干道",
     nameEn: "Warehouse Logistics Lane",
     image: "/ops/cam-04-warehouse.png",
+    video: "/ops/video/cam-04.mp4",
+    poster: "/ops/video/cam-04-poster.jpg",
     status: "gathering",
     statusLabel: "疑似目标聚集",
     fps: 25,
@@ -260,7 +268,7 @@ export const NEW_EVENT_TEMPLATES: Omit<
   },
 ]
 
-export const SEARCH_PRESETS = ["检索打架冲突", "未戴安全帽作业", "禁区违规滞留", "叉车超速逆行"]
+export const SEARCH_PRESETS = ["检��打架冲突", "未戴安全帽作业", "禁区违规滞留", "叉车超速逆行"]
 
 export const SEARCH_PRESET_QUERY: Record<string, string> = {
   检索打架冲突: "查找打架冲突和推搡事件",

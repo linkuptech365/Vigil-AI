@@ -1,3 +1,4 @@
+export type ChannelId = "CAM-01" | "CAM-02" | "CAM-03" | "CAM-04"
 export type CameraStatus = "normal" | "alert" | "fence" | "gathering"
 export type BoxTone = "ok" | "critical" | "warn" | "zone"
 
@@ -13,11 +14,14 @@ export interface OverlayBox {
 }
 
 export interface Camera {
-  id: string
+  id: ChannelId
   code: string
   name: string
   nameEn: string
   image: string
+  /** Looping 30s clip; the AI overlay timeline is keyed to its playback time. */
+  video: string
+  poster: string
   status: CameraStatus
   statusLabel: string
   fps: number
@@ -93,4 +97,18 @@ export interface ReplayState {
   start: string
   end: string
   title: string
+}
+
+export interface SeekTarget {
+  channelId: ChannelId
+  timestampSec: number
+  /** Bumped on every request so repeated jumps to the same spot still fire. */
+  nonce: number
+  incidentId?: string
+  title?: string
+}
+
+export interface LocateOptions {
+  timestampSec?: number
+  label?: string
 }

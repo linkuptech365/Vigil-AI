@@ -29,9 +29,9 @@ export function OverlayBoxes({ boxes, showAllLabels = true, labelSize = "sm" }: 
         const showLabel = box.label && (showAllLabels || box.tone !== "ok")
         return (
           <div
-            key={`${box.x}-${box.y}-${index}`}
+            key={`${index}-${box.tone}`}
             className={cn(
-              "absolute border-2 shadow-[0_0_12px]",
+              "absolute border-2 shadow-[0_0_12px] transition-[left,top] duration-100 ease-linear",
               TONE_BOX[box.tone],
               box.pulse && "animate-pulse"
             )}

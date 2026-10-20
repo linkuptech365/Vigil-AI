@@ -10,6 +10,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Progress } from "@/components/ui/progress"
 import { RAG_INDEX, RAG_PRESETS, RAG_THRESHOLD, searchCorpus } from "@/lib/ops/vlm-data"
+import type { LocateOptions } from "@/lib/ops/types"
+import { defaultIncidentSec, isChannelId } from "@/lib/ops/video-scenarios"
 import type { RagSearchResult } from "@/lib/ops/vlm-types"
 
 type SearchPhase = "idle" | "searching" | "done"
@@ -20,8 +22,10 @@ const SEARCH_STAGES = [
   { until: 101, label: "正在对 Top-K 候选切片重排序..." },
 ]
 
+type LocateHandler = (channelId: string, opts?: LocateOptions) => void
+
 interface RagStudioProps {
-  onLocate: (channelId: string) => void
+  onLocate: LocateHandler
 }
 
 function IndexStatus() {
@@ -53,7 +57,7 @@ function ResultCard({
 }: {
   result: RagSearchResult
   rank: number
-  onLocate: (channelId: string) => void
+  onLocate: LocateHandler
 }) {
   return (
     <article className="flex flex-col overflow-hidden rounded-lg border border-border bg-background">
@@ -87,7 +91,15 @@ function ResultCard({
             {result.matchedText}
           </p>
         </div>
-        <Button variant="outline" size="sm" className="mt-auto w-full" onClick={() => onLocate(result.channelId)}>
+        <Button variant="outline" size="sm" className="mt-auto w-full" onClick={() =>
+            onLocate(result.channelId, {
+              timestampSec: defaultIncidentSec(
+                isChannelId(result.channelId) ? result.channelId : "CAM-01",
+                result.matchedText
+              ),
+              label: result.matchedText,
+            })
+          }>
           <MapPin data-icon="inline-start" />
           跳转至监控矩阵定位 (Locate in Monitor)
         </Button>
