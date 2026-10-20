@@ -2,11 +2,12 @@
 
 import * as React from "react"
 import { toast } from "sonner"
-import { Cable, LayoutGrid, ScanEye, ShieldCheck, Sparkles } from "lucide-react"
+import { Archive, Cable, LayoutGrid, ScanEye, ShieldCheck, Sparkles } from "lucide-react"
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AlertDrawer } from "./alert-drawer"
+import { DispatchTab } from "./dispatch/dispatch-tab"
 import { IncidentFeed } from "./incident-feed"
 import { IngestionPipeline } from "./ingestion/ingestion-pipeline"
 import { IngestionProvider } from "./ingestion/ingestion-provider"
@@ -60,6 +61,10 @@ function OpsShell() {
                 <ShieldCheck aria-hidden="true" />
                 规则与防抖引擎
               </TabsTrigger>
+              <TabsTrigger value="dispatch" className="gap-1.5 px-3">
+                <Archive aria-hidden="true" />
+                处置联动与证据归档
+              </TabsTrigger>
             </TabsList>
           </div>
           <TabsContent
@@ -83,6 +88,9 @@ function OpsShell() {
           </TabsContent>
           <TabsContent value="rules" className="flex min-h-0 flex-1 flex-col">
             <RulesTab onLocate={locateInMonitor} />
+          </TabsContent>
+          <TabsContent value="dispatch" className="flex min-h-0 flex-1 flex-col">
+            <DispatchTab onLocate={locateInMonitor} />
           </TabsContent>
         </Tabs>
       </div>
