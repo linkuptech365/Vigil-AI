@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { AlertsTab } from "./alerts/alerts-tab"
 import { AppHeader } from "./app-header"
 import { ConfigTab } from "./config/config-tab"
+import { FrameTestDialog } from "./frame-test-dialog"
 import { QueueTab } from "./queue/queue-tab"
 import { VideoDetailDialog } from "./video-detail-dialog"
 import { type TabId, VigilProvider, useVigil } from "./vigil-provider"
@@ -56,6 +57,7 @@ function Shell() {
         </TabsContent>
       </Tabs>
       <VideoDetailDialog />
+      <FrameTestDialog />
     </div>
   )
 }

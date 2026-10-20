@@ -1,6 +1,6 @@
 "use client"
 
-import { FileVideo, FolderOpen, Play, RotateCw, ScanEye, Trash2 } from "lucide-react"
+import { FileVideo, Film, FolderOpen, Play, RotateCw, ScanEye, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -19,8 +19,15 @@ import { VideoStatusBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
 
 export function QueueTable() {
-  const { queue, analyzeOne, removeVideo, setSelectedId, setActiveTab, batchRunning } =
-    useVigil()
+  const {
+    queue,
+    analyzeOne,
+    removeVideo,
+    setSelectedId,
+    setActiveTab,
+    batchRunning,
+    openFrameTest,
+  } = useVigil()
 
   if (queue.length === 0) {
     return (
@@ -97,6 +104,18 @@ export function QueueTable() {
                 </TableCell>
                 <TableCell className="pr-4">
                   <div className="flex items-center justify-end gap-1">
+                    {video.source === "disk" && (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`抽取关键帧 ${video.name}`}
+                        title="抽取关键帧"
+                        disabled={analyzing}
+                        onClick={() => openFrameTest(video)}
+                      >
+                        <Film />
+                      </Button>
+                    )}
                     {done ? (
                       <>
                         <Button

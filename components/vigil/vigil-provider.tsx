@@ -8,7 +8,6 @@ import {
   DEFAULT_SETTINGS,
   VIDEO_FORMATS,
   createInitialQueue,
-  createScanResults,
   createTestSamples,
   formatDuration,
   hashString,
@@ -18,11 +17,22 @@ import type {
   ConnectionTestRequest,
   ConnectionTestResponse,
 } from "@/lib/ops/api-types"
+import { postVideoApi } from "@/lib/ops/video-client"
+import type {
+  ExtractFramesRequest,
+  ExtractFramesResponse,
+  SamplingFps,
+  ScanFolderRequest,
+  ScanFolderResponse,
+  ScannedVideoItem,
+} from "@/lib/ops/video-types"
 import { RULES, RULE_IDS } from "@/lib/vigil/rules"
 import type {
+  FrameTestState,
   LogLevel,
   LogLine,
   PingState,
+  ScanInfo,
   Settings,
   VideoItem,
 } from "@/lib/vigil/types"
@@ -43,7 +53,12 @@ interface VigilContextValue {
   modelName: string
   scanning: boolean
   lastScan: string | null
+  scanInfo: ScanInfo | null
   scanFolder: () => Promise<void>
+  frameTest: FrameTestState | null
+  openFrameTest: (video: VideoItem) => void
+  runFrameTest: (video: VideoItem, fps: SamplingFps, triggerSec: number | null) => Promise<void>
+  closeFrameTest: () => void
   importLocalFiles: (files: FileList | null) => Promise<void>
   queue: VideoItem[]
   addSamples: () => void
@@ -69,6 +84,31 @@ export function useVigil() {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+function toQueueItem(scanned: ScannedVideoItem, scanRoot: string): VideoItem {
+  return {
+    id: scanned.id,
+    name: scanned.name,
+    path: scanned.path,
+    durationSec: scanned.durationSeconds,
+    sizeMB: scanned.sizeBytes / (1024 * 1024),
+    fps: 25,
+    recordedAt: new Date(scanned.lastModified).toLocaleString("zh-CN", { hour12: false }),
+    truth: truthForLocalFile(scanned.name),
+    status: "pending",
+    source: "disk",
+    scanRoot,
+    format: scanned.format,
+    resolution: scanned.resolution,
+    durationEstimated: scanned.durationSource === "estimated",
+  }
+}
+
+function mergeScan(prev: VideoItem[], incoming: VideoItem[], scanRoot: string): VideoItem[] {
+  const known = new Map(prev.map((v) => [v.id, v]))
+  const kept = prev.filter((v) => v.scanRoot !== scanRoot)
+  return [...kept, ...incoming.map((item) => known.get(item.id) ?? item)]
+}
 
 function timestamp() {
   const d = new Date()
@@ -107,6 +147,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
   const [lastScan, setLastScan] = React.useState<string | null>(null)
+  const [scanInfo, setScanInfo] = React.useState<ScanInfo | null>(null)
+  const [frameTest, setFrameTest] = React.useState<FrameTestState | null>(null)
   const [queue, setQueue] = React.useState<VideoItem[]>(createInitialQueue)
   const [logs, setLogs] = React.useState<LogLine[]>([])
   const [batchRunning, setBatchRunning] = React.useState(false)
@@ -115,6 +157,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
   const settingsRef = React.useRef(settings)
   const apiKeyRef = React.useRef(apiKey)
+  const queueRef = React.useRef(queue)
+  const frameTestToken = React.useRef(0)
   const busyRef = React.useRef(new Set<string>())
   const logId = React.useRef(0)
   const booted = React.useRef(false)
@@ -126,6 +170,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     apiKeyRef.current = apiKey
   }, [apiKey])
+
+  React.useEffect(() => {
+    queueRef.current = queue
+  }, [queue])
 
   const pushLog = React.useCallback((level: LogLevel, text: string) => {
     logId.current += 1
@@ -164,6 +212,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
   const updateSettings = React.useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => ({ ...prev, ...patch }))
+    if (patch.folderPath !== undefined) setScanInfo(null)
     if (patch.apiUrl !== undefined) {
       setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
     }
@@ -237,26 +286,44 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     }
     setScanning(true)
     pushLog(
-      "info",
-      `扫描目录 ${folderPath}  recursive=${recursive}  formats=${formats.join(",")}`
+      "req",
+      `POST /api/v1/scan-folder  folderPath=${folderPath.trim()}  recursive=${recursive}  formats=${formats.join(",")}`
     )
-    await sleep(1500 + Math.random() * 600)
 
-    const found = createScanResults(folderPath.trim(), recursive, formats)
-    let added = 0
-    setQueue((prev) => {
-      const known = new Set(prev.map((v) => v.id))
-      const fresh = found.filter((v) => !known.has(v.id))
-      added = fresh.length
-      return [...prev, ...fresh]
-    })
+    try {
+      const result = await postVideoApi<ScanFolderRequest, ScanFolderResponse>(
+        "/api/v1/scan-folder",
+        { folderPath: folderPath.trim(), recursive, filterExtensions: formats },
+        30000
+      )
+      const incoming = result.videos.map((v) => toQueueItem(v, result.folderPath))
+      const knownIds = new Set(queueRef.current.map((v) => v.id))
+      const added = incoming.filter((v) => !knownIds.has(v.id)).length
+      setQueue((prev) => mergeScan(prev, incoming, result.folderPath))
 
-    setLastScan(new Date().toLocaleString("zh-CN", { hour12: false }))
-    setScanning(false)
-    pushLog("ok", `扫描完成：发现 ${found.length} 个视频文件，新增入队 ${added} 个。`)
-    toast.success(`目录同步完成，发现 ${found.length} 个视频`, {
-      action: { label: "查看队列", onClick: () => setActiveTab("queue") },
-    })
+      setLastScan(new Date(result.scannedAt).toLocaleString("zh-CN", { hour12: false }))
+      setScanInfo({ count: result.totalFound, folder: result.folderPath, truncated: result.truncated })
+      pushLog(
+        "ok",
+        `200 OK  扫描完成：${result.folderPath} 下发现 ${result.totalFound} 个视频文件，新增入队 ${added} 个。${
+          result.truncated ? "（已达 100 个上限，结果被截断）" : ""
+        }`
+      )
+      if (result.totalFound === 0) {
+        toast.warning("目录已连通，但未发现匹配格式的视频文件")
+      } else {
+        toast.success(`成功同步目录，共发现 ${result.totalFound} 个视频文件`, {
+          action: { label: "查看队列", onClick: () => setActiveTab("queue") },
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "扫描失败"
+      setScanInfo(null)
+      pushLog("warn", `扫描失败：${message}`)
+      toast.error(message)
+    } finally {
+      setScanning(false)
+    }
   }, [pushLog])
 
   const importLocalFiles = React.useCallback(
@@ -331,16 +398,39 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         analyzedAt: undefined,
       })
 
+      let keyframes: VideoItem["keyframes"]
+      let keyframeWindow: VideoItem["keyframeWindow"]
+
       try {
         pushLog(
           "info",
           `▶ ${video.name}  (${formatDuration(video.durationSec)}, ${video.sizeMB.toFixed(1)} MB, ${video.fps}fps)`
         )
         await sleep(450)
-        pushLog(
-          "sample",
-          `ffmpeg -i "${video.name}" -vf fps=${s.samplingFps},scale=640:-1 → 抽取 ${frames} 帧`
-        )
+        if (video.source === "disk") {
+          try {
+            const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
+              "/api/v1/extract-frames",
+              { videoPath: video.path, fps: s.samplingFps as SamplingFps }
+            )
+            keyframes = result.keyframes
+            keyframeWindow = result.windowRange
+            pushLog(
+              "sample",
+              `POST /api/v1/extract-frames → ${result.totalFramesExtracted} 帧  窗口 [${result.windowRange.startSec}s, ${result.windowRange.endSec}s]  fps=${result.samplingFps}`
+            )
+          } catch (error) {
+            pushLog(
+              "warn",
+              `抽帧接口失败：${error instanceof Error ? error.message : "未知错误"}，继续以元数据完成分析。`
+            )
+          }
+        } else {
+          pushLog(
+            "sample",
+            `ffmpeg -i "${video.name}" -vf fps=${s.samplingFps},scale=640:-1 → 抽取 ${frames} 帧`
+          )
+        }
         await sleep(600)
         pushLog(
           "req",
@@ -389,6 +479,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           suppressedReason,
           samplingFps: s.samplingFps,
           frames,
+          keyframes,
+          keyframeWindow,
           analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
         })
 
@@ -408,6 +500,61 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     },
     [apiKey, patchVideo, pushLog]
   )
+
+  const runFrameTest = React.useCallback(
+    async (video: VideoItem, fps: SamplingFps, triggerSec: number | null) => {
+      const token = ++frameTestToken.current
+      setFrameTest({ videoId: video.id, fps, triggerSec, status: "loading" })
+      pushLog(
+        "req",
+        `POST /api/v1/extract-frames  videoPath=${video.path}  fps=${fps}${
+          triggerSec !== null ? `  trigger=${triggerSec}s` : ""
+        }`
+      )
+      try {
+        const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
+          "/api/v1/extract-frames",
+          {
+            videoPath: video.path,
+            fps,
+            ...(triggerSec !== null ? { triggerTimestampSec: triggerSec } : {}),
+          }
+        )
+        if (token !== frameTestToken.current) return
+        setFrameTest({
+          videoId: video.id,
+          fps,
+          triggerSec,
+          status: "ok",
+          keyframes: result.keyframes,
+          windowRange: result.windowRange,
+          triggerTimestampSec: result.triggerTimestampSec,
+        })
+        pushLog(
+          "sample",
+          `200 OK  ${result.totalFramesExtracted} 帧  窗口 [${result.windowRange.startSec}s, ${result.windowRange.endSec}s]  ← ${video.name}`
+        )
+      } catch (error) {
+        if (token !== frameTestToken.current) return
+        const message = error instanceof Error ? error.message : "抽帧失败"
+        setFrameTest({ videoId: video.id, fps, triggerSec, status: "error", error: message })
+        pushLog("warn", `抽帧失败：${message}`)
+      }
+    },
+    [pushLog]
+  )
+
+  const openFrameTest = React.useCallback(
+    (video: VideoItem) => {
+      void runFrameTest(video, settingsRef.current.samplingFps as SamplingFps, null)
+    },
+    [runFrameTest]
+  )
+
+  const closeFrameTest = React.useCallback(() => {
+    frameTestToken.current += 1
+    setFrameTest(null)
+  }, [])
 
   const analyzeAll = React.useCallback(async () => {
     const pending = queue.filter((v) => v.status === "pending")
@@ -455,7 +602,12 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       modelName,
       scanning,
       lastScan,
+      scanInfo,
       scanFolder,
+      frameTest,
+      openFrameTest,
+      runFrameTest,
+      closeFrameTest,
       importLocalFiles,
       queue,
       addSamples,
@@ -481,7 +633,12 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       modelName,
       scanning,
       lastScan,
+      scanInfo,
       scanFolder,
+      frameTest,
+      openFrameTest,
+      runFrameTest,
+      closeFrameTest,
       importLocalFiles,
       queue,
       addSamples,

@@ -25,8 +25,15 @@ import { FOLDER_CHIPS, VIDEO_FORMATS } from "@/lib/vigil/data"
 import { useVigil } from "../vigil-provider"
 
 export function SourceCard() {
-  const { settings, updateSettings, scanning, scanFolder, lastScan, importLocalFiles } =
-    useVigil()
+  const {
+    settings,
+    updateSettings,
+    scanning,
+    scanFolder,
+    lastScan,
+    scanInfo,
+    importLocalFiles,
+  } = useVigil()
   const pickerRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
@@ -100,7 +107,7 @@ export function SourceCard() {
               ))}
             </div>
             <FieldDescription>
-              浏览器无法直接读取服务器路径；使用「选择本机文件夹」可载入本机视频的真实元数据。
+              「同步并扫描目录」会由服务端读取该路径下的真实文件；使用「选择本机文件夹」可载入浏览器本机视频的元数据。
             </FieldDescription>
           </Field>
 
@@ -142,12 +149,21 @@ export function SourceCard() {
               )}
               {scanning ? "正在扫描目录..." : "同步并扫描目录"}
             </Button>
-            {lastScan && (
-              <Badge variant="outline" className="gap-1.5 font-mono text-muted-foreground">
-                <Clock aria-hidden="true" />
-                上次同步 {lastScan}
-              </Badge>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {scanInfo && (
+                <Badge variant={scanInfo.count > 0 ? "secondary" : "outline"} role="status">
+                  {scanInfo.count > 0
+                    ? `发现 ${scanInfo.count} 个视频${scanInfo.truncated ? "（已截断）" : ""}`
+                    : "未发现匹配视频"}
+                </Badge>
+              )}
+              {lastScan && (
+                <Badge variant="outline" className="gap-1.5 font-mono text-muted-foreground">
+                  <Clock aria-hidden="true" />
+                  上次同步 {lastScan}
+                </Badge>
+              )}
+            </div>
           </div>
         </FieldGroup>
       </CardContent>

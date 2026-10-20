@@ -1,3 +1,5 @@
+import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
+
 export type RuleId = "violence" | "ppe" | "fire" | "intrusion"
 
 export type Severity = "critical" | "high"
@@ -26,6 +28,31 @@ export interface VideoItem {
   samplingFps?: number
   frames?: number
   suppressedReason?: string
+  /** disk: 由服务端真实扫描得到，可调用抽帧接口 */
+  source?: "disk"
+  scanRoot?: string
+  format?: string
+  resolution?: string | null
+  durationEstimated?: boolean
+  keyframes?: ExtractedKeyframe[]
+  keyframeWindow?: { startSec: number; endSec: number }
+}
+
+export interface FrameTestState {
+  videoId: string
+  fps: SamplingFps
+  triggerSec: number | null
+  status: "loading" | "ok" | "error"
+  keyframes?: ExtractedKeyframe[]
+  windowRange?: { startSec: number; endSec: number }
+  triggerTimestampSec?: number
+  error?: string
+}
+
+export interface ScanInfo {
+  count: number
+  folder: string
+  truncated: boolean
 }
 
 export type LogLevel = "sys" | "info" | "sample" | "req" | "res" | "ok" | "warn" | "alert"

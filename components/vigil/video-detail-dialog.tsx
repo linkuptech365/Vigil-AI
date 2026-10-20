@@ -1,6 +1,6 @@
 "use client"
 
-import { CircleCheck, ClipboardList, Cpu, ListChecks, TriangleAlert } from "lucide-react"
+import { CircleCheck, ClipboardList, Cpu, Film, ListChecks, TriangleAlert } from "lucide-react"
 
 import {
   Dialog,
@@ -12,6 +12,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
 import { RULES } from "@/lib/vigil/rules"
+import { KeyframeGrid } from "./frame-test-dialog"
 import { SeverityBadge } from "./status-badges"
 import { useVigil } from "./vigil-provider"
 
@@ -66,6 +67,14 @@ export function VideoDetailDialog() {
 
             <ScrollArea className="max-h-[60vh]">
               <div className="flex flex-col gap-6 p-6">
+                {video.keyframes && video.keyframeWindow && (
+                  <Section
+                    icon={Film}
+                    title={`证据关键帧 [${video.keyframeWindow.startSec}s – ${video.keyframeWindow.endSec}s]`}
+                  >
+                    <KeyframeGrid keyframes={video.keyframes} />
+                  </Section>
+                )}
                 {rule ? (
                   <>
                     <Section icon={ClipboardList} title="事件概述">

@@ -1,10 +1,19 @@
 import type { Settings, Truth, VideoItem } from "./types"
 
-export const DEFAULT_FOLDER = "/data/videos/surveillance_stream"
+export const DEMO_FOLDER = "/data/videos/surveillance_stream"
 
-export const FOLDER_CHIPS = [DEFAULT_FOLDER, "/mnt/nas/cctv_archive/gate_east"]
+export const DEFAULT_FOLDER = "./sample-videos"
 
-export const VIDEO_FORMATS = [".mp4", ".avi", ".mkv", ".mov"]
+export const FOLDER_CHIPS = [
+  DEFAULT_FOLDER,
+  "./public",
+  "./",
+  "/tmp",
+  DEMO_FOLDER,
+  "/mnt/nas/cctv_archive/gate_east",
+]
+
+export const VIDEO_FORMATS = [".mp4", ".avi", ".mkv", ".mov", ".webm", ".flv"]
 
 export interface ApiPreset {
   id: string
@@ -166,7 +175,7 @@ export function createInitialQueue(): VideoItem[] {
     return {
       ...rest,
       id: `seed-${seed.name}`,
-      path: joinPath(DEFAULT_FOLDER, dir, seed.name),
+      path: joinPath(DEMO_FOLDER, dir, seed.name),
       status: "pending" as const,
     }
   })
@@ -191,30 +200,6 @@ export function createTestSamples(count = 3): VideoItem[] {
     out.push(fromSeed(seed, "/data/videos/test_samples", false))
   }
   return out
-}
-
-const SCAN_ORDER = [
-  SEEDS.warehouseSmoke,
-  SEEDS.siteHelmet,
-  SEEDS.lobby,
-  SEEDS.perimeter,
-  SEEDS.dock,
-  SEEDS.canteenFight,
-]
-
-export function createScanResults(
-  folder: string,
-  recursive: boolean,
-  formats: string[]
-): VideoItem[] {
-  const pool = recursive ? SCAN_ORDER : SCAN_ORDER.slice(0, 4)
-  return pool
-    .filter((seed) => formats.some((ext) => seed.name.toLowerCase().endsWith(ext)))
-    .map((seed, index) => {
-      const nested = recursive && index % 2 === 1
-      const item = fromSeed(seed, folder, nested)
-      return { ...item, id: `scan-${folder}-${seed.name}` }
-    })
 }
 
 export function hashString(value: string) {
