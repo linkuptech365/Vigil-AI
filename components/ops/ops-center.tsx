@@ -7,6 +7,7 @@ import { Archive, Cable, LayoutGrid, ScanEye, ShieldCheck, Sparkles } from "luci
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AlertDrawer } from "./alert-drawer"
+import { AuditTrailView } from "./audit/audit-trail-view"
 import { DispatchTab } from "./dispatch/dispatch-tab"
 import { IncidentFeed } from "./incident-feed"
 import { IngestionPipeline } from "./ingestion/ingestion-pipeline"
@@ -102,6 +103,7 @@ function OpsShell() {
       </div>
       <AlertDrawer />
       <RuleStudioModal />
+      <AuditTrailView />
     </TooltipProvider>
   )
 }

@@ -13,7 +13,7 @@ interface SavedPlayback {
 /** Survives tile remounts (tab switches, layout changes) so playback resumes where it was. */
 const savedPlayback = new Map<string, SavedPlayback>()
 
-const TICK_MS = 100
+const TICK_MS = 200
 const LOAD_TIMEOUT_MS = 8000
 
 interface Options {
@@ -79,8 +79,9 @@ export function useCameraPlayback({ cameraId, duration, suspended }: Options) {
     const video = videoRef.current
     if (!video || status === "fallback") return
     if (playing && !suspended) {
-      video.play().catch((error: DOMException) => {
-        if (error.name === "NotAllowedError") setPlaying(false)
+      // AbortError ("interrupted by a new load request") is benign, so every rejection is swallowed.
+      video.play().catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "NotAllowedError") setPlaying(false)
       })
     } else {
       video.pause()

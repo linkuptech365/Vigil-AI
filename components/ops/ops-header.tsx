@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { FlaskConical, Library, MonitorPlay, Plus, Settings2, ShieldAlert, Volume2, VolumeX } from "lucide-react"
+import { ClipboardCheck, FlaskConical, Library, MonitorPlay, Plus, Settings2, ShieldAlert, Volume2, VolumeX } from "lucide-react"
 import { toast } from "sonner"
 import { useSWRConfig } from "swr"
 
@@ -42,7 +42,7 @@ function LiveClock() {
 }
 
 export function OpsHeader() {
-  const { muted, toggleMuted, openRuleStudio } = useOps()
+  const { muted, toggleMuted, openRuleStudio, setAuditOpen } = useOps()
   const router = useRouter()
   const { mutate } = useSWRConfig()
   const [loadingGmp, setLoadingGmp] = React.useState(false)
@@ -146,6 +146,25 @@ export function OpsHeader() {
           disabled={loadingGmp}
         >
           {loadingGmp ? <Spinner /> : <FlaskConical />}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="hidden lg:inline-flex"
+          onClick={() => setAuditOpen(true)}
+        >
+          <ClipboardCheck data-icon="inline-start" />
+          审计与 CAPA 追踪
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          aria-label="审计与 CAPA 追踪"
+          className="lg:hidden"
+          onClick={() => setAuditOpen(true)}
+        >
+          <ClipboardCheck />
         </Button>
         <Button
           type="button"

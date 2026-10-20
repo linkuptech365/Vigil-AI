@@ -38,6 +38,8 @@ interface OpsContextValue {
   openRuleStudio: (tab?: RuleStudioTab) => void
   setRuleStudioOpen: (open: boolean) => void
   setRuleStudioTab: (tab: RuleStudioTab) => void
+  auditOpen: boolean
+  setAuditOpen: (open: boolean) => void
   replay: ReplayState | null
   startReplay: (momentId: string) => void
   stopReplay: () => void
@@ -61,6 +63,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     open: false,
     tab: "list",
   })
+  const [auditOpen, setAuditOpen] = React.useState(false)
   const [replay, setReplay] = React.useState<ReplayState | null>(null)
   const [seekTarget, setSeekTarget] = React.useState<SeekTarget | null>(null)
   const [showOverlays, setShowOverlays] = React.useState(true)
@@ -205,6 +208,8 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       openRuleStudio,
       setRuleStudioOpen: (open) => setRuleStudio((prev) => ({ ...prev, open })),
       setRuleStudioTab: (tab) => setRuleStudio((prev) => ({ ...prev, tab })),
+      auditOpen,
+      setAuditOpen,
       replay,
       startReplay,
       stopReplay: () => setReplay(null),
@@ -224,6 +229,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       setAlertStatus,
       ruleStudio,
       openRuleStudio,
+      auditOpen,
       replay,
       startReplay,
     ]
