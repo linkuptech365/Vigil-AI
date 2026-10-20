@@ -1,7 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { ArrowRightLeft, Layers, LocateFixed, PackageOpen } from "lucide-react"
+import { ArrowRightLeft, Layers, LocateFixed, PackageOpen, TriangleAlert } from "lucide-react"
+import useSWR from "swr"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -14,27 +15,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Progress } from "@/components/ui/progress"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { CAMERAS } from "@/lib/ops/data"
-import {
-  CORRELATED_INCIDENT,
-  CORRELATION_WINDOW_SECONDS,
-  EVIDENCE_CHAIN,
-} from "@/lib/ops/rules-data"
+import type { ClusteredIncidentResponse } from "@/lib/ops/rules-api-types"
+import { CLUSTER_ENDPOINT, getJson } from "@/lib/ops/rules-client"
 import type { EvidenceTrigger } from "@/lib/ops/rules-types"
 import type { OverlayBox } from "@/lib/ops/types"
 import { OverlayBoxes } from "../overlay-boxes"
+
+const CLUSTER_REFRESH_MS = 8000
 
 const KEYFRAME_BOX: Record<string, OverlayBox> = {
   "CAM-01": { x: 66, y: 42, w: 8, h: 43, tone: "warn", label: "#1187 ENTER" },
   "CAM-02": { x: 70.5, y: 53, w: 10.5, h: 36, tone: "critical", pulse: true, label: "#1187 REDLINE" },
 }
-
-const AFFINITY_FACTORS = [
-  { label: "外观重识别 (ReID) 相似度", value: 94.1 },
-  { label: "运动方向连续性", value: 91.8 },
-  { label: "跨机位时间间隔吻合度", value: 91.3 },
-]
 
 const ROLE_META: Record<EvidenceTrigger["role"], { label: string; className: string }> = {
   primary: { label: "主事件", className: "border-destructive/50 text-destructive" },
@@ -46,13 +41,48 @@ function cameraOf(id: string) {
   return CAMERAS.find((camera) => camera.id === id)
 }
 
+function ClusteringPlaceholder({ loading, failed }: { loading: boolean; failed: boolean }) {
+  return (
+    <Card className="gap-4 py-4">
+      <CardHeader className="px-4">
+        <CardTitle className="text-sm">多机位时空关联 (Spatial-Temporal Correlation)</CardTitle>
+        <CardDescription>
+          {failed ? "聚类引擎暂时不可用，将自动重试。" : "服务端尚未检测到跨机位关联事件。"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="px-4">
+        {loading ? (
+          <div className="flex flex-col gap-3" aria-busy="true" aria-label="正在加载聚类结果">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 rounded-md border border-dashed border-border p-4 text-xs text-muted-foreground">
+            <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+            {failed ? "请检查 /api/v1/rules/cluster 服务状态。" : "相邻机位在时间窗内同时命中同类事件后，会在此处自动合并为一张工单。"}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 interface IncidentClusteringProps {
   onLocate: (channelId: string) => void
 }
 
 export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
   const [evidenceOpen, setEvidenceOpen] = React.useState(false)
-  const incident = CORRELATED_INCIDENT
+  const { data, error, isLoading } = useSWR<ClusteredIncidentResponse>(CLUSTER_ENDPOINT, getJson, {
+    refreshInterval: CLUSTER_REFRESH_MS,
+  })
+  const incident = data?.primary
+
+  if (!incident) {
+    return <ClusteringPlaceholder loading={isLoading} failed={Boolean(error) && !data} />
+  }
+
+  const windowSeconds = data.windowSeconds
   const clustered = [incident.primaryChannelId, ...incident.relatedChannelIds]
     .map((id) => cameraOf(id)?.code ?? id)
     .sort()
@@ -74,7 +104,7 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
           </div>
           <CardTitle className="text-sm">多机位时空关联 (Spatial-Temporal Correlation)</CardTitle>
           <CardDescription>
-            {incident.title}。{clustered.join(" + ")} 在 {CORRELATION_WINDOW_SECONDS} 秒窗口内命中同一目标轨迹，
+            {incident.title}。{clustered.join(" + ")} 在 {windowSeconds} 秒窗口内命中同一目标轨迹，
             合并为一张工单。
           </CardDescription>
         </div>
@@ -119,7 +149,9 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
                         alt={`${frame.channelId} ${camera?.name ?? ""} 同步关键帧`}
                         className="size-full object-cover"
                       />
-                      <OverlayBoxes boxes={[KEYFRAME_BOX[frame.channelId]]} labelSize="xs" />
+                      {KEYFRAME_BOX[frame.channelId] && (
+                        <OverlayBoxes boxes={[KEYFRAME_BOX[frame.channelId]]} labelSize="xs" />
+                      )}
                       <span className="absolute left-1.5 top-1.5 rounded-sm bg-background/80 px-1.5 py-0.5 font-mono text-[10px]">
                         {frame.channelId}
                       </span>
@@ -144,8 +176,8 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
           </div>
           <Progress value={incident.spatialAffinity} aria-label="时空轨迹吻合度" />
           <ul className="flex flex-col gap-1.5">
-            {AFFINITY_FACTORS.map((factor) => (
-              <li key={factor.label} className="flex items-center justify-between gap-2 text-[11px]">
+            {incident.factors.map((factor) => (
+              <li key={factor.key} className="flex items-center justify-between gap-2 text-[11px]">
                 <span className="text-muted-foreground">{factor.label}</span>
                 <span className="font-mono tabular-nums">{factor.value.toFixed(1)}%</span>
               </li>
@@ -170,7 +202,7 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
           <DialogHeader>
             <DialogTitle>聚合证据包 {incident.incidentId}</DialogTitle>
             <DialogDescription>
-              {incident.title}。共 {EVIDENCE_CHAIN.length} 段触发证据，其中 {incident.rawTriggersFolded} 次原始触发已折叠，仅生成 1 张工单。
+              {incident.title}。共 {incident.evidence.length} 段触发证据，其中 {incident.rawTriggersFolded} 次原始触发已折叠，仅生成 1 张工单。
             </DialogDescription>
           </DialogHeader>
           <div className="scrollbar-thin min-h-0 flex-1 overflow-auto rounded-lg border border-border">
@@ -185,7 +217,7 @@ export function IncidentClustering({ onLocate }: IncidentClusteringProps) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {EVIDENCE_CHAIN.map((row) => {
+                {incident.evidence.map((row) => {
                   const role = ROLE_META[row.role]
                   return (
                     <TableRow key={`${row.time}-${row.channelId}-${row.note}`}>

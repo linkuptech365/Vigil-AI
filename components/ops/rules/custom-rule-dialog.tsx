@@ -39,13 +39,17 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
     siren: false,
   })
 
+  const [submitting, setSubmitting] = React.useState(false)
+
   const valid = name.trim().length >= 2 && prompt.trim().length >= 8
 
-  const submit = (event: React.FormEvent) => {
+  const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!valid) return
-    addCustomRule({ name: name.trim(), prompt: prompt.trim(), sensitivity, actions })
-    onDone()
+    if (!valid || submitting) return
+    setSubmitting(true)
+    const created = await addCustomRule({ name: name.trim(), prompt: prompt.trim(), sensitivity, actions })
+    setSubmitting(false)
+    if (created) onDone()
   }
 
   return (
@@ -130,9 +134,9 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
         <Button type="button" variant="outline" onClick={onDone}>
           取消
         </Button>
-        <Button type="submit" disabled={!valid}>
+        <Button type="submit" disabled={!valid || submitting}>
           <WandSparkles data-icon="inline-start" />
-          创建并启用规则
+          {submitting ? "正在写入规则库..." : "创建并启用规则"}
         </Button>
       </div>
     </form>

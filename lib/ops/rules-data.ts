@@ -1,6 +1,4 @@
 import type {
-  ChannelCooldown,
-  CorrelatedIncident,
   DeduplicationMetrics,
   EvidenceTrigger,
   InspectionRule,
@@ -96,43 +94,6 @@ export const INITIAL_DEDUP_METRICS: DeduplicationMetrics = {
 }
 
 export const DEDUP_WINDOW_SECONDS = 60
-
-/** CAM-02 starts mid-window: triggers at 00:00 / 00:08 / 00:15 / 00:23, now 00:41, so 42s of cooldown remain. */
-export const INITIAL_COOLDOWNS: Record<string, ChannelCooldown> = {
-  "CAM-01": { incidentId: null, pulses: [], elapsed: 0, windowSeconds: DEDUP_WINDOW_SECONDS },
-  "CAM-02": {
-    incidentId: "INC-20261020-009",
-    pulses: [
-      { id: 1, offset: 0, kind: "incident" },
-      { id: 2, offset: 8, kind: "suppressed" },
-      { id: 3, offset: 15, kind: "suppressed" },
-      { id: 4, offset: 23, kind: "suppressed" },
-    ],
-    elapsed: 41,
-    windowSeconds: DEDUP_WINDOW_SECONDS,
-  },
-  "CAM-03": { incidentId: null, pulses: [], elapsed: 0, windowSeconds: DEDUP_WINDOW_SECONDS },
-  "CAM-04": { incidentId: null, pulses: [], elapsed: 0, windowSeconds: DEDUP_WINDOW_SECONDS },
-}
-
-export const INITIAL_INCIDENT_SEQ = 9
-
-export const STORM_SCHEDULE_MS = [0, 700, 1500, 2400, 3500, 4800]
-
-export const CORRELATED_INCIDENT: CorrelatedIncident = {
-  incidentId: "INC-20261020-008",
-  title: "东门通道至1号车间逃窜/冲突事件",
-  primaryChannelId: "CAM-02",
-  relatedChannelIds: ["CAM-01"],
-  startTime: "17:42:08",
-  durationSeconds: 38,
-  rawTriggersFolded: 9,
-  spatialAffinity: 92.4,
-  dualKeyframes: [
-    { channelId: "CAM-01", timestamp: "17:42:08", thumbnail: "/ops/cam-01-gate.png" },
-    { channelId: "CAM-02", timestamp: "17:42:46", thumbnail: "/ops/cam-02-workshop.png" },
-  ],
-}
 
 export const CORRELATION_WINDOW_SECONDS = 45
 

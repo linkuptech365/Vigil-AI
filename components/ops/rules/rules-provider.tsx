@@ -1,15 +1,31 @@
 "use client"
 
 import * as React from "react"
+import useSWR, { useSWRConfig } from "swr"
 import { toast } from "sonner"
 
+import type {
+  CreateRuleResponse,
+  RulesListResponse,
+  StormResponse,
+  SuppressResponse,
+  SuppressionSnapshot,
+  UpdateRuleResponse,
+} from "@/lib/ops/rules-api-types"
 import {
+  CLUSTER_ENDPOINT,
+  RULES_ENDPOINT,
+  STORM_ENDPOINT,
+  SUPPRESS_ENDPOINT,
+  errorMessage,
+  getJson,
+  sendJson,
+} from "@/lib/ops/rules-client"
+import {
+  ALL_CHANNELS,
   DEFAULT_CUSTOM_PROMPT,
-  INITIAL_COOLDOWNS,
   INITIAL_DEDUP_METRICS,
-  INITIAL_INCIDENT_SEQ,
   INITIAL_INSPECTION_RULES,
-  STORM_SCHEDULE_MS,
 } from "@/lib/ops/rules-data"
 import type {
   ChannelCooldown,
@@ -19,8 +35,11 @@ import type {
 } from "@/lib/ops/rules-types"
 
 const TICK_MS = 500
-const TICK_SECONDS = TICK_MS / 1000
-const LIVE_BUMP_EVERY_TICKS = 12
+const IDLE_POLL_MS = 5000
+const STORM_POLL_MS = 400
+const STORM_COUNT = 6
+const STORM_SPACING_MS = 500
+const DEFAULT_WINDOW_SECONDS = 60
 
 export function lastTriggerOffset(cd: ChannelCooldown) {
   return cd.pulses.length ? cd.pulses[cd.pulses.length - 1].offset : 0
@@ -35,100 +54,43 @@ export function remainingSeconds(cd: ChannelCooldown) {
   return Math.max(0, Math.ceil(cd.windowSeconds - (cd.elapsed - lastTriggerOffset(cd))))
 }
 
-interface EngineState {
-  cooldowns: Record<string, ChannelCooldown>
-  metrics: DeduplicationMetrics
-  incidentSeq: number
-  pulseSeq: number
+interface TimedSnapshot extends SuppressionSnapshot {
+  receivedAt: number
 }
 
-type EngineAction =
-  | { type: "tick" }
-  | { type: "trigger"; channelId: string }
-  | { type: "bump"; newIncident: boolean }
-
-const INITIAL_ENGINE: EngineState = {
-  cooldowns: INITIAL_COOLDOWNS,
-  metrics: INITIAL_DEDUP_METRICS,
-  incidentSeq: INITIAL_INCIDENT_SEQ,
-  pulseSeq: 100,
+async function fetchSnapshot(url: string): Promise<TimedSnapshot> {
+  const snapshot = await getJson<SuppressionSnapshot>(url)
+  return { ...snapshot, receivedAt: Date.now() }
 }
 
-function incidentLabel(seq: number) {
-  return `INC-20261020-${String(seq).padStart(3, "0")}`
+function idleCooldown(): ChannelCooldown {
+  return { incidentId: null, elapsed: 0, windowSeconds: DEFAULT_WINDOW_SECONDS, pulses: [] }
 }
 
-function engineReducer(state: EngineState, action: EngineAction): EngineState {
-  switch (action.type) {
-    case "tick": {
-      let changed = false
-      const cooldowns: Record<string, ChannelCooldown> = {}
-      for (const [id, cd] of Object.entries(state.cooldowns)) {
-        if (isWindowActive(cd)) {
-          changed = true
-          const last = lastTriggerOffset(cd)
-          const elapsed = Math.min(cd.elapsed + TICK_SECONDS, last + cd.windowSeconds)
-          cooldowns[id] = { ...cd, elapsed }
-        } else {
-          cooldowns[id] = cd
-        }
-      }
-      return changed ? { ...state, cooldowns } : state
+/** Projects the server's window state forward by the time elapsed since it was received. */
+function projectCooldowns(snapshot: TimedSnapshot | undefined, now: number): Record<string, ChannelCooldown> {
+  const result: Record<string, ChannelCooldown> = {}
+  for (const channelId of ALL_CHANNELS) {
+    const status = snapshot?.channels[channelId]
+    if (!snapshot || !status) {
+      result[channelId] = idleCooldown()
+      continue
     }
-    case "trigger": {
-      const cd = state.cooldowns[action.channelId]
-      if (!cd) return state
-      const pulseId = state.pulseSeq + 1
-      if (isWindowActive(cd)) {
-        return {
-          ...state,
-          pulseSeq: pulseId,
-          cooldowns: {
-            ...state.cooldowns,
-            [action.channelId]: {
-              ...cd,
-              pulses: [...cd.pulses, { id: pulseId, offset: cd.elapsed, kind: "suppressed" }],
-            },
-          },
-          metrics: {
-            ...state.metrics,
-            rawTriggersCount: state.metrics.rawTriggersCount + 1,
-            suppressedCount: state.metrics.suppressedCount + 1,
-          },
-        }
-      }
-      const seq = state.incidentSeq + 1
-      return {
-        ...state,
-        incidentSeq: seq,
-        pulseSeq: pulseId,
-        cooldowns: {
-          ...state.cooldowns,
-          [action.channelId]: {
-            ...cd,
-            incidentId: incidentLabel(seq),
-            elapsed: 0,
-            pulses: [{ id: pulseId, offset: 0, kind: "incident" }],
-          },
-        },
-        metrics: {
-          ...state.metrics,
-          rawTriggersCount: state.metrics.rawTriggersCount + 1,
-          incidentCount: state.metrics.incidentCount + 1,
-        },
-      }
+    const pulses = status.pulses.map((pulse) => ({
+      id: pulse.id,
+      offset: pulse.offsetSec,
+      kind: pulse.kind,
+    }))
+    const last = pulses.length ? pulses[pulses.length - 1].offset : 0
+    const drift = Math.max(0, (now - snapshot.receivedAt) / 1000)
+    result[channelId] = {
+      incidentId: status.incidentId,
+      windowSeconds: status.windowSeconds,
+      pulses,
+      elapsed: Math.min(status.elapsedSec + drift, last + status.windowSeconds),
     }
-    case "bump":
-      return {
-        ...state,
-        metrics: {
-          ...state.metrics,
-          rawTriggersCount: state.metrics.rawTriggersCount + 1,
-          suppressedCount: state.metrics.suppressedCount + (action.newIncident ? 0 : 1),
-          incidentCount: state.metrics.incidentCount + (action.newIncident ? 1 : 0),
-        },
-      }
   }
+  return result
 }
 
 export interface CustomRuleInput {
@@ -140,14 +102,17 @@ export interface CustomRuleInput {
 
 interface RulesContextValue {
   rules: InspectionRule[]
-  updateRule: (id: string, patch: Partial<InspectionRule>) => void
-  addCustomRule: (input: CustomRuleInput) => void
+  rulesError: boolean
+  updateRule: (id: string, patch: Partial<InspectionRule>) => Promise<void>
+  addCustomRule: (input: CustomRuleInput) => Promise<boolean>
   metrics: DeduplicationMetrics
   cooldowns: Record<string, ChannelCooldown>
+  engineReady: boolean
+  engineError: boolean
   selectedChannel: string
   setSelectedChannel: (id: string) => void
-  triggerOnce: (channelId: string) => void
-  runStorm: (channelId: string) => void
+  triggerOnce: (channelId: string) => Promise<void>
+  runStorm: (channelId: string) => Promise<void>
   stormRunning: boolean
   customDialogOpen: boolean
   setCustomDialogOpen: (open: boolean) => void
@@ -162,104 +127,137 @@ export function useRules() {
 }
 
 export function RulesProvider({ children }: { children: React.ReactNode }) {
-  const [engine, dispatch] = React.useReducer(engineReducer, INITIAL_ENGINE)
-  const [rules, setRules] = React.useState<InspectionRule[]>(INITIAL_INSPECTION_RULES)
+  const { mutate: mutateGlobal } = useSWRConfig()
   const [selectedChannel, setSelectedChannel] = React.useState("CAM-02")
   const [stormRunning, setStormRunning] = React.useState(false)
   const [customDialogOpen, setCustomDialogOpen] = React.useState(false)
+  const [now, setNow] = React.useState(() => Date.now())
 
-  const engineRef = React.useRef(engine)
+  const { data: rulesData, error: rulesError, mutate: mutateRules } = useSWR<RulesListResponse>(
+    RULES_ENDPOINT,
+    getJson
+  )
+  const {
+    data: snapshot,
+    error: snapshotError,
+    mutate: mutateSnapshot,
+  } = useSWR<TimedSnapshot>(SUPPRESS_ENDPOINT, fetchSnapshot, {
+    refreshInterval: stormRunning ? STORM_POLL_MS : IDLE_POLL_MS,
+    dedupingInterval: 200,
+  })
+
   React.useEffect(() => {
-    engineRef.current = engine
-  }, [engine])
+    const interval = window.setInterval(() => setNow(Date.now()), TICK_MS)
+    return () => window.clearInterval(interval)
+  }, [])
 
-  const stormTimers = React.useRef<number[]>([])
+  const rules = rulesData?.rules ?? INITIAL_INSPECTION_RULES
+  const cooldowns = React.useMemo(() => projectCooldowns(snapshot, now), [snapshot, now])
+  const metrics = snapshot?.metrics ?? INITIAL_DEDUP_METRICS
 
-  React.useEffect(() => {
-    let ticks = 0
-    const interval = window.setInterval(() => {
-      ticks += 1
-      dispatch({ type: "tick" })
-      if (ticks % LIVE_BUMP_EVERY_TICKS === 0) {
-        dispatch({ type: "bump", newIncident: Math.random() < 0.12 })
+  const refreshAfterTrigger = React.useCallback(async () => {
+    await Promise.all([mutateSnapshot(), mutateGlobal(CLUSTER_ENDPOINT)])
+  }, [mutateSnapshot, mutateGlobal])
+
+  const updateRule = React.useCallback(
+    async (id: string, patch: Partial<InspectionRule>) => {
+      try {
+        await mutateRules(
+          async () => {
+            const response = await sendJson<UpdateRuleResponse>(`${RULES_ENDPOINT}/${id}`, "PATCH", patch)
+            return { rules: response.rules }
+          },
+          {
+            optimisticData: (current) => ({
+              rules: (current?.rules ?? INITIAL_INSPECTION_RULES).map((rule) =>
+                rule.id === id ? { ...rule, ...patch } : rule
+              ),
+            }),
+            rollbackOnError: true,
+            populateCache: true,
+            revalidate: false,
+          }
+        )
+      } catch (error) {
+        toast.error("规则更新失败，已回滚", { description: errorMessage(error) })
       }
-    }, TICK_MS)
-    const timers = stormTimers.current
-    return () => {
-      window.clearInterval(interval)
-      timers.forEach((t) => window.clearTimeout(t))
-    }
-  }, [])
+    },
+    [mutateRules]
+  )
 
-  const updateRule = React.useCallback((id: string, patch: Partial<InspectionRule>) => {
-    setRules((prev) => prev.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule)))
-  }, [])
-
-  const addCustomRule = React.useCallback((input: CustomRuleInput) => {
-    setRules((prev) => {
-      const next = prev.length + 1
-      const rule: InspectionRule = {
-        id: `RULE-${String(next).padStart(2, "0")}`,
-        name: input.name,
-        type: "PROMPT_SEMANTIC",
-        prompt: input.prompt,
-        boundChannels: ["CAM-01", "CAM-02", "CAM-03", "CAM-04"],
-        severity: "WARNING",
-        cooldownSeconds: 60,
-        schedule: "24x7",
-        enabled: true,
-        custom: true,
-        sensitivity: input.sensitivity,
-        actions: input.actions,
+  const addCustomRule = React.useCallback(
+    async (input: CustomRuleInput) => {
+      try {
+        const response = await sendJson<CreateRuleResponse>(RULES_ENDPOINT, "POST", input)
+        await mutateRules({ rules: response.rules }, { revalidate: false })
+        toast.success("自定义语义规则已创建并启用", {
+          description: `${response.rule.id} 已写入服务端规则库，默认绑定全部通道，可在规则目录中继续调整。`,
+        })
+        return true
+      } catch (error) {
+        toast.error("规则创建失败", { description: errorMessage(error) })
+        return false
       }
-      return [...prev, rule]
-    })
-    toast.success("自定义语义规则已创建并启用", {
-      description: "新规则默认绑定全部通道，可在规则目录中继续调整。",
-    })
-  }, [])
+    },
+    [mutateRules]
+  )
 
-  const triggerOnce = React.useCallback((channelId: string) => {
-    const cd = engineRef.current.cooldowns[channelId]
-    const wasActive = cd ? isWindowActive(cd) : false
-    dispatch({ type: "trigger", channelId })
-    if (wasActive) {
-      toast.info("重复触发已被抑制", { description: "证据已自动追加到现有工单，未产生新的通知。" })
-    } else {
-      toast.warning("已创建新工单并派发声光告警", { description: `${channelId} 进入 60s 冷却窗口。` })
-    }
-  }, [])
-
-  const runStorm = React.useCallback((channelId: string) => {
-    if (stormTimers.current.length > 0) return
-    const cd = engineRef.current.cooldowns[channelId]
-    const wasActive = cd ? isWindowActive(cd) : false
-    const total = STORM_SCHEDULE_MS.length
-    setStormRunning(true)
-    STORM_SCHEDULE_MS.forEach((delay, index) => {
-      const timer = window.setTimeout(() => {
-        dispatch({ type: "trigger", channelId })
-        if (index === total - 1) {
-          stormTimers.current = []
-          setStormRunning(false)
-          toast.success("告警风暴已被防抖引擎消化", {
-            description: wasActive
-              ? `${total} 次连续触发全部折叠进现有工单，0 条重复通知。`
-              : `${total} 次连续触发 = 1 张正式工单 + ${total - 1} 次折叠追加。`,
+  const triggerOnce = React.useCallback(
+    async (channelId: string) => {
+      try {
+        const response = await sendJson<SuppressResponse>(SUPPRESS_ENDPOINT, "POST", { channelId })
+        if (response.suppressed) {
+          toast.info("重复触发已被服务端抑制", {
+            description: `证据已追加到工单 ${response.incidentId}，剩余冷却 ${response.cooldownRemainingSec} 秒。`,
+          })
+        } else {
+          toast.warning("服务端已创建新工单并派发声光告警", {
+            description: `${response.incidentId} · ${channelId} 进入 ${response.windowSeconds}s 冷却窗口。`,
           })
         }
-      }, delay)
-      stormTimers.current.push(timer)
-    })
-  }, [])
+        await refreshAfterTrigger()
+      } catch (error) {
+        toast.error("触发失败", { description: errorMessage(error) })
+      }
+    },
+    [refreshAfterTrigger]
+  )
+
+  const runStorm = React.useCallback(
+    async (channelId: string) => {
+      if (stormRunning) return
+      setStormRunning(true)
+      try {
+        const response = await sendJson<StormResponse>(STORM_ENDPOINT, "POST", {
+          channelId,
+          count: STORM_COUNT,
+          spacingMs: STORM_SPACING_MS,
+        })
+        toast.success("告警风暴已被防抖引擎消化", {
+          description: response.foldedIntoExisting
+            ? `服务端已将 ${response.total} 次连续触发合并至已有工单 ${response.primaryIncidentId}，剩余冷却 ${response.cooldownRemainingSec} 秒。`
+            : `${response.total} 次连续触发 = ${response.incidentsCreated} 张正式工单 + ${response.suppressedCount} 次折叠追加，剩余冷却 ${response.cooldownRemainingSec} 秒。`,
+        })
+      } catch (error) {
+        toast.error("告警风暴注入失败", { description: errorMessage(error) })
+      } finally {
+        setStormRunning(false)
+        await refreshAfterTrigger()
+      }
+    },
+    [stormRunning, refreshAfterTrigger]
+  )
 
   const value = React.useMemo<RulesContextValue>(
     () => ({
       rules,
+      rulesError: Boolean(rulesError),
       updateRule,
       addCustomRule,
-      metrics: engine.metrics,
-      cooldowns: engine.cooldowns,
+      metrics,
+      cooldowns,
+      engineReady: snapshot !== undefined,
+      engineError: Boolean(snapshotError) && snapshot === undefined,
       selectedChannel,
       setSelectedChannel,
       triggerOnce,
@@ -270,10 +268,13 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       rules,
+      rulesError,
       updateRule,
       addCustomRule,
-      engine.metrics,
-      engine.cooldowns,
+      metrics,
+      cooldowns,
+      snapshot,
+      snapshotError,
       selectedChannel,
       triggerOnce,
       runStorm,
