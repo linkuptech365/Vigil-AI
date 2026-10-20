@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
+import { GlobalErrorBarrier } from "@/components/ops/global-error-barrier"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
@@ -42,6 +43,7 @@ export default function RootLayout({
       )}
     >
       <body>
+        <GlobalErrorBarrier />
         <ThemeProvider forcedTheme="dark" defaultTheme="dark">
           <TooltipProvider>{children}</TooltipProvider>
           <Toaster position="bottom-right" />

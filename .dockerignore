@@ -1,0 +1,15 @@
+node_modules
+.next
+.git
+.gitignore
+.vercel
+.env*
+!.env.example
+*.log
+tsconfig.tsbuildinfo
+Dockerfile
+docker-compose.yml
+.dockerignore
+videos
+user_read_only_context
+v0_memories
