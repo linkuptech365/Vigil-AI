@@ -18,6 +18,14 @@ import type {
   ConnectionTestResponse,
 } from "@/lib/ops/api-types"
 import { postVideoApi } from "@/lib/ops/video-client"
+import {
+  analyzeVlmOnce,
+  formatTimecode,
+  readStoredApiKey,
+  storeApiKey,
+} from "@/lib/ops/vlm-client"
+import type { VlmKeyframeInput } from "@/lib/ops/vlm-api-types"
+import { classifyScenario } from "@/lib/ops/vlm-scenario-match"
 import type {
   ExtractFramesRequest,
   ExtractFramesResponse,
@@ -32,6 +40,7 @@ import type {
   LogLevel,
   LogLine,
   PingState,
+  RuleId,
   ScanInfo,
   Settings,
   VideoItem,
@@ -83,7 +92,27 @@ export function useVigil() {
   return ctx
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const MAX_VLM_FRAMES = 16
+
+function toVlmFrames(video: VideoItem): VlmKeyframeInput[] {
+  const extracted = video.keyframes
+  if (extracted && extracted.length > 0) {
+    const stride = Math.max(1, Math.ceil(extracted.length / MAX_VLM_FRAMES))
+    return extracted
+      .filter((_, i) => i % stride === 0)
+      .map((k) => ({
+        index: k.index,
+        timestampSec: k.timestampSec,
+        timecode: k.timecode,
+        motionScore: k.motionScore,
+      }))
+  }
+  const count = Math.min(8, Math.max(2, Math.ceil(video.durationSec / 3)))
+  return Array.from({ length: count }, (_, i) => {
+    const timestampSec = Number(((video.durationSec * (i + 0.5)) / count).toFixed(1))
+    return { index: i, timestampSec, timecode: formatTimecode(timestampSec) }
+  })
+}
 
 function toQueueItem(scanned: ScannedVideoItem, scanRoot: string): VideoItem {
   return {
@@ -143,7 +172,7 @@ function readVideoDuration(file: File): Promise<number> {
 export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS)
   const [hydrated, setHydrated] = React.useState(false)
-  const [apiKey, setApiKey] = React.useState("")
+  const [apiKey, setApiKeyState] = React.useState("")
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
   const [lastScan, setLastScan] = React.useState<string | null>(null)
@@ -195,7 +224,13 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
     }
+    setApiKeyState(readStoredApiKey())
     setHydrated(true)
+  }, [])
+
+  const setApiKey = React.useCallback((value: string) => {
+    setApiKeyState(value)
+    storeApiKey(value)
   }, [])
 
   React.useEffect(() => {
@@ -406,7 +441,6 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           "info",
           `▶ ${video.name}  (${formatDuration(video.durationSec)}, ${video.sizeMB.toFixed(1)} MB, ${video.fps}fps)`
         )
-        await sleep(450)
         if (video.source === "disk") {
           try {
             const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
@@ -431,69 +465,95 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             `ffmpeg -i "${video.name}" -vf fps=${s.samplingFps},scale=640:-1 → 抽取 ${frames} 帧`
           )
         }
-        await sleep(600)
+        const vlmFrames = toVlmFrames({ ...video, keyframes })
+        const truth = video.truth
         pushLog(
           "req",
-          `POST ${s.apiUrl || "(未配置端点)"}  {"model":"${model}","frames":${frames},"rules":[${enabled
+          `POST /api/v1/vlm/analyze  model=${model}  frames=${vlmFrames.length}  rules=[${enabled
             .map((r) => `"${r}"`)
-            .join(",")}],"threshold":${s.threshold.toFixed(2)}}`
+            .join(",")}]  threshold=${s.threshold.toFixed(2)}`
         )
-        if (!apiKey) {
+        if (!apiKeyRef.current) {
           pushLog("warn", "未设置 API Key，以匿名模式调用（本地网关可忽略此提示）。")
         }
-        await sleep(900 + Math.random() * 700)
 
-        const t = video.truth
-        const latency = Math.round(620 + Math.random() * 900)
-        let status: VideoItem["status"] = "safe"
-        let ruleId = undefined as VideoItem["ruleId"]
-        let suppressedReason: string | undefined
+        const { result, metrics } = await analyzeVlmOnce({
+          keyframes: vlmFrames,
+          apiUrl: s.apiUrl.trim() || undefined,
+          apiKey: apiKeyRef.current || undefined,
+          modelName: model,
+          ruleScenario: enabled.map((id) => RULES[id].scenarioLabel).join("、"),
+          simulation: {
+            scenario: truth.ruleId ? RULES[truth.ruleId].scenarioLabel : "画面正常",
+            confidence: truth.confidence,
+          },
+        })
+        const reasoning = result.intentAnalysis
 
-        if (t.ruleId && s.rules[t.ruleId]) {
-          if (t.confidence >= s.threshold) {
-            status = "alert"
-            ruleId = t.ruleId
-          } else {
-            ruleId = t.ruleId
-            suppressedReason = `疑似「${RULES[t.ruleId].ruleName}」，置信度 ${Math.round(
-              t.confidence * 100
-            )}% 低于阈值 ${Math.round(s.threshold * 100)}%，未触发预警`
-          }
-        } else if (t.ruleId) {
-          suppressedReason = `检出场景「${RULES[t.ruleId].scenarioLabel}」已在配置中关闭，结果被忽略`
+        if (metrics.source === "fallback") {
+          pushLog("warn", `未使用远端模型：${metrics.fallbackReason ?? "未配置可用端点"}，已切换离线模拟引擎。`)
         }
-
-        pushLog("res", `200 OK  ${latency}ms`)
         pushLog(
           "res",
-          `{"violation":${status === "alert"},"rule":${
-            ruleId ? `"${ruleId}"` : "null"
-          },"confidence":${t.confidence.toFixed(2)}}`
+          `200 OK  ${metrics.rttMs}ms  source=${metrics.source}  tokens=${metrics.promptTokens}+${metrics.outputTokens}`
         )
-        await sleep(250)
+        pushLog(
+          "res",
+          `{"severity":"${result.severity}","rule":"${result.ruleTriggered}","confidence":${result.confidence.toFixed(2)}}`
+        )
+
+        const kind = classifyScenario(`${result.ruleTriggered} ${result.summary}`)
+        const detected: RuleId | undefined =
+          result.severity === "SAFE" || kind === "safe" || kind === "crowd" ? undefined : kind
+        let status: VideoItem["status"] = "safe"
+        let ruleId: VideoItem["ruleId"]
+        let suppressedReason: string | undefined
+
+        if (result.severity !== "SAFE") {
+          if (detected && s.rules[detected]) {
+            ruleId = detected
+            if (result.confidence >= s.threshold) {
+              status = "alert"
+            } else {
+              suppressedReason = `疑似「${RULES[detected].ruleName}」，置信度 ${Math.round(
+                result.confidence * 100
+              )}% 低于阈值 ${Math.round(s.threshold * 100)}%，未触发预警`
+            }
+          } else if (detected) {
+            suppressedReason = `检出场景「${RULES[detected].scenarioLabel}」已在配置中关闭，结果被忽略`
+          } else {
+            suppressedReason = `模型判定「${result.ruleTriggered}」不在已启用的规则范围内，未触发预警`
+          }
+        }
 
         patchVideo(video.id, {
           status,
           ruleId,
-          confidence: t.confidence,
+          confidence: result.confidence,
           suppressedReason,
           samplingFps: s.samplingFps,
           frames,
           keyframes,
           keyframeWindow,
+          vlmReport: { result, metrics, reasoning },
           analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
         })
 
         if (status === "alert" && ruleId) {
           pushLog(
             "alert",
-            `触发预警 [${RULES[ruleId].ruleName}]  conf=${Math.round(t.confidence * 100)}%  ← ${video.name}`
+            `触发预警 [${RULES[ruleId].ruleName}]  conf=${Math.round(result.confidence * 100)}%  ← ${video.name}`
           )
         } else if (suppressedReason) {
           pushLog("warn", suppressedReason)
         } else {
           pushLog("ok", `分析完成：未发现违规行为  ← ${video.name}`)
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "分析失败"
+        patchVideo(video.id, { status: "pending" })
+        pushLog("warn", `分析失败：${message}  ← ${video.name}`)
+        toast.error(`${video.name} 分析失败`, { description: message })
       } finally {
         busyRef.current.delete(video.id)
       }
@@ -628,6 +688,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       updateSettings,
       applyPreset,
       apiKey,
+      setApiKey,
       ping,
       runPing,
       modelName,

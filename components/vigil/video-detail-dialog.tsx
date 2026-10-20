@@ -41,6 +41,31 @@ export function VideoDetailDialog() {
   const video = queue.find((v) => v.id === selectedId)
   const open = Boolean(video && (video.status === "alert" || video.status === "safe"))
   const rule = video?.status === "alert" && video.ruleId ? RULES[video.ruleId] : null
+  const report = video?.vlmReport
+  const reportedModel = report?.metrics.model ?? modelName
+  const sourceLabel = report ? (report.metrics.source === "remote" ? "远端模型" : "离线模拟") : null
+
+  const reportEvidence =
+    video && report && video.keyframes
+      ? report.result.evidenceKeyframes.flatMap((index) => {
+          const frame = video.keyframes?.find((k) => k.index === index)
+          return frame
+            ? [
+                {
+                  at: video.durationSec > 0 ? frame.timestampSec / video.durationSec : 0,
+                  sec: frame.timestampSec,
+                  text: `关键帧 #${frame.index}（${frame.timecode}）被模型引用为证据`,
+                },
+              ]
+            : []
+        })
+      : []
+  const evidencePoints =
+    rule && video
+      ? reportEvidence.length > 0
+        ? reportEvidence
+        : rule.evidence.map((ev) => ({ at: ev.at, sec: ev.at * video.durationSec, text: ev.text }))
+      : []
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && setSelectedId(null)}>
@@ -78,21 +103,23 @@ export function VideoDetailDialog() {
                 {rule ? (
                   <>
                     <Section icon={ClipboardList} title="事件概述">
-                      <p className="text-sm leading-relaxed text-muted-foreground">{rule.brief}</p>
+                      <p className="text-sm leading-relaxed text-muted-foreground">
+                        {report?.result.summary ?? rule.brief}
+                      </p>
                       <div className="relative mt-2 h-8 rounded-md bg-secondary" aria-hidden="true">
-                        {rule.evidence.map((ev) => (
+                        {evidencePoints.map((ev, i) => (
                           <span
-                            key={ev.at}
+                            key={`${ev.sec}-${i}`}
                             className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-destructive ring-4 ring-destructive/25"
-                            style={{ left: `${ev.at * 100}%` }}
+                            style={{ left: `${Math.min(1, Math.max(0, ev.at)) * 100}%` }}
                           />
                         ))}
                       </div>
                       <ul className="flex flex-col gap-1.5">
-                        {rule.evidence.map((ev) => (
-                          <li key={ev.at} className="flex gap-3 text-sm">
+                        {evidencePoints.map((ev, i) => (
+                          <li key={`${ev.sec}-${i}`} className="flex gap-3 text-sm">
                             <span className="shrink-0 font-mono text-destructive">
-                              T+{(ev.at * video.durationSec).toFixed(1)}s
+                              T+{ev.sec.toFixed(1)}s
                             </span>
                             <span className="text-muted-foreground">{ev.text}</span>
                           </li>
@@ -100,34 +127,58 @@ export function VideoDetailDialog() {
                       </ul>
                     </Section>
 
-                    <Section icon={Cpu} title={`模型推理依据 (${modelName})`}>
+                    <Section icon={Cpu} title={`模型推理依据 (${reportedModel})`}>
                       <p className="rounded-lg border border-border bg-secondary/50 p-3 text-sm leading-relaxed text-muted-foreground">
-                        {rule.reasoning}
+                        {report?.result.intentAnalysis ?? rule.reasoning}
                       </p>
+                      {report && report.result.violationClauses.length > 0 && (
+                        <p className="text-sm text-muted-foreground">
+                          合规扣分项：{report.result.violationClauses.join("；")}
+                        </p>
+                      )}
                       <p className="font-mono text-xs text-muted-foreground">
-                        采样 {video.samplingFps} FPS · 共 {video.frames} 帧 · 分析于{" "}
+                        {sourceLabel ? `${sourceLabel} · ` : ""}采样 {video.samplingFps} FPS · 共 {video.frames} 帧 · 分析于{" "}
                         {video.analyzedAt}
                       </p>
+                      {report?.metrics.source === "fallback" && (
+                        <p className="text-xs text-warning" role="status">
+                          未使用远端模型{report.metrics.fallbackReason ? `：${report.metrics.fallbackReason}` : ""}
+                          。本结果为离线模拟，不代表真实模型判断。
+                        </p>
+                      )}
                     </Section>
 
                     <Section icon={ListChecks} title="建议处置措施">
-                      <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-primary">
-                        {rule.actions.map((action) => (
-                          <li key={action}>{action}</li>
-                        ))}
-                      </ol>
+                      {report?.result.actionAdvice ? (
+                        <p className="text-sm leading-relaxed text-muted-foreground">
+                          {report.result.actionAdvice}
+                        </p>
+                      ) : (
+                        <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-primary">
+                          {rule.actions.map((action) => (
+                            <li key={action}>{action}</li>
+                          ))}
+                        </ol>
+                      )}
                     </Section>
                   </>
                 ) : (
-                  <Section icon={Cpu} title={`模型推理依据 (${modelName})`}>
+                  <Section icon={Cpu} title={`模型推理依据 (${reportedModel})`}>
                     <p className="rounded-lg border border-border bg-secondary/50 p-3 text-sm leading-relaxed text-muted-foreground">
                       {video.suppressedReason ??
+                        report?.result.intentAnalysis ??
                         "模型对全部采样帧完成逐帧推理，未检测到与已启用规则匹配的异常行为，人员活动与环境状态均处于正常范围。"}
                     </p>
                     <p className="font-mono text-xs text-muted-foreground">
-                      采样 {video.samplingFps} FPS · 共 {video.frames} 帧 · 分析于{" "}
+                      {sourceLabel ? `${sourceLabel} · ` : ""}采样 {video.samplingFps} FPS · 共 {video.frames} 帧 · 分析于{" "}
                       {video.analyzedAt}
                     </p>
+                    {report?.metrics.source === "fallback" && (
+                      <p className="text-xs text-warning" role="status">
+                        未使用远端模型{report.metrics.fallbackReason ? `：${report.metrics.fallbackReason}` : ""}
+                        。本结果为离线模拟，不代表真实模型判断。
+                      </p>
+                    )}
                   </Section>
                 )}
               </div>

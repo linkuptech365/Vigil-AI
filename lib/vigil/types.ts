@@ -1,3 +1,4 @@
+import type { VlmAnalysisReport } from "@/lib/ops/vlm-api-types"
 import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
 
 export type RuleId = "violence" | "ppe" | "fire" | "intrusion"
@@ -36,6 +37,8 @@ export interface VideoItem {
   durationEstimated?: boolean
   keyframes?: ExtractedKeyframe[]
   keyframeWindow?: { startSec: number; endSec: number }
+  /** 由 /api/v1/vlm/analyze 返回的真实（或离线兜底）研判报告 */
+  vlmReport?: VlmAnalysisReport
 }
 
 export interface FrameTestState {

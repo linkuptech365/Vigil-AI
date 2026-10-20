@@ -25,6 +25,8 @@ export interface VlmReasoningResult {
   summary: string
   reasoningChain: string[]
   evidenceKeyframes: number[]
+  violationClauses: string[]
+  actionAdvice: string
   rawJson: Record<string, unknown>
   tokenUsage: VlmTokenUsage
 }

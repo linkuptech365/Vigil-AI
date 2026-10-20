@@ -65,8 +65,9 @@ function ChainSteps({ steps }: { steps: string[] }) {
 }
 
 function Verdict() {
-  const { result, scenario } = useVlm()
-  if (!result || !scenario) return null
+  const { result } = useVlm()
+  if (!result) return null
+  const hasClauses = result.violationClauses.length > 0
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -89,13 +90,29 @@ function Verdict() {
           <Progress value={result.confidence} aria-label="模型置信度" className="h-1.5" />
         </div>
       </div>
-      <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 sm:col-span-2">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+      <div
+        className={cn(
+          "flex items-start gap-2 rounded-md border p-3 sm:col-span-2",
+          hasClauses ? "border-destructive/30 bg-destructive/10" : "border-border bg-background"
+        )}
+      >
+        <ShieldAlert
+          className={cn("mt-0.5 size-4 shrink-0", hasClauses ? "text-destructive" : "text-muted-foreground")}
+          aria-hidden="true"
+        />
         <div className="flex flex-col gap-0.5">
           <span className="text-xs text-muted-foreground">安全生产合规扣分项</span>
-          <span className="text-sm font-medium">{scenario.clause}</span>
+          <span className="text-sm font-medium">
+            {hasClauses ? result.violationClauses.join("；") : "未触发合规扣分项"}
+          </span>
         </div>
       </div>
+      {result.actionAdvice && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-border bg-background p-3 sm:col-span-2">
+          <span className="text-xs text-muted-foreground">现场安保建议</span>
+          <p className="text-sm leading-relaxed">{result.actionAdvice}</p>
+        </div>
+      )}
     </div>
   )
 }

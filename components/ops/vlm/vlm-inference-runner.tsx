@@ -26,9 +26,9 @@ function formatUsd(value: number) {
 }
 
 function MetricsBadge() {
-  const { phase, promptTokens, completionTokens, result, model } = useVlm()
-  const rtt = result ? `${(model.latencyMs / 1000).toFixed(2)}s` : "--"
-  const cost = ((promptTokens + completionTokens) / 1000) * model.costPer1kTokens
+  const { phase, promptTokens, completionTokens, metrics, model } = useVlm()
+  const rtt = metrics ? `${(metrics.rttMs / 1000).toFixed(2)}s` : "--"
+  const cost = metrics ? metrics.costUsd : ((promptTokens + completionTokens) / 1000) * model.costPer1kTokens
   const showCost = phase !== "idle"
 
   const items = [
@@ -70,7 +70,7 @@ function StreamLine({ line }: { line: string }) {
 }
 
 function StreamOutput() {
-  const { phase, streamText } = useVlm()
+  const { phase, streamText, thinkingMessage, metrics } = useVlm()
   const scrollRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
@@ -82,11 +82,11 @@ function StreamOutput() {
     <div className="flex flex-col overflow-hidden rounded-lg border border-border bg-background">
       <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
         <span className="font-mono text-muted-foreground">model_output.stream</span>
-        <span className="flex items-center gap-1.5 text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
           {phase === "thinking" && (
             <>
-              <Spinner className="size-3" />
-              Thinking
+              <Spinner className="size-3 shrink-0" />
+              <span className="truncate">{thinkingMessage || "Thinking"}</span>
             </>
           )}
           {phase === "streaming" && (
@@ -95,10 +95,30 @@ function StreamOutput() {
               Streaming
             </>
           )}
-          {phase === "done" && <span className="text-success">Completed</span>}
+          {phase === "done" && (
+            <>
+              <span className="text-success">Completed</span>
+              {metrics && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "font-mono",
+                    metrics.source === "remote" ? "border-signal/50 text-signal" : "border-warning/50 text-warning"
+                  )}
+                >
+                  {metrics.source === "remote" ? "远端模型" : "离线模拟"}
+                </Badge>
+              )}
+            </>
+          )}
           {phase === "idle" && "Idle"}
         </span>
       </div>
+      {phase === "done" && metrics?.source === "fallback" && metrics.fallbackReason && (
+        <p className="border-b border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-warning" role="status">
+          未使用远端模型：{metrics.fallbackReason}。以下为内置启发式引擎的离线模拟结果，不代表真实模型判断。
+        </p>
+      )}
       <div
         ref={scrollRef}
         className="scrollbar-thin h-56 overflow-y-auto p-3 font-mono text-xs leading-relaxed"
@@ -137,7 +157,7 @@ function StreamOutput() {
 }
 
 function FrameStrip() {
-  const { activeClip, scenario, phase, result } = useVlm()
+  const { activeClip, scenario, phase, evidenceFrames } = useVlm()
   const [selected, setSelected] = React.useState(0)
   const camera = CAMERAS.find((c) => c.id === activeClip?.cameraId)
 
@@ -147,8 +167,8 @@ function FrameStrip() {
 
   if (!activeClip || !scenario || !camera) return null
 
-  const showEvidence = phase === "streaming" || phase === "done"
-  const evidence = result?.evidenceKeyframes ?? scenario.evidence
+  const evidence = evidenceFrames ?? []
+  const showEvidence = evidence.length > 0
 
   return (
     <div className="flex flex-col gap-2">

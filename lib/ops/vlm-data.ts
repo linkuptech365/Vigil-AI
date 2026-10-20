@@ -5,7 +5,6 @@ import type {
   RagCorpusEntry,
   RagSearchResult,
   VlmModelConfig,
-  VlmReasoningResult,
   VlmScenario,
   VlmSeverity,
 } from "./vlm-types"
@@ -45,22 +44,13 @@ export const VLM_MODELS: VlmModelConfig[] = [
   },
 ]
 
-const MODEL_TOKEN_PROFILE: Record<string, { prompt: number; completion: number; confidenceDelta: number }> = {
-  "qwen2.5-vl-72b": { prompt: 2420, completion: 168, confidenceDelta: 0 },
-  "gpt-4o-mini-video": { prompt: 2864, completion: 154, confidenceDelta: -2.8 },
-  "gemini-1.5-flash": { prompt: 2310, completion: 182, confidenceDelta: -1.7 },
-  "internvideo2-chat": { prompt: 1980, completion: 141, confidenceDelta: -4.3 },
-}
-
-const REASON_TOKEN_FACTOR: Record<ClipReason, number> = {
-  fall_suspect: 1,
-  roi_breach: 0.94,
-  crowd_anomaly: 1.06,
-}
-
 const FRAME_MARKS = [3.2, 6.4, 9.6, 12.8, 16.0, 19.2, 21.6, 24.0]
 
 export const FRAME_COUNT = FRAME_MARKS.length
+
+export function frameSeconds(index: number) {
+  return FRAME_MARKS[index] ?? 0
+}
 
 export function frameMark(index: number) {
   const seconds = FRAME_MARKS[index] ?? 0
@@ -177,81 +167,6 @@ export function eventIdOf(clip: EscalationClip) {
 export function candidateLabel(clip: EscalationClip) {
   const camera = CAMERAS.find((c) => c.id === clip.cameraId)
   return `${eventIdOf(clip)}: ${camera?.name ?? clip.cameraId} · ${SCENARIOS[clip.reason].title}`
-}
-
-export function buildResult(clip: EscalationClip, model: VlmModelConfig): VlmReasoningResult {
-  const scenario = SCENARIOS[clip.reason]
-  const profile = MODEL_TOKEN_PROFILE[model.id] ?? MODEL_TOKEN_PROFILE["qwen2.5-vl-72b"]
-  const factor = REASON_TOKEN_FACTOR[clip.reason]
-  const prompt = Math.round(profile.prompt * factor)
-  const completion = Math.round(profile.completion * factor)
-  const totalCost = ((prompt + completion) / 1000) * model.costPer1kTokens
-  const confidence = Math.round((scenario.baseConfidence + profile.confidenceDelta) * 10) / 10
-  const eventId = eventIdOf(clip)
-
-  return {
-    eventId,
-    channelId: clip.cameraId,
-    modelUsed: model.name,
-    confidence,
-    severity: scenario.severity,
-    summary: scenario.intent,
-    reasoningChain: scenario.chain,
-    evidenceKeyframes: scenario.evidence,
-    tokenUsage: { prompt, completion, totalCost },
-    rawJson: {
-      schema_version: "vigil.vlm.v1",
-      event_id: eventId,
-      channel_id: clip.cameraId,
-      source_clip: clip.id,
-      model: model.name,
-      severity: scenario.severity,
-      confidence: confidence / 100,
-      behavior: {
-        type: scenario.title,
-        intent: scenario.intent,
-      },
-      evidence_keyframes: scenario.evidence.map((i) => ({
-        index: i + 1,
-        offset: frameTag(i),
-        timestamp: frameMark(i),
-      })),
-      violated_clause: scenario.clause,
-      recommended_actions: scenario.actions,
-      tier1_trigger: clip.reason,
-      token_usage: { prompt, completion },
-      latency_ms: model.latencyMs,
-      human_review_required: scenario.severity === "CRITICAL",
-    },
-  }
-}
-
-export function composeStreamText(result: VlmReasoningResult, scenario: VlmScenario) {
-  const summary = JSON.stringify(
-    {
-      severity: result.severity,
-      confidence: result.confidence / 100,
-      evidence_keyframes: result.evidenceKeyframes.map((i) => i + 1),
-      violated_clause: scenario.clause,
-    },
-    null,
-    2
-  )
-
-  return [
-    "### 时序观察",
-    ...result.reasoningChain.slice(0, -1).map((line) => `- ${line}`),
-    "",
-    "### 行为意图研判",
-    result.summary,
-    "",
-    "### 研判结论",
-    `${result.reasoningChain[result.reasoningChain.length - 1]}`,
-    "",
-    "```json",
-    summary,
-    "```",
-  ].join("\n")
 }
 
 export const RAG_INDEX = {
