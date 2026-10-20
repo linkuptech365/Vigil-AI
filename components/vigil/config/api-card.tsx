@@ -84,22 +84,28 @@ export function ApiCard() {
                 disabled={ping.state === "testing"}
               >
                 {ping.state === "testing" && <Spinner data-icon="inline-start" />}
-                {ping.state === "testing" ? "测试中..." : "测试连通性"}
+                {ping.state === "testing" ? "正在测通真实端点..." : "测试 API 连通性"}
               </Button>
             </div>
             <div aria-live="polite" className="min-h-5 text-sm">
+              {ping.state === "testing" && (
+                <p className="flex items-center gap-1.5 text-muted-foreground">
+                  <Spinner />
+                  <span className="font-mono">正在测通真实端点...</span>
+                </p>
+              )}
               {ping.state === "ok" && (
-                <p className="flex items-center gap-1.5 text-success">
-                  <CircleCheck className="size-4" aria-hidden="true" />
+                <p className="flex items-start gap-1.5 text-success">
+                  <CircleCheck className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                   <span className="font-mono">
-                    200 OK · {ping.latency}ms · {ping.model}
+                    ● 握手成功 (RTT: {ping.latency}ms | {ping.model})
                   </span>
                 </p>
               )}
               {ping.state === "error" && (
-                <p className="flex items-center gap-1.5 text-destructive">
-                  <CircleAlert className="size-4" aria-hidden="true" />
-                  {ping.message}
+                <p className="flex items-start gap-1.5 text-destructive">
+                  <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  <span className="font-mono">✕ 连通失败 ({ping.message})</span>
                 </p>
               )}
             </div>

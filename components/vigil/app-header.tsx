@@ -9,16 +9,20 @@ import { cn } from "@/lib/utils"
 import { shortFolder } from "@/lib/vigil/data"
 import { useVigil } from "./vigil-provider"
 
-function StatusDot({ active }: { active: boolean }) {
+type DotTone = "ok" | "error" | "idle"
+
+function StatusDot({ tone }: { tone: DotTone }) {
   return (
     <span className="relative flex size-2">
-      {active && (
+      {tone === "ok" && (
         <span className="absolute inline-flex size-full animate-ping rounded-full bg-success opacity-70" />
       )}
       <span
         className={cn(
           "relative inline-flex size-2 rounded-full",
-          active ? "bg-success" : "bg-muted-foreground/60"
+          tone === "ok" && "bg-success",
+          tone === "error" && "bg-destructive",
+          tone === "idle" && "bg-muted-foreground/60"
         )}
       />
     </span>
@@ -27,7 +31,8 @@ function StatusDot({ active }: { active: boolean }) {
 
 export function AppHeader() {
   const { ping, settings } = useVigil()
-  const connected = ping.state === "ok"
+  const tone: DotTone =
+    ping.state === "ok" ? "ok" : ping.state === "error" ? "error" : "idle"
 
   return (
     <header className="flex flex-col gap-4 py-5 lg:flex-row lg:items-center lg:justify-between">
@@ -63,15 +68,18 @@ export function AppHeader() {
           variant="outline"
           className={cn(
             "h-7 gap-2 px-3 font-mono text-xs",
-            connected
-              ? "border-success/40 bg-success/10 text-success"
-              : "border-border bg-secondary text-muted-foreground"
+            tone === "ok" && "border-success/40 bg-success/10 text-success",
+            tone === "error" && "border-destructive/40 bg-destructive/10 text-destructive",
+            tone === "idle" && "border-border bg-secondary text-muted-foreground"
           )}
           role="status"
           aria-live="polite"
         >
-          <StatusDot active={connected} />
-          {connected ? `API: 200 OK - ${ping.model}` : "API: 未连接"}
+          <StatusDot tone={tone} />
+          {ping.state === "ok" && `API: 握手成功 · ${ping.latency}ms`}
+          {ping.state === "error" && "API: 连通失败"}
+          {ping.state === "testing" && "API: 测通中..."}
+          {ping.state === "idle" && "API: 未连接"}
         </Badge>
         <Badge
           variant="outline"

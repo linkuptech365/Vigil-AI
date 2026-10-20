@@ -51,5 +51,5 @@ export interface Settings {
 export type PingState =
   | { state: "idle" }
   | { state: "testing" }
-  | { state: "ok"; latency: number; model: string }
+  | { state: "ok"; latency: number; model: string; message: string }
   | { state: "error"; message: string }

@@ -14,6 +14,10 @@ import {
   hashString,
   truthForLocalFile,
 } from "@/lib/vigil/data"
+import type {
+  ConnectionTestRequest,
+  ConnectionTestResponse,
+} from "@/lib/ops/api-types"
 import { RULES, RULE_IDS } from "@/lib/vigil/rules"
 import type {
   LogLevel,
@@ -110,6 +114,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [activeTab, setActiveTab] = React.useState<TabId>("config")
 
   const settingsRef = React.useRef(settings)
+  const apiKeyRef = React.useRef(apiKey)
   const busyRef = React.useRef(new Set<string>())
   const logId = React.useRef(0)
   const booted = React.useRef(false)
@@ -117,6 +122,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     settingsRef.current = settings
   }, [settings])
+
+  React.useEffect(() => {
+    apiKeyRef.current = apiKey
+  }, [apiKey])
 
   const pushLog = React.useCallback((level: LogLevel, text: string) => {
     logId.current += 1
@@ -176,28 +185,44 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     const { apiUrl, presetId } = settingsRef.current
     const model = API_PRESETS.find((p) => p.id === presetId)?.model ?? "Qwen2.5-VL"
     setPing({ state: "testing" })
-    pushLog("req", `HEAD ${apiUrl || "(empty)"}  → 连通性探测`)
-    await sleep(1000 + Math.random() * 600)
+    pushLog("req", `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}`)
 
-    let valid = false
+    const reportFailure = (message: string) => {
+      setPing({ state: "error", message })
+      pushLog("warn", `连通失败：${message}`)
+      toast.error("API 连通失败", {
+        description: `${message}。请检查端点地址拼写或网络防火墙。`,
+      })
+    }
+
     try {
-      const parsed = new URL(apiUrl.trim())
-      valid = parsed.protocol === "http:" || parsed.protocol === "https:"
+      const response = await fetch("/api/v1/test-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiUrl,
+          apiKey: apiKeyRef.current || undefined,
+          modelName: model,
+        } satisfies ConnectionTestRequest),
+        signal: AbortSignal.timeout(8000),
+      })
+      const result = (await response.json()) as ConnectionTestResponse
+
+      if (result.status === "success") {
+        setPing({
+          state: "ok",
+          latency: result.rttMs,
+          model: result.modelDetected,
+          message: result.message,
+        })
+        pushLog("ok", `握手成功  RTT ${result.rttMs}ms  model=${result.modelDetected}  ${result.message}`)
+        toast.success(`API 握手成功 · RTT ${result.rttMs}ms`, { description: result.message })
+        return
+      }
+      reportFailure(result.message)
     } catch {
-      valid = false
+      reportFailure("无法连接 Vigil-AI 网关或网关响应超时")
     }
-
-    if (!valid) {
-      setPing({ state: "error", message: "无法解析 API 端点，请检查 URL 格式" })
-      pushLog("warn", "ERR_INVALID_URL 端点地址无效，连通性测试失败。")
-      toast.error("API 连通性测试失败", { description: "端点地址格式无效" })
-      return
-    }
-
-    const latency = Math.round(28 + Math.random() * 40)
-    setPing({ state: "ok", latency, model })
-    pushLog("ok", `200 OK  RTT ${latency}ms  model=${model}`)
-    toast.success(`API 连通正常 · RTT ${latency}ms`)
   }, [pushLog])
 
   const scanFolder = React.useCallback(async () => {
