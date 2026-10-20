@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { toast } from "sonner"
-import { Cable, LayoutGrid, ScanEye, Sparkles } from "lucide-react"
+import { Cable, LayoutGrid, ScanEye, ShieldCheck, Sparkles } from "lucide-react"
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -16,6 +16,7 @@ import { OpsProvider, useOps } from "./ops-provider"
 import { PerceptionProvider } from "./perception/perception-provider"
 import { PerceptionTab } from "./perception/perception-tab"
 import { RuleStudioModal } from "./rule-studio-modal"
+import { RulesTab } from "./rules/rules-tab"
 import { VideoSearchBar } from "./video-search-bar"
 import { VlmTab } from "./vlm/vlm-tab"
 
@@ -55,6 +56,10 @@ function OpsShell() {
                 <Sparkles aria-hidden="true" />
                 二级多模态研判
               </TabsTrigger>
+              <TabsTrigger value="rules" className="gap-1.5 px-3">
+                <ShieldCheck aria-hidden="true" />
+                规则与防抖引擎
+              </TabsTrigger>
             </TabsList>
           </div>
           <TabsContent
@@ -75,6 +80,9 @@ function OpsShell() {
           </TabsContent>
           <TabsContent value="vlm" className="flex min-h-0 flex-1 flex-col">
             <VlmTab onLocate={locateInMonitor} />
+          </TabsContent>
+          <TabsContent value="rules" className="flex min-h-0 flex-1 flex-col">
+            <RulesTab onLocate={locateInMonitor} />
           </TabsContent>
         </Tabs>
       </div>
