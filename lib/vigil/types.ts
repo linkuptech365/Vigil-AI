@@ -15,6 +15,13 @@ export interface Truth {
   confidence: number
 }
 
+export interface ChunkProgress {
+  /** 正在分析的切片编号，从 1 起 */
+  index: number
+  total: number
+  percent: number
+}
+
 export interface VideoItem {
   id: string
   name: string
@@ -45,6 +52,10 @@ export interface VideoItem {
   evidenceFrameTotal?: number
   /** 证据帧所属的动作区间，如 "00:11 - 00:21" */
   motionSegment?: string
+  /** 超长视频分段分析时的实时进度；分析结束后清空 */
+  chunkProgress?: ChunkProgress
+  /** 全片累计触发的预警事件数（按事件 ID 去重，冷却窗口内的重复触发不重复计） */
+  alertEventCount?: number
   analyzedAt?: string
   samplingFps?: number
   frames?: number

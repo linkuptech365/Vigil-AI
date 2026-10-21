@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
 import { SEVERITY_LABEL } from "@/lib/vigil/rules"
-import type { Severity, VideoStatus } from "@/lib/vigil/types"
+import type { ChunkProgress, Severity, VideoStatus } from "@/lib/vigil/types"
 
 const STATUS_STYLE: Record<VideoStatus, string> = {
   pending: "border-border bg-secondary text-muted-foreground",
@@ -13,7 +13,11 @@ const STATUS_STYLE: Record<VideoStatus, string> = {
   alert: "border-destructive/50 bg-destructive/10 text-destructive",
 }
 
-export function VideoStatusBadge({ status }: { status: VideoStatus }) {
+export function chunkProgressLabel(progress: ChunkProgress) {
+  return `切片 ${progress.index}/${progress.total} (${progress.percent}%)`
+}
+
+export function VideoStatusBadge({ status, progress }: { status: VideoStatus; progress?: ChunkProgress }) {
   return (
     <Badge variant="outline" className={cn("gap-1.5", STATUS_STYLE[status])}>
       {status === "pending" && (
@@ -25,7 +29,7 @@ export function VideoStatusBadge({ status }: { status: VideoStatus }) {
       {status === "analyzing" && (
         <>
           <Spinner aria-hidden="true" />
-          推理中...
+          {progress ? chunkProgressLabel(progress) : "推理中..."}
         </>
       )}
       {status === "safe" && (

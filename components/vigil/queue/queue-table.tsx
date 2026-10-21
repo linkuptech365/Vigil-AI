@@ -15,7 +15,7 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
 import type { VideoItem } from "@/lib/vigil/types"
-import { VideoStatusBadge } from "../status-badges"
+import { chunkProgressLabel, VideoStatusBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
 
 export function QueueTable({ videos }: { videos?: VideoItem[] }) {
@@ -88,10 +88,19 @@ export function QueueTable({ videos }: { videos?: VideoItem[] }) {
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col items-start gap-1">
-                    <VideoStatusBadge status={video.status} />
+                    <VideoStatusBadge status={video.status} progress={video.chunkProgress} />
                     {video.status === "alert" && video.ruleId && (
                       <span className="text-xs text-destructive">
                         {video.ruleName ?? video.ruleId}
+                        {video.alertEventCount && video.alertEventCount > 1
+                          ? ` 等 ${video.alertEventCount} 起`
+                          : ""}
+                      </span>
+                    )}
+                    {video.status === "alert" && video.chunkProgress && (
+                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Spinner aria-hidden="true" className="size-3" />
+                        继续分析 {chunkProgressLabel(video.chunkProgress)}
                       </span>
                     )}
                     {video.status === "safe" && video.suppressedReason && (

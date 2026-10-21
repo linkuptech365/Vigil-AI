@@ -9,6 +9,8 @@ export interface AdaptiveFrame {
   /** 完整的 data:image/jpeg;base64,... */
   base64: string
   reason: FrameReason
+  /** 所属切片编号（从 1 起） */
+  chunkIndex?: number
 }
 
 export interface MotionSegment {
@@ -16,16 +18,35 @@ export interface MotionSegment {
   end: string
   startSeconds: number
   endSeconds: number
+  /** 区间内像素变化最剧烈的时间点 */
+  peakSeconds?: number
+  /** 峰值变化率（0-1），用于给区间排优先级 */
+  peakRate?: number
 }
 
-export interface AdaptiveCaptureResult {
-  frames: AdaptiveFrame[]
-  totalVideoDuration: number
+export interface MotionScan {
   motionSegments: MotionSegment[]
   /** 静止时长占全片的百分比 */
   staticRatioPercent: number
   /** 初筛的实际采样间隔（秒）。时长不超过 MAX_SCAN_SAMPLES 秒时为 1，即严格 1 FPS。 */
   scanStepSeconds: number
+}
+
+export interface VideoChunk {
+  /** 从 1 起 */
+  index: number
+  total: number
+  startTime: number
+  endTime: number
+  startStr: string
+  endStr: string
+}
+
+/** 一次打开、全程复用的视频句柄。用完必须 dispose()，否则解码器和 ObjectURL 会一直占着内存。 */
+export interface CaptureSession {
+  readonly video: HTMLVideoElement
+  readonly duration: number
+  dispose: () => void
 }
 
 const FRAME_WIDTH = 640
@@ -35,7 +56,7 @@ const SCAN_WIDTH = 160
 const SCAN_HEIGHT = 90
 const PIXEL_DIFF_THRESHOLD = 24
 const MOTION_RATE_THRESHOLD = 0.03
-const MAX_SCAN_SAMPLES = 240
+const MAX_SCAN_SAMPLES = 600
 const SEGMENT_MERGE_GAP_SEC = 2
 
 const BASELINE_SECOND = 1
@@ -44,6 +65,13 @@ const MAX_TOTAL_FRAMES = 8
 const MIN_FRAME_GAP_SEC = 0.8
 const LONG_SEGMENT_SEC = 6
 const END_GUARD_SEC = 0.05
+
+export const CHUNK_WINDOW_SECONDS = 90
+const MIN_TAIL_CHUNK_SECONDS = 10
+const MAX_CHUNK_MOTION_FRAMES = 5
+const MIN_CHUNK_MOTION_FRAMES = 3
+const CHUNK_PATROL_RATIOS = [0.25, 0.75]
+const CHUNK_FILL_RATIOS = [0.5, 0.25, 0.75]
 
 const METADATA_TIMEOUT_MS = 15_000
 const SEEK_TIMEOUT_MS = 8_000
@@ -217,33 +245,182 @@ async function loadVideo(video: HTMLVideoElement, src: string) {
   if (video.readyState < 2) await waitForEvent(video, "loadeddata", METADATA_TIMEOUT_MS, "加载首帧画面")
 }
 
+function makeChunk(index: number, total: number, startTime: number, endTime: number): VideoChunk {
+  return { index, total, startTime, endTime, startStr: formatClock(startTime), endStr: formatClock(endTime) }
+}
+
 /**
- * 自适应抽帧：Level-1 像素运动初筛 → 首帧基线 + 动作区间密集采样（静止则均匀巡检）→ 640px JPEG。
- * 传入 Blob 时由本函数创建并释放 ObjectURL；传入字符串地址则不改动其生命周期。
+ * 按 90 秒窗口切片。不超过 90 秒的视频是单切片；末尾不足 10 秒的零头并入上一片，避免为几秒画面单独发一次大模型请求。
  */
-export async function captureAdaptiveFrames(source: string | Blob): Promise<AdaptiveCaptureResult> {
+export function planVideoChunks(duration: number): VideoChunk[] {
+  const safe = Math.max(0, duration)
+  if (!(safe > CHUNK_WINDOW_SECONDS)) return [makeChunk(1, 1, 0, safe)]
+
+  const ranges: Array<[number, number]> = []
+  for (let start = 0; start < safe; start += CHUNK_WINDOW_SECONDS) {
+    ranges.push([start, Math.min(start + CHUNK_WINDOW_SECONDS, safe)])
+  }
+  const last = ranges[ranges.length - 1]
+  if (ranges.length > 1 && last[1] - last[0] < MIN_TAIL_CHUNK_SECONDS) {
+    ranges.pop()
+    ranges[ranges.length - 1][1] = safe
+  }
+  return ranges.map(([start, end], i) => makeChunk(i + 1, ranges.length, start, end))
+}
+
+/** 打开视频并读出时长。传入 Blob 时由会话创建并在 dispose() 时释放 ObjectURL；字符串地址不改动其生命周期。 */
+export async function openCaptureSession(source: string | Blob): Promise<CaptureSession> {
   const objectUrl = typeof source === "string" ? null : URL.createObjectURL(source)
   const video = document.createElement("video")
+  let disposed = false
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    video.pause()
+    video.removeAttribute("src")
+    video.load()
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+  }
 
   try {
     await loadVideo(video, objectUrl ?? (source as string))
     const duration = video.duration
     if (!Number.isFinite(duration) || duration <= 0) throw new Error("无法读取视频时长，浏览器不支持该流的时间定位")
+    return { video, duration, dispose }
+  } catch (error) {
+    dispose()
+    throw error
+  }
+}
 
-    const { segments, step } = await scanMotionSegments(video, duration)
-    const motionDuration = segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0)
-    const staticRatioPercent = Math.round(Math.min(100, Math.max(0, 100 - (motionDuration / duration) * 100)))
+/** Level-1：对整段视频做一次运动初筛，结果供各切片挑帧时复用。 */
+export async function scanVideoMotion(session: CaptureSession): Promise<MotionScan> {
+  const { segments, step } = await scanMotionSegments(session.video, session.duration)
+  const motionDuration = segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0)
+  return {
+    motionSegments: segments.map((segment) => ({
+      start: formatClock(segment.start),
+      end: formatClock(segment.end),
+      startSeconds: segment.start,
+      endSeconds: segment.end,
+      peakSeconds: segment.peakAt,
+      peakRate: segment.peakRate,
+    })),
+    staticRatioPercent: Math.round(
+      Math.min(100, Math.max(0, 100 - (motionDuration / session.duration) * 100))
+    ),
+    scanStepSeconds: step,
+  }
+}
+
+function toRawSegment(segment: MotionSegment): RawSegment {
+  return {
+    start: segment.startSeconds,
+    end: segment.endSeconds,
+    peakRate: segment.peakRate ?? 0.1,
+    peakAt: segment.peakSeconds ?? (segment.startSeconds + segment.endSeconds) / 2,
+  }
+}
+
+/** 把落在切片窗口内的动作区间裁剪到窗口边界；峰值落在窗口外时退回区间中点。 */
+function clipSegmentsToChunk(segments: MotionSegment[], start: number, end: number) {
+  return segments.flatMap((segment) => {
+    if (segment.endSeconds <= start || segment.startSeconds >= end) return []
+    const raw = toRawSegment(segment)
+    const clippedStart = Math.max(raw.start, start)
+    const clippedEnd = Math.min(raw.end, end)
+    const peakInside = raw.peakAt >= clippedStart && raw.peakAt <= clippedEnd
+    return [
+      {
+        start: clippedStart,
+        end: clippedEnd,
+        peakRate: raw.peakRate,
+        peakAt: peakInside ? raw.peakAt : (clippedStart + clippedEnd) / 2,
+      },
+    ]
+  })
+}
+
+/**
+ * 多切片场景的挑帧：有动作区间时取各区间的峰值，再补起点和终点，总数 3-5 帧；
+ * 区间完全静止时只在 25% / 75% 各取一帧巡检，尽快放行以省 Token。
+ */
+function selectChunkFrameTimes(start: number, end: number, segments: RawSegment[], limit: (t: number) => number) {
+  const length = end - start
+  const patrol = (ratio: number): Candidate => ({
+    seconds: limit(start + length * ratio),
+    weight: 1,
+    reason: "patrol",
+  })
+
+  if (segments.length === 0) return CHUNK_PATROL_RATIOS.map(patrol)
+
+  const selected: Candidate[] = []
+  const accept = (candidate: Candidate, max: number) => {
+    if (selected.length >= max) return
+    if (selected.some((item) => Math.abs(item.seconds - candidate.seconds) < MIN_FRAME_GAP_SEC)) return
+    selected.push(candidate)
+  }
+
+  const ranked = [...segments].sort((a, b) => b.peakRate - a.peakRate)
+  const motion = (seconds: number, segment: RawSegment, factor: number): Candidate => ({
+    seconds: limit(seconds),
+    weight: (1 + Math.min(segment.peakRate, 1) * 10) * factor,
+    reason: "motion",
+  })
+  for (const segment of ranked) accept(motion(segment.peakAt, segment, 1.1), MAX_CHUNK_MOTION_FRAMES)
+  for (const segment of ranked) {
+    const inset = Math.min(0.5, (segment.end - segment.start) / 4)
+    accept(motion(segment.start + inset, segment, 0.9), MAX_CHUNK_MOTION_FRAMES)
+    accept(motion(segment.end, segment, 0.8), MAX_CHUNK_MOTION_FRAMES)
+  }
+  for (const ratio of CHUNK_FILL_RATIOS) accept(patrol(ratio), MIN_CHUNK_MOTION_FRAMES)
+
+  return selected.sort((a, b) => a.seconds - b.seconds)
+}
+
+function isSession(source: CaptureSession | string | Blob): source is CaptureSession {
+  return typeof source === "object" && "video" in source && "dispose" in source
+}
+
+/**
+ * 在 [startTime, endTime] 内按切片抽帧，每张帧带准确时间戳和切片编号。
+ * 传入 CaptureSession 时复用其视频元素（不会释放）；传入地址或 Blob 时临时打开并在结束后释放。
+ * totalChunks 为 1 时沿用整片的原有挑帧策略（首帧基线 + 动作区间 / 20-50-80% 巡检，最多 8 帧）。
+ */
+export async function captureChunkFrames(
+  videoSource: CaptureSession | string | Blob,
+  startTime: number,
+  endTime: number,
+  chunkIndex: number,
+  options: { motionSegments?: MotionSegment[]; totalChunks?: number } = {}
+): Promise<AdaptiveFrame[]> {
+  const owned = isSession(videoSource) ? null : await openCaptureSession(videoSource)
+  const session = owned ?? (videoSource as CaptureSession)
+  const canvas = document.createElement("canvas")
+
+  try {
+    const { video, duration } = session
+    const start = Math.max(0, startTime)
+    const end = Math.min(endTime, duration)
+    if (!(end > start)) throw new Error(`切片 ${chunkIndex} 的时间区间无效 [${startTime}, ${endTime}]`)
+
+    const withinChunk = (seconds: number) => Math.min(clampTime(Math.max(seconds, start), duration), end - END_GUARD_SEC)
+    const segments = clipSegmentsToChunk(options.motionSegments ?? [], start, end)
+    const targets =
+      (options.totalChunks ?? 1) <= 1
+        ? selectFrameTimes(duration, segments)
+        : selectChunkFrameTimes(start, end, segments, withinChunk)
 
     const sourceWidth = video.videoWidth || FRAME_WIDTH
     const sourceHeight = video.videoHeight || 360
-    const canvas = document.createElement("canvas")
     canvas.width = FRAME_WIDTH
     canvas.height = Math.max(1, Math.round((sourceHeight * FRAME_WIDTH) / sourceWidth))
     const ctx = canvas.getContext("2d")
     if (!ctx) throw new Error("浏览器不支持 Canvas 2D")
 
     const frames: AdaptiveFrame[] = []
-    for (const target of selectFrameTimes(duration, segments)) {
+    for (const target of targets) {
       await seekTo(video, target.seconds)
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
       frames.push({
@@ -251,26 +428,15 @@ export async function captureAdaptiveFrames(source: string | Blob): Promise<Adap
         seconds: Number(target.seconds.toFixed(2)),
         base64: canvas.toDataURL("image/jpeg", JPEG_QUALITY),
         reason: target.reason,
+        chunkIndex,
       })
     }
-
-    return {
-      frames,
-      totalVideoDuration: duration,
-      motionSegments: segments.map((segment) => ({
-        start: formatClock(segment.start),
-        end: formatClock(segment.end),
-        startSeconds: segment.start,
-        endSeconds: segment.end,
-      })),
-      staticRatioPercent,
-      scanStepSeconds: step,
-    }
+    return frames
   } finally {
-    video.pause()
-    video.removeAttribute("src")
-    video.load()
-    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    // 归零画布尺寸，让浏览器立刻回收位图缓冲，长视频多切片时不会累积
+    canvas.width = 0
+    canvas.height = 0
+    owned?.dispose()
   }
 }
 
