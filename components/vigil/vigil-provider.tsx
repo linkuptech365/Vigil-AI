@@ -48,7 +48,13 @@ import type {
 } from "@/lib/vigil/types"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { getVideoSrc, registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
-import { captureVideoFramesFromSrc, toKeyframeInputs } from "@/lib/client/frame-capture"
+import {
+  captureAdaptiveFrames,
+  formatClock,
+  toKeyframeInputs,
+  type AdaptiveCaptureResult,
+  type FrameReason,
+} from "@/lib/client/frame-capture"
 
 export type TabId = "config" | "queue" | "alerts"
 
@@ -59,6 +65,11 @@ const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
 const MAX_LOGS = 200
 /** 一级初筛：采样帧平均变化率低于 2% 视为画面静止，跳过大模型推理。 */
 const STATIC_SCENE_THRESHOLD = 0.02
+const FRAME_REASON_LABEL: Record<FrameReason, string> = {
+  baseline: "基线",
+  motion: "动作",
+  patrol: "巡检",
+}
 
 const LOG_LEVELS: readonly LogLevel[] = ["sys", "info", "sample", "req", "res", "ok", "warn", "alert"]
 
@@ -608,15 +619,34 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
       try {
         let clientFrames: VlmKeyframeInput[] = []
+        let adaptive: AdaptiveCaptureResult | null = null
         const playableSrc = getVideoSrc(video)
         if (playableSrc) {
           try {
-            clientFrames = toKeyframeInputs(await captureVideoFramesFromSrc(playableSrc))
+            adaptive = await captureAdaptiveFrames(playableSrc)
+            clientFrames = toKeyframeInputs(adaptive.frames)
+            const fullLength = formatClock(adaptive.totalVideoDuration)
+            if (adaptive.motionSegments.length > 0) {
+              const ranges = adaptive.motionSegments.map((seg) => `${seg.start}-${seg.end}`).join(", ")
+              pushLog(
+                "info",
+                `[LEVEL-1] 初筛完成：视频全长 ${fullLength}，识别到 ${adaptive.motionSegments.length} 个动作高危时段 [${ranges}]，静止占比 ${adaptive.staticRatioPercent}%`
+              )
+            } else {
+              pushLog(
+                "info",
+                `[LEVEL-1] 初筛完成：视频全长 ${fullLength}，全片几乎静止，静止占比 ${adaptive.staticRatioPercent}%，按 20%/50%/80% 巡检并保留首帧基线（静态违禁品仍需研判，不跳过 VLM）`
+              )
+            }
+            const frameList = adaptive.frames
+              .map((frame) => `${frame.timestamp}[${FRAME_REASON_LABEL[frame.reason]}]`)
+              .join(", ")
             pushLog(
               "sample",
-              `[PREPROCESS] 浏览器 Canvas 抽帧完成：${clientFrames.length} 帧 (640px JPEG)，将优先直传 VLM，无需服务端访问磁盘。`
+              `[PREPROCESS] 抽取自适应关键帧: ${adaptive.frames.length} 帧 (时间戳: ${frameList})，优先直传 VLM`
             )
           } catch (error) {
+            adaptive = null
             clientFrames = []
             pushLog(
               "warn",
@@ -641,13 +671,17 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           }
         }
         const vlmFrames = clientFrames.length > 0 ? clientFrames : toVlmFrames({ ...video, keyframes })
-        pushLog(
-          "sample",
-          `[PREPROCESS] 抽取采样帧: ${vlmFrames.length} 帧 (640x360, ${s.samplingFps} FPS, 时长: ${formatDuration(video.durationSec)})`
-        )
+        if (!adaptive) {
+          pushLog(
+            "sample",
+            `[PREPROCESS] 抽取采样帧: ${vlmFrames.length} 帧 (640x360, ${s.samplingFps} FPS, 时长: ${formatDuration(video.durationSec)})`
+          )
+        }
 
         const scores = vlmFrames.flatMap((f) => (typeof f.motionScore === "number" ? [f.motionScore] : []))
-        if (scores.length === vlmFrames.length && scores.length > 0) {
+        if (adaptive) {
+          // Level-1 已在浏览器端完成，静止视频也要保留基线帧交给 VLM 识别静态违禁品
+        } else if (scores.length === vlmFrames.length && scores.length > 0) {
           const changeRate = scores.reduce((sum, v) => sum + v, 0) / scores.length
           if (changeRate < STATIC_SCENE_THRESHOLD) {
             pushLog(
@@ -857,7 +891,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     pushLog("req", "POST /api/v1/samples/provision  suite=vaccine-cleanroom-gmp")
     try {
       const suite = await provisionGmpSuite()
-      pushLog("ok", `200 OK  已写入 ${suite.cases.length} 个 GMP 算例至 ${suite.directory}，规则库已含 RULE-BIO-01~04。`)
+      pushLog("ok", `200 OK  已写入 ${suite.cases.length} 个 GMP 算例至 ${suite.directory}，规则���已含 RULE-BIO-01~04。`)
       settingsRef.current = { ...settingsRef.current, folderPath: suite.directory }
       updateSettings({ folderPath: suite.directory })
       setActiveTab("queue")
