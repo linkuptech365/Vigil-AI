@@ -1,5 +1,6 @@
 import { CAMERAS } from "@/lib/ops/data"
 import { INITIAL_ZONES } from "@/lib/ops/perception-data"
+import { SEVERITY_RANK, SOURCE_ALL, bindsSource, ruleSensitivity } from "@/lib/ops/rule-binding"
 import type { RoiZone } from "@/lib/ops/perception-types"
 import type {
   AffinityFactor,
@@ -50,12 +51,6 @@ const MAX_PULSES = 120
 const MAX_EVENTS = 500
 const MIN_CLUSTER_AFFINITY = 0.65
 const SHANGHAI_TZ = "Asia/Shanghai"
-
-const DEFAULT_THRESHOLD: Record<InspectionRule["type"], number> = {
-  GEOMETRIC: 0.5,
-  THRESHOLD: 0.6,
-  PROMPT_SEMANTIC: 0.7,
-}
 
 /** Physical neighbours: east gate -> workshop -> tank farm -> warehouse lane. */
 const ADJACENT_PAIRS: [string, string][] = [
@@ -203,7 +198,7 @@ export function findRule(ruleId: string) {
 }
 
 export function defaultRuleForChannel(channelId: string) {
-  return engine().rules.find((rule) => rule.enabled && rule.boundChannels.includes(channelId))
+  return engine().rules.find((rule) => rule.enabled && bindsSource(rule, { kind: "channel", channelId }))
 }
 
 export function createCustomRule(input: CreateRuleRequest): InspectionRule {
@@ -214,8 +209,8 @@ export function createCustomRule(input: CreateRuleRequest): InspectionRule {
     name: input.name,
     type: "PROMPT_SEMANTIC",
     prompt: input.prompt,
-    boundChannels: [...ALL_CHANNELS],
-    severity: "WARNING",
+    boundChannels: input.boundChannels?.length ? [...input.boundChannels] : [SOURCE_ALL],
+    severity: input.severity ?? "WARNING",
     cooldownSeconds: DEFAULT_WINDOW_SECONDS,
     schedule: "24x7",
     enabled: true,
@@ -237,6 +232,10 @@ export function updateRule(ruleId: string, patch: UpdateRuleRequest): Inspection
   if (patch.boundChannels !== undefined) rule.boundChannels = [...patch.boundChannels]
   if (patch.sensitivity !== undefined) rule.sensitivity = patch.sensitivity
   if (patch.actions !== undefined) rule.actions = { ...patch.actions }
+  if (patch.description !== undefined) {
+    if (rule.type === "PROMPT_SEMANTIC") rule.prompt = patch.description
+    else rule.logic = patch.description
+  }
   return { ...rule, boundChannels: [...rule.boundChannels] }
 }
 
@@ -290,10 +289,22 @@ function nextIncidentId(state: EngineState, now: number) {
  * Inside an active window the trigger is folded into the existing incident and the
  * window restarts its countdown from this trigger; otherwise a new incident is opened.
  */
-export function registerTrigger(channelId: string, ruleId: string, now = Date.now()): TriggerOutcome {
+export interface TriggerOptions {
+  /** 规则库中查不到该规则时使用的冷却窗口（秒） */
+  windowSeconds?: number
+  /** 本地视频源不参与跨机位聚类，只计入冷却窗口与去重指标 */
+  skipEvent?: boolean
+}
+
+export function registerTrigger(
+  channelId: string,
+  ruleId: string,
+  now = Date.now(),
+  options: TriggerOptions = {}
+): TriggerOutcome {
   const state = engine()
   const rule = findRule(ruleId)
-  const windowMs = (rule?.cooldownSeconds ?? DEFAULT_WINDOW_SECONDS) * 1000
+  const windowMs = (rule?.cooldownSeconds ?? options.windowSeconds ?? DEFAULT_WINDOW_SECONDS) * 1000
   const key = windowKey(channelId, ruleId)
   const existing = state.windows.get(key)
   const active = existing !== undefined && now - existing.lastTriggeredAt < existing.windowMs
@@ -327,17 +338,19 @@ export function registerTrigger(channelId: string, ruleId: string, now = Date.no
   }
 
   const isNewIncident = !(existing && active)
-  pushEvent(state, {
-    channelId,
-    ruleId,
-    incidentId: window.activeIncidentId,
-    tags: rule ? ruleTags(rule) : [],
-    timestampMs: now,
-    kind: isNewIncident ? "incident" : "suppressed",
-    note: isNewIncident
-      ? `${rule?.name ?? ruleId} 触发，生成工单并派发告警`
-      : `${Math.round(window.windowMs / 1000)}s 冷却窗口内重复触发，证据已折叠`,
-  })
+  if (!options.skipEvent) {
+    pushEvent(state, {
+      channelId,
+      ruleId,
+      incidentId: window.activeIncidentId,
+      tags: rule ? ruleTags(rule) : [],
+      timestampMs: now,
+      kind: isNewIncident ? "incident" : "suppressed",
+      note: isNewIncident
+        ? `${rule?.name ?? ruleId} 触发，生成工单并派发告警`
+        : `${Math.round(window.windowMs / 1000)}s 冷却窗口内重复触发，证据已折叠`,
+    })
+  }
 
   return {
     isNewIncident,
@@ -389,11 +402,11 @@ function normalizeConfidence(value: number) {
 }
 
 function ruleThreshold(rule: InspectionRule) {
-  return rule.sensitivity ?? DEFAULT_THRESHOLD[rule.type]
+  return ruleSensitivity(rule)
 }
 
 function maxSeverity(a: RuleSeverity, b: RuleSeverity): RuleSeverity {
-  return a === "CRITICAL" || b === "CRITICAL" ? "CRITICAL" : "WARNING"
+  return SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b
 }
 
 function scaleZone(zone: RoiZone): Vec2[] {
@@ -501,7 +514,9 @@ function evaluateSemantic(rule: InspectionRule, req: RuleEvaluateRequest, confid
 
 function evaluateRule(rule: InspectionRule, req: RuleEvaluateRequest, when: Date): RuleVerdict {
   if (!rule.enabled) return { miss: `${rule.id} 已停用` }
-  if (!rule.boundChannels.includes(req.channelId)) return { miss: `${rule.id} 未绑定 ${req.channelId}` }
+  if (!bindsSource(rule, { kind: "channel", channelId: req.channelId })) {
+    return { miss: `${rule.id} 未绑定 ${req.channelId}` }
+  }
   if (!scheduleActive(rule.schedule, when)) return { miss: `${rule.id} 当前不在生效时段` }
   const confidence = normalizeConfidence(req.confidence)
   return rule.type === "PROMPT_SEMANTIC"
@@ -527,7 +542,9 @@ export function evaluateRules(req: RuleEvaluateRequest, now = Date.now()): Evalu
     if (!rule) return { ok: false, status: 404, code: "RULE_NOT_FOUND", error: `规则 ${req.ruleId} 不存在` }
     candidates = [rule]
   } else {
-    candidates = state.rules.filter((rule) => rule.enabled && rule.boundChannels.includes(req.channelId))
+    candidates = state.rules.filter(
+      (rule) => rule.enabled && bindsSource(rule, { kind: "channel", channelId: req.channelId })
+    )
   }
 
   const hits: RuleHit[] = []
@@ -556,10 +573,7 @@ export function evaluateRules(req: RuleEvaluateRequest, now = Date.now()): Evalu
     }
   }
 
-  hits.sort((a, b) => {
-    if (a.severity !== b.severity) return a.severity === "CRITICAL" ? -1 : 1
-    return 0
-  })
+  hits.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])
   const best = hits[0]
   const outcome = registerTrigger(req.channelId, best.rule.id, now)
 

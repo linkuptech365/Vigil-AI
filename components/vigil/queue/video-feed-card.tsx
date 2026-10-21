@@ -32,7 +32,6 @@ import { cn } from "@/lib/utils"
 import { CAMERAS } from "@/lib/ops/data"
 import { hasMediaSrc, PLACEHOLDER_IMAGE, safePlay, suppressMediaError } from "@/lib/ops/media"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
-import { RULES } from "@/lib/vigil/rules"
 import type { VideoItem, VideoStatus } from "@/lib/vigil/types"
 import {
   cameraTag,
@@ -271,7 +270,7 @@ export function VideoFeedCard({ video }: { video: VideoItem }) {
           >
             <Siren className="size-3.5 shrink-0" aria-hidden="true" />
             <span className="truncate">
-              {RULES[video.ruleId].scenarioLabel}
+              {video.ruleName ?? video.ruleId}
               {video.confidence !== undefined && ` ${Math.round(video.confidence * 100)}%`}
             </span>
           </div>

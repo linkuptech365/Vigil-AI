@@ -104,7 +104,7 @@ export const GMP_CASES: readonly GmpCase[] = [
   },
 ]
 
-const GMP_CHANNELS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"]
+const GMP_CHANNELS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04", "LOCAL"]
 
 /** 预置进服务端规则库的 3 条违规规则（BIO-04 仅作为合规对照，不入库）。 */
 export const GMP_RULE_SEEDS: InspectionRule[] = [

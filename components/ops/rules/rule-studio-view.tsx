@@ -1,5 +1,6 @@
 "use client"
 
+import * as React from "react"
 import { Plus, Quote, Ruler } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -14,8 +15,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { SCOPE_BINDINGS, bindingLabel, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
 import {
   ALL_CHANNELS,
   COOLDOWN_OPTIONS,
@@ -38,6 +42,88 @@ const TYPE_META: Record<InspectionRuleType, { label: string; className: string }
   PROMPT_SEMANTIC: { label: "VLM 语义 Prompt", className: "border-primary/40 text-primary" },
 }
 
+const MIN_DESCRIPTION = 4
+const MAX_DESCRIPTION = 400
+
+function DescriptionEditor({
+  rule,
+  textareaId,
+  onSave,
+}: {
+  rule: InspectionRule
+  textareaId: string
+  onSave: (description: string) => void
+}) {
+  const saved = ruleDescription(rule)
+  const [draft, setDraft] = React.useState(saved)
+  const text = draft.trim()
+  const valid = text.length >= MIN_DESCRIPTION && text.length <= MAX_DESCRIPTION
+  const Icon = rule.type === "PROMPT_SEMANTIC" ? Quote : Ruler
+
+  const commit = () => {
+    if (valid && text !== saved) onSave(text)
+  }
+
+  return (
+    <Field>
+      <FieldLabel htmlFor={textareaId} className="flex items-center gap-1.5">
+        <Icon className="size-3.5 text-primary" aria-hidden="true" />
+        语义判定依据 (VLM Description)
+      </FieldLabel>
+      <Textarea
+        id={textareaId}
+        value={draft}
+        disabled={!rule.enabled}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        rows={3}
+        maxLength={MAX_DESCRIPTION}
+        aria-invalid={!valid}
+        className="resize-none text-xs leading-relaxed"
+      />
+      {!valid ? (
+        <p className="text-[11px] text-destructive">
+          描述需为 {MIN_DESCRIPTION}~{MAX_DESCRIPTION} 个字符，未满足前不会保存。
+        </p>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">失焦后自动保存，下一次研判即按新描述注入大模型。</p>
+      )}
+    </Field>
+  )
+}
+
+function SensitivityField({
+  rule,
+  sliderId,
+  onCommit,
+}: {
+  rule: InspectionRule
+  sliderId: string
+  onCommit: (sensitivity: number) => void
+}) {
+  const [value, setValue] = React.useState(ruleSensitivity(rule))
+
+  return (
+    <Field>
+      <div className="flex items-center justify-between">
+        <FieldLabel htmlFor={sliderId}>灵敏度 / 置信度阈值</FieldLabel>
+        <span className="font-mono text-xs text-signal">≥ {value.toFixed(2)}</span>
+      </div>
+      <Slider
+        id={sliderId}
+        value={[value]}
+        min={0.3}
+        max={0.99}
+        step={0.01}
+        disabled={!rule.enabled}
+        onValueChange={([next]) => setValue(next)}
+        onValueCommit={([next]) => onCommit(next)}
+        aria-label={`${rule.id} 灵敏度阈值`}
+      />
+    </Field>
+  )
+}
+
 function RuleCard({ rule }: { rule: InspectionRule }) {
   const { updateRule } = useRules()
   const ids = {
@@ -45,6 +131,8 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
     severity: `${rule.id}-severity`,
     cooldown: `${rule.id}-cooldown`,
     schedule: `${rule.id}-schedule`,
+    description: `${rule.id}-description`,
+    sensitivity: `${rule.id}-sensitivity`,
   }
   const type = TYPE_META[rule.type]
 
@@ -82,24 +170,19 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
         />
       </div>
 
-      {rule.type === "PROMPT_SEMANTIC" ? (
-        <div className="flex gap-2 rounded-md border border-border bg-card p-3">
-          <Quote className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden="true" />
-          <div className="flex min-w-0 flex-col gap-1">
-            <p className="text-xs leading-relaxed">{rule.prompt}</p>
-            {rule.sensitivity !== undefined && (
-              <p className="font-mono text-[11px] text-muted-foreground">
-                sensitivity {rule.sensitivity.toFixed(2)}
-              </p>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex gap-2 rounded-md border border-border bg-card p-3">
-          <Ruler className="mt-0.5 size-3.5 shrink-0 text-signal" aria-hidden="true" />
-          <p className="text-xs leading-relaxed text-muted-foreground">{rule.logic}</p>
-        </div>
-      )}
+      <DescriptionEditor
+        key={`${rule.id}:${ruleDescription(rule)}`}
+        rule={rule}
+        textareaId={ids.description}
+        onSave={(description) => updateRule(rule.id, { description })}
+      />
+
+      <SensitivityField
+        key={`${rule.id}:${ruleSensitivity(rule)}`}
+        rule={rule}
+        sliderId={ids.sensitivity}
+        onCommit={(sensitivity) => updateRule(rule.id, { sensitivity })}
+      />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Field className="sm:col-span-3">
@@ -115,12 +198,20 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
             aria-label={`${rule.id} 绑定通道`}
             className="flex-wrap"
           >
+            {SCOPE_BINDINGS.map((scope) => (
+              <ToggleGroupItem key={scope} value={scope} className="text-xs">
+                {bindingLabel(scope)} ({scope})
+              </ToggleGroupItem>
+            ))}
             {ALL_CHANNELS.map((channel) => (
               <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs">
                 {channel}
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
+          <p className="text-[11px] text-muted-foreground">
+            ALL 覆盖实时通道与本地视频；LOCAL 仅用于本地导入/检索目录视频。
+          </p>
           {rule.boundChannels.length === 0 && (
             <p className="text-[11px] text-warning">未绑定任何通道，该规则不会产生触发。</p>
           )}

@@ -1,5 +1,5 @@
 export type InspectionRuleType = "GEOMETRIC" | "THRESHOLD" | "PROMPT_SEMANTIC"
-export type RuleSeverity = "WARNING" | "CRITICAL"
+export type RuleSeverity = "INFO" | "WARNING" | "CRITICAL"
 export type RuleSchedule = "24x7" | "NIGHT_ONLY" | "WORK_HOURS"
 export type RuleActionKey = "webhook" | "dispatch" | "siren"
 

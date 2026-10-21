@@ -11,7 +11,7 @@ import { createSeedSnapshot, SERVER_SNAPSHOT } from "./audit-seed"
 export const STORAGE_KEYS = {
   dossiers: "vigil_dossiers_v1",
   capa: "vigil_capa_records_v1",
-  rules: "vigil_server_rules_v1",
+  rules: "vigil_rules_state",
 } as const
 
 const CLASSES: readonly DeviationClass[] = ["CRITICAL", "MAJOR", "MINOR"]

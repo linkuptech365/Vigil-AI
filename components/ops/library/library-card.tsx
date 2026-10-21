@@ -8,7 +8,6 @@ import { Spinner } from "@/components/ui/spinner"
 import { hasMediaSrc, PLACEHOLDER_IMAGE, safePlay, suppressMediaError } from "@/lib/ops/media"
 import { buildTimeMarkers, deriveOverlayBoxes } from "@/lib/vigil/library-overlay"
 import { formatDuration } from "@/lib/vigil/data"
-import { RULES } from "@/lib/vigil/rules"
 import type { VideoItem, VideoStatus } from "@/lib/vigil/types"
 import { cameraTag, getVideoSrc } from "@/lib/vigil/video-source"
 import { cn } from "@/lib/utils"
@@ -181,7 +180,7 @@ export function LibraryCard({ video }: { video: VideoItem }) {
             role="status"
           >
             <Siren className="size-3 shrink-0" aria-hidden="true" />
-            <span className="truncate">{RULES[video.ruleId]?.scenarioLabel ?? "异常预警"}</span>
+            <span className="truncate">{video.ruleName ?? video.ruleId ?? "异常预警"}</span>
           </div>
         )}
 

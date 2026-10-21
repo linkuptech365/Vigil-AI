@@ -1,5 +1,4 @@
 import type { OverlayBox } from "@/lib/ops/types"
-import { RULES } from "@/lib/vigil/rules"
 import type { VideoItem } from "@/lib/vigil/types"
 
 export interface TimeMarker {
@@ -40,7 +39,7 @@ export function deriveOverlayBoxes(video: VideoItem): OverlayBox[] {
         h,
         tone: "critical",
         pulse: true,
-        label: `${RULES[video.ruleId]?.scenarioLabel ?? "异常预警"}${percent}`,
+        label: `${video.ruleName ?? video.ruleId ?? "异常预警"}${percent}`,
       },
     ]
   }

@@ -21,6 +21,7 @@ export const SCHEDULE_LABEL: Record<RuleSchedule, string> = {
 export const SEVERITY_LABEL: Record<RuleSeverity, string> = {
   CRITICAL: "CRITICAL 严重",
   WARNING: "WARNING 警告",
+  INFO: "INFO 提示",
 }
 
 export const ACTION_LABEL: Record<RuleActionKey, string> = {

@@ -1,17 +1,17 @@
 import type { VlmProtocol, VlmStreamChunk } from "../vlm-api-types"
 import { isBlockedHost, isGatewayItself, isLocalHost } from "./url-guard"
 import { fallbackStream } from "./vlm-fallback"
+import { buildSystemInstruction, buildUserPrompt } from "./vlm-prompt"
+import { parseFinalResult } from "./vlm-parse"
 import {
-  SYSTEM_PROMPT,
-  buildUserPrompt,
   collectImages,
   describeRemoteError,
   detectProtocol,
   normalizeEndpoint,
-  parseFinalResult,
   protocolLabel,
   streamRemote,
 } from "./vlm-remote"
+import { applyVerdict, type PreVerdictChunk } from "./vlm-verdict"
 import {
   costUsd,
   estimateTokens,
@@ -60,8 +60,9 @@ async function* runRemote(
   input: NormalizedInput,
   plan: Extract<EnginePlan, { kind: "remote" }>,
   ctx: EngineContext
-): AsyncGenerator<VlmStreamChunk, RemoteOutcome> {
+): AsyncGenerator<PreVerdictChunk, RemoteOutcome> {
   const images = collectImages(input.keyframes, plan.protocol)
+  const systemPrompt = buildSystemInstruction(input.rules)
   const userPrompt = buildUserPrompt(input, images.length)
 
   yield {
@@ -84,7 +85,7 @@ async function* runRemote(
       protocol: plan.protocol,
       apiKey: input.apiKey,
       model: input.modelName,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       user: userPrompt,
       images,
       stream: input.remoteStream,
@@ -109,8 +110,7 @@ async function* runRemote(
     timeout.dispose()
   }
 
-  const validIndices = new Set(input.keyframes.map((frame) => frame.index))
-  const result = parseFinalResult(text, validIndices)
+  const result = parseFinalResult(text, input.rules, input.keyframes)
   if (!result) {
     return {
       ok: false,
@@ -124,7 +124,7 @@ async function* runRemote(
   const promptTokens =
     usage && usage.promptTokens > 0
       ? usage.promptTokens
-      : estimateTokens(SYSTEM_PROMPT + userPrompt) + images.length * IMAGE_TOKEN_ESTIMATE
+      : estimateTokens(systemPrompt + userPrompt) + images.length * IMAGE_TOKEN_ESTIMATE
   const outputTokens = usage && usage.outputTokens > 0 ? usage.outputTokens : estimateTokens(text)
   const profile = modelProfile(input.modelName)
 
@@ -146,10 +146,26 @@ async function* runRemote(
   return { ok: true }
 }
 
-export async function* runAnalysis(
+async function* withVerdict(
   input: NormalizedInput,
-  ctx: EngineContext
+  chunks: AsyncGenerator<PreVerdictChunk>
 ): AsyncGenerator<VlmStreamChunk> {
+  for await (const chunk of chunks) {
+    if (chunk.type !== "done") {
+      yield chunk
+      continue
+    }
+    const { result, verdict } = applyVerdict(input, chunk.result)
+    if (verdict.belowThreshold) yield { type: "evidence", frames: [] }
+    yield { type: "done", result, metrics: chunk.metrics, verdict }
+  }
+}
+
+export function runAnalysis(input: NormalizedInput, ctx: EngineContext): AsyncGenerator<VlmStreamChunk> {
+  return withVerdict(input, runPipeline(input, ctx))
+}
+
+async function* runPipeline(input: NormalizedInput, ctx: EngineContext): AsyncGenerator<PreVerdictChunk> {
   const frameCount = input.keyframes.length
   yield {
     type: "thinking",

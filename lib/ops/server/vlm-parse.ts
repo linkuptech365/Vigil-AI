@@ -1,0 +1,147 @@
+import type { VlmBbox, VlmFinalResult, VlmPromptRule } from "../vlm-api-types"
+import type { VlmSeverity } from "../vlm-types"
+
+const SEVERITIES: ReadonlySet<string> = new Set(["CRITICAL", "WARNING", "INFO", "SAFE"])
+const NO_RULE_VALUES: ReadonlySet<string> = new Set(["", "NONE", "NULL", "N/A", "无"])
+const TIMESTAMP = /^(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?$/
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+function text(value: unknown) {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+export function formatOffset(totalSec: number) {
+  const safe = Math.max(0, totalSec)
+  const minutes = Math.floor(safe / 60)
+  const seconds = safe - minutes * 60
+  const [whole, millis = "000"] = seconds.toFixed(3).split(".")
+  return `${String(minutes).padStart(2, "0")}:${whole.padStart(2, "0")}.${millis}`
+}
+
+export function offsetToSeconds(offset: string) {
+  const match = TIMESTAMP.exec(offset.trim())
+  if (!match) return null
+  const [, minutes, seconds, millis = "0"] = match
+  return Number(minutes) * 60 + Number(seconds) + Number(millis.padEnd(3, "0")) / 1000
+}
+
+function parseOffset(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return formatOffset(value)
+  const raw = text(value)
+  const seconds = offsetToSeconds(raw)
+  return seconds === null ? "00:00.000" : formatOffset(seconds)
+}
+
+function parseBbox(value: unknown): VlmBbox | null {
+  if (!Array.isArray(value) || value.length !== 4) return null
+  const numbers = value.map((v) => (typeof v === "number" && Number.isFinite(v) ? v : Number.NaN))
+  if (numbers.some(Number.isNaN)) return null
+  // 兼容 0~1 的小数归一化坐标，统一换算到 0~1000
+  const scale = numbers.every((v) => v >= 0 && v <= 1) ? 1000 : 1
+  const [ymin, xmin, ymax, xmax] = numbers.map((v) => Math.round(Math.min(1000, Math.max(0, v * scale))))
+  if (ymax <= ymin || xmax <= xmin) return null
+  return [ymin, xmin, ymax, xmax]
+}
+
+function leadingSentence(reasoning: string) {
+  const first = reasoning.split(/(?<=[。！？!?；;])/)[0]?.trim() ?? ""
+  return (first || reasoning).slice(0, 80)
+}
+
+/** 把帧时间戳换算成最贴近的关键帧 index，作为证据帧。 */
+export function nearestFrameIndex(frames: { index: number; timestampSec: number }[], seconds: number) {
+  let best: number | null = null
+  let gap = Number.POSITIVE_INFINITY
+  for (const frame of frames) {
+    const diff = Math.abs(frame.timestampSec - seconds)
+    if (diff < gap) {
+      gap = diff
+      best = frame.index
+    }
+  }
+  return best
+}
+
+function coerceResult(
+  raw: unknown,
+  rules: VlmPromptRule[],
+  frames: { index: number; timestampSec: number }[]
+): VlmFinalResult | null {
+  const record = asRecord(raw)
+  if (!record) return null
+
+  const severityRaw = text(record.severity).toUpperCase()
+  const ruleIdRaw = text(record.rule_id ?? record.ruleId)
+  const triggeredFlag = typeof record.triggered === "boolean" ? record.triggered : undefined
+  if (triggeredFlag === undefined && !SEVERITIES.has(severityRaw)) return null
+
+  const matched = NO_RULE_VALUES.has(ruleIdRaw.toUpperCase())
+    ? undefined
+    : rules.find((rule) => rule.id.toLowerCase() === ruleIdRaw.toLowerCase())
+  // 模型必须引用规则库里真实存在的编号，否则视为未命中，防止幻觉出不存在的规则
+  const triggered = (triggeredFlag ?? severityRaw !== "SAFE") && matched !== undefined
+
+  let confidence = typeof record.confidence === "number" && Number.isFinite(record.confidence) ? record.confidence : 0.5
+  if (confidence > 1 && confidence <= 100) confidence /= 100
+  confidence = Math.round(Math.min(1, Math.max(0, confidence)) * 1000) / 1000
+
+  const reasoning = text(record.reasoning) || text(record.intentAnalysis) || text(record.summary)
+  const timestampOffset = triggered ? parseOffset(record.timestamp_offset ?? record.timestampOffset) : "00:00.000"
+  const severity: VlmSeverity = triggered
+    ? SEVERITIES.has(severityRaw) && severityRaw !== "SAFE"
+      ? (severityRaw as VlmSeverity)
+      : matched.severity
+    : "SAFE"
+
+  const evidenceFrame = triggered ? nearestFrameIndex(frames, offsetToSeconds(timestampOffset) ?? 0) : null
+
+  return {
+    triggered,
+    ruleId: triggered ? matched.id : null,
+    ruleTriggered: triggered ? matched.name : "无",
+    severity,
+    confidence,
+    timestampOffset,
+    bbox: triggered ? parseBbox(record.bbox) : null,
+    reasoning: reasoning || (triggered ? "模型未给出论据" : "未发现符合任何生效规则的画面"),
+    advice: text(record.advice ?? record.actionAdvice),
+    summary: leadingSentence(reasoning) || (triggered ? matched.name : "未触发任何生效规则"),
+    evidenceKeyframes: evidenceFrame === null ? [] : [evidenceFrame],
+  }
+}
+
+export function parseFinalResult(
+  output: string,
+  rules: VlmPromptRule[],
+  frames: { index: number; timestampSec: number }[]
+): VlmFinalResult | null {
+  const candidates: string[] = []
+  const fence = /```(?:json)?\s*([\s\S]*?)```/gi
+  let lastFence: string | null = null
+  let match = fence.exec(output)
+  while (match) {
+    lastFence = match[1]
+    match = fence.exec(output)
+  }
+  if (lastFence) candidates.push(lastFence)
+  const first = output.indexOf("{")
+  const last = output.lastIndexOf("}")
+  if (first >= 0 && last > first) candidates.push(output.slice(first, last + 1))
+
+  for (const candidate of candidates) {
+    const result = coerceResult(parseJson(candidate.trim()), rules, frames)
+    if (result) return result
+  }
+  return null
+}

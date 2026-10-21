@@ -18,6 +18,7 @@ import { useVlm } from "./vlm-provider"
 const SEVERITY_STYLE: Record<VlmSeverity, string> = {
   CRITICAL: "border-destructive/50 bg-destructive/15 text-destructive",
   WARNING: "border-warning/50 bg-warning/15 text-warning",
+  INFO: "border-primary/50 bg-primary/15 text-primary",
   SAFE: "border-success/50 bg-success/15 text-success",
 }
 

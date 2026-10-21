@@ -1,4 +1,4 @@
-export type VlmSeverity = "SAFE" | "WARNING" | "CRITICAL"
+export type VlmSeverity = "SAFE" | "INFO" | "WARNING" | "CRITICAL"
 export type VlmPhase = "idle" | "thinking" | "streaming" | "done"
 
 export interface VlmModelConfig {

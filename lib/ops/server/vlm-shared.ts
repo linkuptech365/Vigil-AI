@@ -1,5 +1,5 @@
 import { VLM_MODELS } from "../vlm-data"
-import type { VlmKeyframeInput, VlmSimulationHint } from "../vlm-api-types"
+import type { VlmKeyframeInput, VlmPromptRule, VlmSimulationHint, VlmSourceType } from "../vlm-api-types"
 
 export interface NormalizedInput {
   videoPath?: string
@@ -7,7 +7,11 @@ export interface NormalizedInput {
   apiUrl?: string
   apiKey?: string
   modelName: string
-  ruleScenario: string
+  sourceType?: VlmSourceType
+  /** 防抖窗口分桶键：实时通道 ID，或本地视频的唯一标识 */
+  sourceKey: string
+  /** 注入仲裁指令的生效规则 */
+  rules: VlmPromptRule[]
   stream: boolean
   /** 向远端模型发起流式（SSE）请求；默认 false，即 `stream: false` */
   remoteStream: boolean

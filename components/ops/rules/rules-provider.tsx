@@ -16,7 +16,7 @@ import {
 import { ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT, INITIAL_DEDUP_METRICS } from "@/lib/ops/rules-data"
 import type { ChannelCooldown, DeduplicationMetrics, InspectionRule } from "@/lib/ops/rules-types"
 
-import { type CustomRuleInput, useServerRules } from "./use-server-rules"
+import { type CustomRuleInput, type RulePatch, useServerRules } from "./use-server-rules"
 
 export type { CustomRuleInput }
 
@@ -82,7 +82,7 @@ function projectCooldowns(snapshot: TimedSnapshot | undefined, now: number): Rec
 interface RulesContextValue {
   rules: InspectionRule[]
   rulesError: boolean
-  updateRule: (id: string, patch: Partial<InspectionRule>) => Promise<void>
+  updateRule: (id: string, patch: RulePatch) => Promise<void>
   addCustomRule: (input: CustomRuleInput) => Promise<boolean>
   metrics: DeduplicationMetrics
   cooldowns: Record<string, ChannelCooldown>

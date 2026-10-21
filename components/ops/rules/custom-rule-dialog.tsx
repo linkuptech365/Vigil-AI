@@ -16,7 +16,9 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { Textarea } from "@/components/ui/textarea"
-import { ACTION_LABEL, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { SCOPE_BINDINGS, bindingLabel } from "@/lib/ops/rule-binding"
+import { ACTION_LABEL, ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { RuleActionKey } from "@/lib/ops/rules-types"
 import { useRules } from "./rules-provider"
 
@@ -39,6 +41,7 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
     siren: false,
   })
 
+  const [bound, setBound] = React.useState<string[]>(["ALL"])
   const [submitting, setSubmitting] = React.useState(false)
 
   const valid = name.trim().length >= 2 && prompt.trim().length >= 8
@@ -47,7 +50,13 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
     event.preventDefault()
     if (!valid || submitting) return
     setSubmitting(true)
-    const created = await addCustomRule({ name: name.trim(), prompt: prompt.trim(), sensitivity, actions })
+    const created = await addCustomRule({
+      name: name.trim(),
+      prompt: prompt.trim(),
+      sensitivity,
+      actions,
+      boundChannels: bound,
+    })
     setSubmitting(false)
     if (created) onDone()
   }
@@ -101,6 +110,33 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
           </div>
         </Field>
       </FieldGroup>
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mb-1 text-sm font-medium">适用范围 (Bound Scope)</legend>
+        <ToggleGroup
+          type="multiple"
+          variant="outline"
+          size="sm"
+          value={bound}
+          onValueChange={(next) => setBound(next.length ? next : ["ALL"])}
+          className="flex-wrap justify-start"
+          aria-label="规则适用范围"
+        >
+          {SCOPE_BINDINGS.map((scope) => (
+            <ToggleGroupItem key={scope} value={scope} className="text-xs">
+              {bindingLabel(scope)} ({scope})
+            </ToggleGroupItem>
+          ))}
+          {ALL_CHANNELS.map((channel) => (
+            <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs">
+              {channel}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <p className="text-xs text-muted-foreground">
+          ALL 对所有视频源生效；LOCAL 仅用于本地视频；也可只勾选指定机位。
+        </p>
+      </fieldset>
 
       <fieldset className="flex flex-col gap-3">
         <legend className="mb-1 flex items-center gap-1.5 text-sm font-medium">

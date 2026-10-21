@@ -1,21 +1,16 @@
+import type { RuleSeverity } from "@/lib/ops/rules-types"
 import type { VlmAnalysisReport } from "@/lib/ops/vlm-api-types"
 import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
 
-export type RuleId =
-  | "violence"
-  | "ppe"
-  | "fire"
-  | "intrusion"
-  | "gmpEsd"
-  | "gmpTransfer"
-  | "gmpClassA"
+/** 规则库中的规则编号（如 RULE-01、RULE-99），由规则引擎动态下发，不再内置枚举。 */
+export type RuleId = string
 
-export type Severity = "critical" | "high"
+export type Severity = RuleSeverity
 
 export type VideoStatus = "pending" | "analyzing" | "safe" | "alert"
 
 export interface Truth {
-  /** 模拟 VLM 实际会识别出的违规类型；null 表示画面正常 */
+  /** 仅离线兜底引擎使用：期望命中的规则库编号；null 表示画面正常 */
   ruleId: RuleId | null
   confidence: number
 }
@@ -31,7 +26,15 @@ export interface VideoItem {
   truth: Truth
   status: VideoStatus
   ruleId?: RuleId
+  /** 触发预警时规则库中的规则名称快照，规则改名后历史记录仍保持当时的名称 */
+  ruleName?: string
+  ruleSeverity?: RuleSeverity
   confidence?: number
+  /** 同一事件在防抖冷却窗口内的累计触发次数 */
+  triggerCount?: number
+  /** 被折叠进既有事件证据链的重复触发次数 */
+  suppressedCount?: number
+  incidentId?: string
   analyzedAt?: string
   samplingFps?: number
   frames?: number
@@ -79,7 +82,6 @@ export interface Settings {
   presetId: string
   samplingFps: 1 | 2 | 5
   threshold: number
-  rules: Record<RuleId, boolean>
   folderPath: string
   recursive: boolean
   formats: string[]

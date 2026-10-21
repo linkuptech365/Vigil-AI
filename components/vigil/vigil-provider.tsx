@@ -25,8 +25,9 @@ import {
   readStoredApiKey,
   storeApiKey,
 } from "@/lib/ops/vlm-client"
-import type { VlmKeyframeInput } from "@/lib/ops/vlm-api-types"
-import { classifyScenario } from "@/lib/ops/vlm-scenario-match"
+import { useServerRules } from "@/components/ops/rules/use-server-rules"
+import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import type { VlmKeyframeInput, VlmPromptRule } from "@/lib/ops/vlm-api-types"
 import type {
   ExtractFramesRequest,
   ExtractFramesResponse,
@@ -35,13 +36,12 @@ import type {
   ScanFolderResponse,
   ScannedVideoItem,
 } from "@/lib/ops/video-types"
-import { RULES, RULE_IDS } from "@/lib/vigil/rules"
+import { normalizeSeverity } from "@/lib/vigil/rules"
 import type {
   FrameTestState,
   LogLevel,
   LogLine,
   PingState,
-  RuleId,
   ScanInfo,
   Settings,
   VideoItem,
@@ -55,6 +55,8 @@ const MODEL_STORAGE_KEY = "vigil_api_model"
 const QUEUE_STORAGE_KEY = "vigil_queue_state"
 const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
 const MAX_LOGS = 200
+/** 一级初筛：采样帧平均变化率低于 2% 视为画面静止，跳过大模型推理。 */
+const STATIC_SCENE_THRESHOLD = 0.02
 
 const LOG_LEVELS: readonly LogLevel[] = ["sys", "info", "sample", "req", "res", "ok", "warn", "alert"]
 
@@ -280,6 +282,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const [activeTab, setActiveTab] = React.useState<TabId>("config")
 
+  const { rules } = useServerRules()
+  const rulesRef = React.useRef(rules)
   const settingsRef = React.useRef(settings)
   const apiKeyRef = React.useRef(apiKey)
   const modelNameRef = React.useRef(modelName)
@@ -288,6 +292,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const busyRef = React.useRef(new Set<string>())
   const logId = React.useRef(0)
   const hydrateStarted = React.useRef(false)
+
+  React.useEffect(() => {
+    rulesRef.current = rules
+  }, [rules])
 
   React.useEffect(() => {
     settingsRef.current = settings
@@ -317,12 +325,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY)
       if (raw) {
-        const saved = JSON.parse(raw) as Partial<Settings>
-        setSettings((prev) => ({
-          ...prev,
-          ...saved,
-          rules: { ...prev.rules, ...saved.rules },
-        }))
+        const { rules: _legacyRules, ...saved } = JSON.parse(raw) as Partial<Settings> & { rules?: unknown }
+        setSettings((prev) => ({ ...prev, ...saved }))
       }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
@@ -565,13 +569,34 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
       const s = settingsRef.current
       const model = modelNameRef.current.trim() || undefined
-      const enabled = RULE_IDS.filter((id) => s.rules[id])
       const frames = Math.max(1, Math.ceil(video.durationSec * s.samplingFps))
+      const sourceKey = `LOCAL:${video.id}`
+
+      pushLog("info", `[SOURCE] 开始处理视频: ${video.name} (源类型: 本地导入/检索)`)
+
+      const matched = matchRulesForSource(rulesRef.current, { kind: "local" })
+      if (matched.length === 0) {
+        pushLog("warn", "[SCREENING] 当前视频源无生效绑定的激活规则，跳过分析。")
+        toast.warning(`${video.name} 没有生效规则`, {
+          description: "请在「规则与防抖引擎」中启用规则并绑定 ALL 或 LOCAL。",
+        })
+        busyRef.current.delete(video.id)
+        return
+      }
+      pushLog(
+        "info",
+        `[RULE-MATCH] 命中当前视频源的激活规则: ${matched.length} 条 [${matched.map((r) => r.id).join(", ")}]`
+      )
 
       patchVideo(video.id, {
         status: "analyzing",
         ruleId: undefined,
+        ruleName: undefined,
+        ruleSeverity: undefined,
         confidence: undefined,
+        triggerCount: undefined,
+        suppressedCount: undefined,
+        incidentId: undefined,
         suppressedReason: undefined,
         analyzedAt: undefined,
       })
@@ -580,10 +605,6 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       let keyframeWindow: VideoItem["keyframeWindow"]
 
       try {
-        pushLog(
-          "info",
-          `▶ ${video.name}  (${formatDuration(video.durationSec)}, ${video.sizeMB.toFixed(1)} MB, ${video.fps}fps)`
-        )
         if (video.source === "disk") {
           try {
             const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
@@ -592,106 +613,133 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             )
             keyframes = result.keyframes
             keyframeWindow = result.windowRange
-            pushLog(
-              "sample",
-              `POST /api/v1/extract-frames → ${result.totalFramesExtracted} 帧  窗口 [${result.windowRange.startSec}s, ${result.windowRange.endSec}s]  fps=${result.samplingFps}`
-            )
           } catch (error) {
             pushLog(
               "warn",
-              `抽帧接口失败：${error instanceof Error ? error.message : "未知错误"}，继续以元数据完成分析。`
+              `[PREPROCESS] 抽帧接口失败：${error instanceof Error ? error.message : "未知错误"}，继续以元数据完成分析。`
             )
           }
-        } else {
-          pushLog(
-            "sample",
-            `ffmpeg -i "${video.name}" -vf fps=${s.samplingFps},scale=640:-1 → 抽取 ${frames} 帧`
-          )
         }
         const vlmFrames = toVlmFrames({ ...video, keyframes })
-        const truth = video.truth
+        pushLog(
+          "sample",
+          `[PREPROCESS] 抽取采样帧: ${vlmFrames.length} 帧 (640x360, ${s.samplingFps} FPS, 时长: ${formatDuration(video.durationSec)})`
+        )
+
+        const scores = vlmFrames.flatMap((f) => (typeof f.motionScore === "number" ? [f.motionScore] : []))
+        if (scores.length === vlmFrames.length && scores.length > 0) {
+          const changeRate = scores.reduce((sum, v) => sum + v, 0) / scores.length
+          if (changeRate < STATIC_SCENE_THRESHOLD) {
+            pushLog(
+              "ok",
+              `[LEVEL-1] 画面静止无动态变化 (场景变化率: ${(changeRate * 100).toFixed(1)}% < ${STATIC_SCENE_THRESHOLD * 100}%)，跳过深度推理以节省 Token。`
+            )
+            patchVideo(video.id, {
+              status: "safe",
+              confidence: 1 - changeRate,
+              suppressedReason: `一级初筛：画面静止（变化率 ${(changeRate * 100).toFixed(1)}%），未进入大模型研判`,
+              samplingFps: s.samplingFps,
+              frames,
+              keyframes,
+              keyframeWindow,
+              analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+            })
+            return
+          }
+          pushLog("info", `[LEVEL-1] 动作初筛通过 (场景变化率: ${(changeRate * 100).toFixed(1)}%)`)
+        } else {
+          pushLog("info", "[LEVEL-1] 无逐帧运动特征，初筛放行。")
+        }
+
+        const promptRules: VlmPromptRule[] = matched.map((rule) => ({
+          id: rule.id,
+          name: rule.name,
+          description: ruleDescription(rule),
+          sensitivity: ruleSensitivity(rule),
+          severity: rule.severity,
+          cooldownSeconds: rule.cooldownSeconds,
+        }))
         pushLog(
           "req",
-          `POST /api/v1/vlm/analyze  model=${model ?? "(网关默认)"}  frames=${vlmFrames.length}  rules=[${enabled
-            .map((r) => `"${r}"`)
-            .join(",")}]  threshold=${s.threshold.toFixed(2)}`
+          `[LEVEL-2] 动态组装 ${promptRules.length} 条规则语义注入 VLM (${model ?? "网关默认模型"})...`
         )
         if (!apiKeyRef.current) {
           pushLog("warn", "未设置 API Key，以匿名模式调用（本地网关可忽略此提示）。")
         }
 
-        const { result, metrics } = await analyzeVlmOnce({
+        const hintedRule = video.truth.ruleId && promptRules.some((r) => r.id === video.truth.ruleId)
+        const { result, metrics, verdict, reasoning } = await analyzeVlmOnce({
           keyframes: vlmFrames,
           apiUrl: s.apiUrl.trim() || undefined,
           apiKey: apiKeyRef.current || undefined,
           modelName: model,
-          ruleScenario: enabled.map((id) => RULES[id].scenarioLabel).join("、"),
+          sourceType: "local",
+          sourceKey,
+          rules: promptRules,
           simulation: {
-            scenario: truth.ruleId ? RULES[truth.ruleId].scenarioLabel : "画面正常",
-            confidence: truth.confidence,
+            ruleId: hintedRule ? video.truth.ruleId : null,
+            confidence: video.truth.confidence,
           },
         })
-        const reasoning = result.intentAnalysis
 
         if (metrics.source === "fallback") {
           pushLog("warn", `未使用远端模型：${metrics.fallbackReason ?? "未配置可用端点"}，已切换离线模拟引擎。`)
         }
         pushLog(
           "res",
-          `200 OK  ${metrics.rttMs}ms  source=${metrics.source}  tokens=${metrics.promptTokens}+${metrics.outputTokens}`
-        )
-        pushLog(
-          "res",
-          `{"severity":"${result.severity}","rule":"${result.ruleTriggered}","confidence":${result.confidence.toFixed(2)}}`
+          `[LEVEL-2] 响应完成  ${metrics.rttMs}ms  source=${metrics.source}  tokens=${metrics.promptTokens}+${metrics.outputTokens}`
         )
 
-        const kind = classifyScenario(`${result.ruleTriggered} ${result.summary}`)
-        const detected: RuleId | undefined =
-          result.severity === "SAFE" || kind === "safe" || kind === "crowd" ? undefined : kind
+        const matchedRule = verdict.ruleId ? matched.find((r) => r.id === verdict.ruleId) : undefined
         let status: VideoItem["status"] = "safe"
-        let ruleId: VideoItem["ruleId"]
         let suppressedReason: string | undefined
+        const hit = verdict.triggered && verdict.ruleId
 
-        if (result.severity !== "SAFE") {
-          if (detected && s.rules[detected]) {
-            ruleId = detected
-            if (result.confidence >= s.threshold) {
-              status = "alert"
-            } else {
-              suppressedReason = `疑似「${RULES[detected].ruleName}」，置信度 ${Math.round(
-                result.confidence * 100
-              )}% 低于阈值 ${Math.round(s.threshold * 100)}%，未触发预警`
-            }
-          } else if (detected) {
-            suppressedReason = `检出场景「${RULES[detected].scenarioLabel}」已在配置中关闭，结果被忽略`
-          } else {
-            suppressedReason = `模型判定「${result.ruleTriggered}」不在已启用的规则范围内，未触发预警`
+        if (hit) {
+          status = "alert"
+          const threshold = verdict.threshold ?? 0
+          pushLog(
+            "alert",
+            `[LEVEL-2] 触发 [${verdict.ruleId} ${verdict.ruleName ?? ""}] (置信度 ${result.confidence.toFixed(2)} >= 阈值 ${threshold.toFixed(2)})`
+          )
+          const sup = verdict.suppression
+          if (sup?.suppressed) {
+            pushLog(
+              "warn",
+              `[SUPPRESSION] 冷却窗口 ${sup.windowSeconds}s 内重复触发，已折叠进事件 ${sup.incidentId ?? "-"} 证据链 (累计 ${sup.triggerCount} 次，折叠 ${sup.suppressedCount} 次)，窗口从最新触发重新计时`
+            )
+          } else if (sup) {
+            pushLog(
+              "ok",
+              `[SUPPRESSION] 规则冷却窗口 ${sup.windowSeconds}s 激活，新预警 ${sup.incidentId ?? ""} 入库并派发至处置联动看板`
+            )
           }
+        } else if (verdict.belowThreshold && verdict.ruleId) {
+          suppressedReason = `疑似「${verdict.ruleName ?? verdict.ruleId}」，置信度 ${Math.round(
+            result.confidence * 100
+          )}% 低于阈值 ${Math.round((verdict.threshold ?? 0) * 100)}%，未触发预警`
+          pushLog("warn", `[LEVEL-2] ${suppressedReason}`)
+        } else {
+          pushLog("ok", `[LEVEL-2] 画面正常，未触发任何生效规则  ← ${video.name}`)
         }
 
         patchVideo(video.id, {
           status,
-          ruleId,
+          ruleId: hit ? (verdict.ruleId ?? undefined) : undefined,
+          ruleName: hit ? (verdict.ruleName ?? verdict.ruleId ?? undefined) : undefined,
+          ruleSeverity: hit ? normalizeSeverity(matchedRule?.severity ?? result.severity) : undefined,
           confidence: result.confidence,
+          triggerCount: hit ? verdict.suppression?.triggerCount : undefined,
+          suppressedCount: hit ? verdict.suppression?.suppressedCount : undefined,
+          incidentId: hit ? (verdict.suppression?.incidentId ?? undefined) : undefined,
           suppressedReason,
           samplingFps: s.samplingFps,
           frames,
           keyframes,
           keyframeWindow,
-          vlmReport: { result, metrics, reasoning },
+          vlmReport: { result, metrics, verdict, reasoning },
           analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
         })
-
-        if (status === "alert" && ruleId) {
-          pushLog(
-            "alert",
-            `触发预警 [${RULES[ruleId].ruleName}]  conf=${Math.round(result.confidence * 100)}%  ← ${video.name}`
-          )
-        } else if (suppressedReason) {
-          pushLog("warn", suppressedReason)
-        } else {
-          pushLog("ok", `分析完成：未发现违规行为  ← ${video.name}`)
-        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "分析失败"
         patchVideo(video.id, { status: "pending" })

@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
-import { RULES } from "@/lib/vigil/rules"
+import { normalizeSeverity } from "@/lib/vigil/rules"
 import { KeyframeGrid } from "./frame-test-dialog"
 import { SeverityBadge } from "./status-badges"
 import { useVigil } from "./vigil-provider"
@@ -40,8 +40,10 @@ export function VideoDetailDialog() {
   const { queue, selectedId, setSelectedId, modelName } = useVigil()
   const video = queue.find((v) => v.id === selectedId)
   const open = Boolean(video && (video.status === "alert" || video.status === "safe"))
-  const rule = video?.status === "alert" && video.ruleId ? RULES[video.ruleId] : null
+  const isAlert = video?.status === "alert" && Boolean(video.ruleId)
   const report = video?.vlmReport
+  const ruleName = video?.ruleName ?? video?.ruleId ?? "异常预警"
+  const severity = normalizeSeverity(video?.ruleSeverity)
   const reportedModel = report?.metrics.model ?? modelName
   const sourceLabel = report ? (report.metrics.source === "remote" ? "远端模型" : "离线模拟") : null
 
@@ -60,12 +62,7 @@ export function VideoDetailDialog() {
             : []
         })
       : []
-  const evidencePoints =
-    rule && video
-      ? reportEvidence.length > 0
-        ? reportEvidence
-        : rule.evidence.map((ev) => ({ at: ev.at, sec: ev.at * video.durationSec, text: ev.text }))
-      : []
+  const evidencePoints = isAlert ? reportEvidence : []
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && setSelectedId(null)}>
@@ -74,15 +71,15 @@ export function VideoDetailDialog() {
           <>
             <DialogHeader className="gap-2 border-b border-border p-6">
               <div className="flex items-center gap-2">
-                {rule ? (
+                {isAlert ? (
                   <>
                     <TriangleAlert className="size-5 text-destructive" aria-hidden="true" />
-                    <SeverityBadge severity={rule.severity} />
+                    <SeverityBadge severity={severity} />
                   </>
                 ) : (
                   <CircleCheck className="size-5 text-success" aria-hidden="true" />
                 )}
-                <DialogTitle>{rule ? rule.ruleName : "分析结果：未发现违规行为"}</DialogTitle>
+                <DialogTitle>{isAlert ? ruleName : "分析结果：未发现违规行为"}</DialogTitle>
               </div>
               <DialogDescription className="font-mono text-xs break-all">
                 {video.name} · {formatDuration(video.durationSec)} · {formatSize(video.sizeMB)} ·
@@ -100,11 +97,11 @@ export function VideoDetailDialog() {
                     <KeyframeGrid keyframes={video.keyframes} />
                   </Section>
                 )}
-                {rule ? (
+                {isAlert ? (
                   <>
                     <Section icon={ClipboardList} title="事件概述">
                       <p className="text-sm leading-relaxed text-muted-foreground">
-                        {report?.result.summary ?? rule.brief}
+                        {report?.result.summary ?? "模型判定命中该规则。"}
                       </p>
                       <div className="relative mt-2 h-8 rounded-md bg-secondary" aria-hidden="true">
                         {evidencePoints.map((ev, i) => (
@@ -129,11 +126,17 @@ export function VideoDetailDialog() {
 
                     <Section icon={Cpu} title={`模型推理依据 (${reportedModel})`}>
                       <p className="rounded-lg border border-border bg-secondary/50 p-3 text-sm leading-relaxed text-muted-foreground">
-                        {report?.result.intentAnalysis ?? rule.reasoning}
+                        {report?.result.reasoning ?? "暂无模型推理记录。"}
                       </p>
-                      {report && report.result.violationClauses.length > 0 && (
-                        <p className="text-sm text-muted-foreground">
-                          合规扣分项：{report.result.violationClauses.join("；")}
+                      {report && report.result.timestampOffset && (
+                        <p className="font-mono text-xs text-muted-foreground">
+                          违规时间点 {report.result.timestampOffset}
+                          {report.result.bbox ? ` · 目标框 [${report.result.bbox.join(", ")}]` : ""}
+                        </p>
+                      )}
+                      {video.triggerCount !== undefined && video.triggerCount > 1 && (
+                        <p className="text-xs text-warning" role="status">
+                          冷却窗口内累计触发 {video.triggerCount} 次，其中 {video.suppressedCount ?? 0} 次已折叠进同一事件。
                         </p>
                       )}
                       <p className="font-mono text-xs text-muted-foreground">
@@ -149,24 +152,16 @@ export function VideoDetailDialog() {
                     </Section>
 
                     <Section icon={ListChecks} title="建议处置措施">
-                      {report?.result.actionAdvice ? (
-                        <p className="text-sm leading-relaxed text-muted-foreground">
-                          {report.result.actionAdvice}
-                        </p>
-                      ) : (
-                        <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-primary">
-                          {rule.actions.map((action) => (
-                            <li key={action}>{action}</li>
-                          ))}
-                        </ol>
-                      )}
+                      <p className="text-sm leading-relaxed text-muted-foreground">
+                        {report?.result.advice || "请由值班人员现场核实并按预案处置。"}
+                      </p>
                     </Section>
                   </>
                 ) : (
                   <Section icon={Cpu} title={`模型推理依据 (${reportedModel})`}>
                     <p className="rounded-lg border border-border bg-secondary/50 p-3 text-sm leading-relaxed text-muted-foreground">
                       {video.suppressedReason ??
-                        report?.result.intentAnalysis ??
+                        report?.result.reasoning ??
                         "模型对全部采样帧完成逐帧推理，未检测到与已启用规则匹配的异常行为，人员活动与环境状态均处于正常范围。"}
                     </p>
                     <p className="font-mono text-xs text-muted-foreground">

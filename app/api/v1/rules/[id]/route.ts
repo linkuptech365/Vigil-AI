@@ -1,4 +1,5 @@
 import type { UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
+import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
 import { ALL_CHANNELS, COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
 import { listRules, updateRule } from "@/lib/ops/server/rule-engine"
@@ -9,7 +10,7 @@ export const dynamic = "force-dynamic"
 
 const ACTION_KEYS: RuleActionKey[] = ["webhook", "dispatch", "siren"]
 
-const SEVERITIES: RuleSeverity[] = ["WARNING", "CRITICAL"]
+const SEVERITIES: RuleSeverity[] = ["INFO", "WARNING", "CRITICAL"]
 const SCHEDULES: RuleSchedule[] = ["24x7", "NIGHT_ONLY", "WORK_HOURS"]
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -27,7 +28,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   }
   if (severity !== undefined) {
     if (!SEVERITIES.includes(severity as RuleSeverity)) {
-      return jsonError(400, "INVALID_REQUEST", "severity 必须是 WARNING 或 CRITICAL")
+      return jsonError(400, "INVALID_REQUEST", "severity 必须是 INFO、WARNING 或 CRITICAL")
     }
     patch.severity = severity as RuleSeverity
   }
@@ -46,9 +47,23 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   if (boundChannels !== undefined) {
     const valid =
       Array.isArray(boundChannels) &&
-      boundChannels.every((channel) => typeof channel === "string" && ALL_CHANNELS.includes(channel))
-    if (!valid) return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是已知通道 ID 的数组")
+      boundChannels.every(
+        (channel) =>
+          typeof channel === "string" && (ALL_CHANNELS.includes(channel) || SCOPE_BINDINGS.includes(channel))
+      )
+    if (!valid) {
+      return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是机位 ID 或 ALL / LOCAL 的数组")
+    }
     patch.boundChannels = Array.from(new Set(boundChannels as string[]))
+  }
+
+  const { description } = body.value
+  if (description !== undefined) {
+    const text = typeof description === "string" ? description.trim() : ""
+    if (text.length < 4 || text.length > 400) {
+      return jsonError(400, "INVALID_REQUEST", "description 必须是 4~400 字的文本")
+    }
+    patch.description = text
   }
 
   const { sensitivity, actions } = body.value

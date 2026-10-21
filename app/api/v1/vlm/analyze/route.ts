@@ -6,8 +6,11 @@ import type {
   VlmFinalResult,
   VlmKeyframeInput,
   VlmMetrics,
+  VlmPromptRule,
   VlmSimulationHint,
+  VlmSourceType,
   VlmStreamChunk,
+  VlmVerdict,
 } from "@/lib/ops/vlm-api-types"
 import { runAnalysis } from "@/lib/ops/server/vlm-engine"
 import type { EngineContext, NormalizedInput } from "@/lib/ops/server/vlm-shared"
@@ -61,10 +64,48 @@ function parseKeyframes(value: unknown): VlmKeyframeInput[] | string {
 
 function parseSimulation(value: unknown): VlmSimulationHint | undefined {
   const record = asRecord(value)
-  const scenario = cleanText(record?.scenario, 200)
-  if (!record || !scenario) return undefined
+  if (!record) return undefined
+  const ruleId = cleanText(record.ruleId, 64)
   const confidence = typeof record.confidence === "number" && Number.isFinite(record.confidence) ? record.confidence : undefined
-  return { scenario, confidence }
+  if (!ruleId && confidence === undefined) return undefined
+  return { ruleId, confidence }
+}
+
+const SEVERITY_VALUES: ReadonlySet<string> = new Set(["INFO", "WARNING", "CRITICAL"])
+const MAX_RULES = 32
+
+function parseRules(value: unknown): VlmPromptRule[] | string {
+  if (!Array.isArray(value) || value.length === 0) return "rules 不能为空：当前视频源没有生效的检测规则"
+  if (value.length > MAX_RULES) return `rules 最多 ${MAX_RULES} 条`
+
+  const rules: VlmPromptRule[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    const record = asRecord(item)
+    const id = cleanText(record?.id, 64)
+    const name = cleanText(record?.name, 120)
+    const description = cleanText(record?.description, 1200)
+    if (!record || !id || !name || !description) return "rules 中的每一项都必须包含 id、name、description"
+    if (seen.has(id)) return `rules 中存在重复的规则编号 ${id}`
+    seen.add(id)
+
+    const sensitivity = typeof record.sensitivity === "number" && Number.isFinite(record.sensitivity) ? record.sensitivity : 0.7
+    const severity = typeof record.severity === "string" && SEVERITY_VALUES.has(record.severity) ? record.severity : "WARNING"
+    const cooldown = typeof record.cooldownSeconds === "number" && Number.isFinite(record.cooldownSeconds) ? record.cooldownSeconds : 60
+    rules.push({
+      id,
+      name,
+      description,
+      sensitivity: Math.round(Math.min(1, Math.max(0, sensitivity)) * 100) / 100,
+      severity: severity as VlmPromptRule["severity"],
+      cooldownSeconds: Math.min(86_400, Math.max(1, Math.round(cooldown))),
+    })
+  }
+  return rules
+}
+
+function parseSourceType(value: unknown): VlmSourceType | undefined {
+  return value === "local" || value === "channel" ? value : undefined
 }
 
 function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: string } {
@@ -77,6 +118,12 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
   const videoPath = cleanText(record.videoPath, 1024)
   if (!videoPath && keyframes.length === 0) return { error: "需要提供 keyframes 或 videoPath 之一" }
 
+  const rules = parseRules(record.rules)
+  if (typeof rules === "string") return { error: rules }
+
+  const sourceType = parseSourceType(record.sourceType)
+  const sourceKey = cleanText(record.sourceKey, 256) ?? (sourceType === "local" ? `LOCAL:${videoPath ?? "unknown"}` : "unknown")
+
   const apiKey = typeof record.apiKey === "string" && record.apiKey.trim() ? record.apiKey.trim().slice(0, 512) : undefined
 
   return {
@@ -86,7 +133,9 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
       apiUrl: cleanText(record.apiUrl, 2048),
       apiKey,
       modelName: cleanText(record.modelName, 128) ?? DEFAULT_MODEL,
-      ruleScenario: cleanText(record.ruleScenario, 400) ?? "",
+      sourceType,
+      sourceKey,
+      rules,
       stream: record.stream !== false,
       remoteStream: record.remoteStream === true,
       simulation: parseSimulation(record.simulation),
@@ -129,6 +178,7 @@ async function collectResponse(input: NormalizedInput, ctx: EngineContext) {
   let reasoning = ""
   let result: VlmFinalResult | null = null
   let metrics: VlmMetrics | null = null
+  let verdict: VlmVerdict | null = null
 
   for await (const chunk of runAnalysis(input, ctx)) {
     if (chunk.type === "token") reasoning += chunk.content
@@ -136,11 +186,12 @@ async function collectResponse(input: NormalizedInput, ctx: EngineContext) {
     else if (chunk.type === "done") {
       result = chunk.result
       metrics = chunk.metrics
+      verdict = chunk.verdict
     } else if (chunk.type === "error") return fail(chunk.message, 500)
   }
 
-  if (!result || !metrics) return fail("推理引擎未返回结果", 500)
-  const body: VlmAnalyzeResponse = { status: "success", result, metrics, reasoning }
+  if (!result || !metrics || !verdict) return fail("推理引擎未返回结果", 500)
+  const body: VlmAnalyzeResponse = { status: "success", result, metrics, verdict, reasoning }
   return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } })
 }
 

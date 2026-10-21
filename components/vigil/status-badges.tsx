@@ -49,9 +49,9 @@ export function SeverityBadge({ severity }: { severity: Severity }) {
     <Badge
       variant="outline"
       className={cn(
-        severity === "critical"
-          ? "border-destructive/50 bg-destructive/15 text-destructive"
-          : "border-warning/50 bg-warning/15 text-warning"
+        severity === "CRITICAL" && "border-destructive/50 bg-destructive/15 text-destructive",
+        severity === "WARNING" && "border-warning/50 bg-warning/15 text-warning",
+        severity === "INFO" && "border-primary/40 bg-primary/10 text-primary"
       )}
     >
       {SEVERITY_LABEL[severity]}

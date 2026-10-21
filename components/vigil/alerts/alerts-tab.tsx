@@ -5,7 +5,7 @@ import { Play, ScanEye, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
-import { RULES } from "@/lib/vigil/rules"
+import { normalizeSeverity } from "@/lib/vigil/rules"
 import { SeverityBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
 
@@ -33,7 +33,7 @@ export function AlertsTab() {
     )
   }
 
-  const critical = alerts.filter((v) => RULES[v.ruleId!].severity === "critical").length
+  const critical = alerts.filter((v) => normalizeSeverity(v.ruleSeverity) === "CRITICAL").length
 
   return (
     <div className="flex flex-col gap-4">
@@ -43,7 +43,9 @@ export function AlertsTab() {
       </p>
       <ul className="grid gap-4 lg:grid-cols-2">
         {alerts.map((video) => {
-          const rule = RULES[video.ruleId!]
+          const severity = normalizeSeverity(video.ruleSeverity)
+          const ruleName = video.ruleName ?? video.ruleId
+          const brief = video.vlmReport?.result.summary ?? ""
           return (
             <li key={video.id}>
               <Card className="h-full border-destructive/30">
@@ -51,8 +53,8 @@ export function AlertsTab() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center gap-2">
-                        <SeverityBadge severity={rule.severity} />
-                        <h3 className="text-sm font-semibold">{rule.ruleName}</h3>
+                        <SeverityBadge severity={severity} />
+                        <h3 className="text-sm font-semibold">{ruleName}</h3>
                       </div>
                       <p className="truncate font-mono text-xs text-muted-foreground" title={video.name}>
                         {video.name}
@@ -62,7 +64,7 @@ export function AlertsTab() {
                       {Math.round((video.confidence ?? 0) * 100)}%
                     </span>
                   </div>
-                  <p className="flex-1 text-sm leading-relaxed text-muted-foreground">{rule.brief}</p>
+                  <p className="flex-1 text-sm leading-relaxed text-muted-foreground">{brief}</p>
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono text-xs text-muted-foreground">
                       {video.analyzedAt}

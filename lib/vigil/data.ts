@@ -54,15 +54,6 @@ export const DEFAULT_SETTINGS: Settings = {
   presetId: "fastapi",
   samplingFps: 2,
   threshold: 0.8,
-  rules: {
-    violence: true,
-    ppe: true,
-    fire: true,
-    intrusion: true,
-    gmpEsd: true,
-    gmpTransfer: true,
-    gmpClassA: true,
-  },
   folderPath: DEFAULT_FOLDER,
   recursive: true,
   formats: [...VIDEO_FORMATS],
@@ -82,7 +73,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 12.4,
     fps: 25,
     recordedAt: today("08:15:30"),
-    truth: { ruleId: "violence", confidence: 0.94 },
+    truth: { ruleId: "RULE-03", confidence: 0.94 },
   },
   machining: {
     name: "machining_zone_cam07_20261020_094212.mp4",
@@ -91,7 +82,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 23.8,
     fps: 25,
     recordedAt: today("09:42:12"),
-    truth: { ruleId: "ppe", confidence: 0.91 },
+    truth: { ruleId: "RULE-05", confidence: 0.91 },
   },
   parking: {
     name: "parking_north_cam03_20261020_110005.mp4",
@@ -109,7 +100,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 31.2,
     fps: 25,
     recordedAt: today("14:23:47"),
-    truth: { ruleId: "fire", confidence: 0.89 },
+    truth: { ruleId: "RULE-04", confidence: 0.89 },
   },
   perimeter: {
     name: "perimeter_west_cam05_20261020_023318.avi",
@@ -118,7 +109,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 14.6,
     fps: 15,
     recordedAt: today("02:33:18"),
-    truth: { ruleId: "intrusion", confidence: 0.96 },
+    truth: { ruleId: "RULE-01", confidence: 0.96 },
   },
   lobby: {
     name: "lobby_main_cam02_20261020_131500.mov",
@@ -136,7 +127,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 9.7,
     fps: 25,
     recordedAt: today("12:18:40"),
-    truth: { ruleId: "violence", confidence: 0.87 },
+    truth: { ruleId: "RULE-03", confidence: 0.87 },
   },
   siteHelmet: {
     name: "construction_site_cam09_20261020_100730.mp4",
@@ -145,7 +136,7 @@ const SEEDS: Record<string, VideoSeed> = {
     sizeMB: 21.3,
     fps: 25,
     recordedAt: today("10:07:30"),
-    truth: { ruleId: "ppe", confidence: 0.93 },
+    truth: { ruleId: "RULE-05", confidence: 0.93 },
   },
   dock: {
     name: "loading_dock_cam06_20261020_153010.mp4",
@@ -220,17 +211,17 @@ export function hashString(value: string) {
 
 const LOCAL_TRUTHS: Truth[] = [
   { ruleId: null, confidence: 0.97 },
-  { ruleId: "violence", confidence: 0.92 },
+  { ruleId: "RULE-03", confidence: 0.92 },
   { ruleId: null, confidence: 0.95 },
-  { ruleId: "ppe", confidence: 0.9 },
-  { ruleId: "intrusion", confidence: 0.94 },
-  { ruleId: "fire", confidence: 0.88 },
+  { ruleId: "RULE-05", confidence: 0.9 },
+  { ruleId: "RULE-01", confidence: 0.94 },
+  { ruleId: "RULE-04", confidence: 0.88 },
 ]
 
 const GMP_TRUTHS: Record<string, Truth> = {
-  "case_bio_01_esd_shoes_violation.mp4": { ruleId: "gmpEsd", confidence: 0.93 },
-  "case_bio_02_aseptic_transfer_collision.mp4": { ruleId: "gmpTransfer", confidence: 0.95 },
-  "case_bio_03_class_a_zone_touch.mp4": { ruleId: "gmpClassA", confidence: 0.97 },
+  "case_bio_01_esd_shoes_violation.mp4": { ruleId: "RULE-BIO-01", confidence: 0.93 },
+  "case_bio_02_aseptic_transfer_collision.mp4": { ruleId: "RULE-BIO-02", confidence: 0.95 },
+  "case_bio_03_class_a_zone_touch.mp4": { ruleId: "RULE-BIO-03", confidence: 0.97 },
   "case_bio_04_standard_gmp_operation.mp4": { ruleId: null, confidence: 0.99 },
 }
 

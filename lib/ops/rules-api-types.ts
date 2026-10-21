@@ -181,6 +181,9 @@ export interface CreateRuleRequest {
   /** 0.6~0.95 */
   sensitivity: number
   actions: Record<RuleActionKey, boolean>
+  /** 缺省为 ["ALL"]（全部视频源）；可指定机位 ID，或 "ALL" / "LOCAL" */
+  boundChannels?: string[]
+  severity?: RuleSeverity
 }
 
 export interface CreateRuleResponse extends RulesListResponse {
@@ -192,10 +195,13 @@ export interface UpdateRuleRequest {
   severity?: RuleSeverity
   cooldownSeconds?: number
   schedule?: RuleSchedule
+  /** 具体机位 ID，或通用范围 "ALL"（全部视频源）/ "LOCAL"（本地视频） */
   boundChannels?: string[]
   /** 0.3~0.99 */
   sensitivity?: number
   actions?: Record<RuleActionKey, boolean>
+  /** VLM 语义判定依据；语义规则写入 prompt，确定性规则写入 logic */
+  description?: string
 }
 
 export interface UpdateRuleResponse extends RulesListResponse {

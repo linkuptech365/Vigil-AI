@@ -7,7 +7,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { useVigil } from "@/components/vigil/vigil-provider"
 import { triggerSecOf } from "@/lib/vigil/library-overlay"
-import { RULES } from "@/lib/vigil/rules"
 import type { VideoItem } from "@/lib/vigil/types"
 import { cameraTag } from "@/lib/vigil/video-source"
 import { cn } from "@/lib/utils"
@@ -65,7 +64,6 @@ export function LibraryAlerts() {
       </h3>
       <ul className="flex flex-col gap-2">
         {alerts.map((video) => {
-          const rule = video.ruleId ? RULES[video.ruleId] : null
           const isFresh = fresh.has(video.id)
           const isLocated = videoTarget?.videoId === video.id
           return (
@@ -82,7 +80,7 @@ export function LibraryAlerts() {
                   <Badge className="bg-destructive font-mono text-[10px] text-destructive-foreground">
                     ALERT
                   </Badge>
-                  <span className="text-sm font-semibold">{rule?.scenarioLabel}</span>
+                  <span className="text-sm font-semibold">{video.ruleName ?? video.ruleId}</span>
                   {isFresh && (
                     <Badge variant="outline" className="border-signal text-[10px] text-signal">
                       新预警

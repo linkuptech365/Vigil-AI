@@ -15,6 +15,20 @@ export interface CustomRuleInput {
   prompt: string
   sensitivity: number
   actions: Record<RuleActionKey, boolean>
+  boundChannels?: string[]
+}
+
+/** description 是 VLM 语义判定依据：语义规则落到 prompt，确定性规则落到 logic。 */
+export type RulePatch = Partial<InspectionRule> & { description?: string }
+
+function applyPatch(rule: InspectionRule, patch: RulePatch): InspectionRule {
+  const { description, ...rest } = patch
+  const next = { ...rule, ...rest }
+  if (description !== undefined) {
+    if (rule.type === "PROMPT_SEMANTIC") next.prompt = description
+    else next.logic = description
+  }
+  return next
 }
 
 const PATCH_KEYS = ["enabled", "severity", "cooldownSeconds", "schedule", "boundChannels", "sensitivity", "actions"] as const
@@ -34,6 +48,9 @@ async function restoreRulesFromStorage(server: InspectionRule[]) {
           patch[key] = saved[key]
         }
       }
+      const savedText = saved.type === "PROMPT_SEMANTIC" ? saved.prompt : saved.logic
+      const liveText = live.type === "PROMPT_SEMANTIC" ? live.prompt : live.logic
+      if (savedText && savedText !== liveText) patch.description = savedText
       if (Object.keys(patch).length === 0) continue
       try {
         await sendJson<UpdateRuleResponse>(`${RULES_ENDPOINT}/${live.id}`, "PATCH", patch)
@@ -48,6 +65,8 @@ async function restoreRulesFromStorage(server: InspectionRule[]) {
           prompt: saved.prompt,
           sensitivity: saved.sensitivity ?? 0.8,
           actions: saved.actions ?? { webhook: true, dispatch: true, siren: false },
+          boundChannels: saved.boundChannels.length ? saved.boundChannels : undefined,
+          severity: saved.severity,
         })
         touched = true
       } catch {
@@ -92,7 +111,7 @@ export function useServerRules() {
   }, [data, mutate])
 
   const updateRule = React.useCallback(
-    async (id: string, patch: Partial<InspectionRule>) => {
+    async (id: string, patch: RulePatch) => {
       try {
         await mutate(
           async () => {
@@ -102,7 +121,7 @@ export function useServerRules() {
           {
             optimisticData: (current) => ({
               rules: (current?.rules ?? INITIAL_INSPECTION_RULES).map((rule) =>
-                rule.id === id ? { ...rule, ...patch } : rule
+                rule.id === id ? applyPatch(rule, patch) : rule
               ),
             }),
             rollbackOnError: true,

@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/table"
 import { Spinner } from "@/components/ui/spinner"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
-import { RULES } from "@/lib/vigil/rules"
 import type { VideoItem } from "@/lib/vigil/types"
 import { VideoStatusBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
@@ -92,7 +91,7 @@ export function QueueTable({ videos }: { videos?: VideoItem[] }) {
                     <VideoStatusBadge status={video.status} />
                     {video.status === "alert" && video.ruleId && (
                       <span className="text-xs text-destructive">
-                        {RULES[video.ruleId].scenarioLabel}
+                        {video.ruleName ?? video.ruleId}
                       </span>
                     )}
                     {video.status === "safe" && video.suppressedReason && (

@@ -23,6 +23,7 @@ import { DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { type RuleStudioTab, useOps } from "./ops-provider"
+import { RuleScopePicker } from "./rules/rule-scope-picker"
 import { useServerRules } from "./rules/use-server-rules"
 
 const ACTIONS: { key: RuleActionKey; label: string; icon: typeof BellRing }[] = [
@@ -110,6 +111,16 @@ function RuleRow({ rule }: { rule: InspectionRule }) {
         </div>
       )}
 
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs text-muted-foreground">适用范围</span>
+        <RuleScopePicker
+          value={rule.boundChannels}
+          disabled={!rule.enabled}
+          onChange={(boundChannels) => void updateRule(rule.id, { boundChannels })}
+          label={`${rule.name} 适用范围`}
+        />
+      </div>
+
       <div className="flex flex-wrap gap-x-5 gap-y-2">
         {ACTIONS.map(({ key, label, icon: Icon }) => {
           const id = `${rule.id}-${key}`
@@ -139,6 +150,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
   const { addCustomRule } = useServerRules()
   const [prompt, setPrompt] = React.useState(DEFAULT_CUSTOM_PROMPT)
   const [actions, setActions] = React.useState(DEFAULT_ACTIONS)
+  const [bound, setBound] = React.useState<string[]>(["ALL"])
   const [submitting, setSubmitting] = React.useState(false)
 
   const valid = prompt.trim().length >= 8
@@ -151,6 +163,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
       prompt: text,
       sensitivity: 0.85,
       actions,
+      boundChannels: bound,
     })
     setSubmitting(false)
     if (created) onCreated()
@@ -174,6 +187,14 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
           </p>
         </Field>
       </FieldGroup>
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mb-1 text-sm font-medium">适用范围 (Bound Scope)</legend>
+        <RuleScopePicker value={bound} onChange={setBound} />
+        <p className="text-xs text-muted-foreground">
+          ALL 对所有视频源生效；LOCAL 仅用于本地视频；也可只勾选指定机位。
+        </p>
+      </fieldset>
 
       <fieldset className="flex flex-col gap-3">
         <legend className="mb-1 text-sm font-medium">联动响应</legend>
