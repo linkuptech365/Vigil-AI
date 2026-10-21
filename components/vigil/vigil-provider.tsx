@@ -51,7 +51,95 @@ export type TabId = "config" | "queue" | "alerts"
 
 const STORAGE_KEY = "vigil-ai:settings"
 const MODEL_STORAGE_KEY = "vigil_api_model"
-const MAX_LOGS = 400
+const QUEUE_STORAGE_KEY = "vigil_queue_state"
+const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
+const MAX_LOGS = 200
+
+const LOG_LEVELS: readonly LogLevel[] = ["sys", "info", "sample", "req", "res", "ok", "warn", "alert"]
+
+function readStoredQueue(): VideoItem[] | null {
+  try {
+    const raw = window.localStorage.getItem(QUEUE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) throw new Error("invalid queue cache")
+    const items = parsed.filter(
+      (v): v is VideoItem =>
+        typeof v === "object" &&
+        v !== null &&
+        typeof (v as VideoItem).id === "string" &&
+        typeof (v as VideoItem).name === "string" &&
+        typeof (v as VideoItem).path === "string"
+    )
+    if (items.length === 0) return null
+    // 刷新或跳转时正在进行的分析请求已随页面中断，回退为待分析
+    return items.map((v) => (v.status === "analyzing" ? { ...v, status: "pending" as const } : v))
+  } catch {
+    try {
+      window.localStorage.removeItem(QUEUE_STORAGE_KEY)
+    } catch {
+      // 忽略
+    }
+    return null
+  }
+}
+
+function writeStoredQueue(queue: VideoItem[]) {
+  try {
+    if (queue.length === 0) {
+      window.localStorage.removeItem(QUEUE_STORAGE_KEY)
+      return
+    }
+    try {
+      window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(queue))
+    } catch {
+      // 配额不足时丢弃体积最大的抽帧缩略图，仍保留分析结论
+      const slim = queue.map(({ keyframes: _keyframes, ...rest }) => rest)
+      window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(slim))
+    }
+  } catch {
+    // 隐私模式或存储已满：仅在当前页面内存中生效
+  }
+}
+
+function readStoredLogs(): LogLine[] {
+  try {
+    const raw = window.localStorage.getItem(LOGS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) throw new Error("invalid log cache")
+    return parsed
+      .filter(
+        (l): l is LogLine =>
+          typeof l === "object" &&
+          l !== null &&
+          typeof (l as LogLine).id === "number" &&
+          typeof (l as LogLine).ts === "string" &&
+          typeof (l as LogLine).text === "string" &&
+          LOG_LEVELS.includes((l as LogLine).level)
+      )
+      .slice(-MAX_LOGS)
+  } catch {
+    try {
+      window.localStorage.removeItem(LOGS_STORAGE_KEY)
+    } catch {
+      // 忽略
+    }
+    return []
+  }
+}
+
+function writeStoredLogs(logs: LogLine[]) {
+  try {
+    if (logs.length === 0) {
+      window.localStorage.removeItem(LOGS_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(logs.slice(-MAX_LOGS)))
+  } catch {
+    // 隐私模式或存储已满：仅在当前页面内存中生效
+  }
+}
 
 interface VigilContextValue {
   settings: Settings
@@ -198,7 +286,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const frameTestToken = React.useRef(0)
   const busyRef = React.useRef(new Set<string>())
   const logId = React.useRef(0)
-  const booted = React.useRef(false)
+  const hydrateStarted = React.useRef(false)
 
   React.useEffect(() => {
     settingsRef.current = settings
@@ -223,6 +311,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   React.useEffect(() => {
+    if (hydrateStarted.current) return
+    hydrateStarted.current = true
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY)
       if (raw) {
@@ -246,8 +336,33 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       // 隐私模式下 localStorage 不可读，沿用默认预设的模型名
     }
     setApiKeyState(readStoredApiKey())
+
+    const storedQueue = readStoredQueue()
+    if (storedQueue) {
+      queueRef.current = storedQueue
+      setQueue(storedQueue)
+    }
+
+    const storedLogs = readStoredLogs()
+    if (storedLogs.length > 0) {
+      logId.current = storedLogs.reduce((max, l) => Math.max(max, l.id), 0)
+      setLogs(storedLogs)
+    } else {
+      pushLog("sys", "Vigil-AI Sentinel v1.0 初始化完成，等待接入模型 API。")
+      pushLog("sys", "视频推理管线就绪：frame-sampler / vlm-client / rule-engine")
+    }
     setHydrated(true)
-  }, [])
+  }, [pushLog])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    writeStoredQueue(queue)
+  }, [queue, hydrated])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    writeStoredLogs(logs)
+  }, [logs, hydrated])
 
   const setApiKey = React.useCallback((value: string) => {
     setApiKeyState(value)
@@ -258,13 +373,6 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     if (!hydrated) return
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
   }, [settings, hydrated])
-
-  React.useEffect(() => {
-    if (booted.current) return
-    booted.current = true
-    pushLog("sys", "Vigil-AI Sentinel v1.0 初始化完成，等待接入模型 API。")
-    pushLog("sys", "视频推理管线就绪：frame-sampler / vlm-client / rule-engine")
-  }, [pushLog])
 
   const updateSettings = React.useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => ({ ...prev, ...patch }))
@@ -700,7 +808,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   }, [hydrated, scanFolder])
 
   const clearQueue = React.useCallback(() => {
+    queueRef.current = []
     setQueue([])
+    writeStoredQueue([])
     pushLog("info", "检测队列已清空。")
   }, [pushLog])
 
@@ -708,7 +818,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     setQueue((prev) => prev.filter((v) => v.id !== id))
   }, [])
 
-  const clearLogs = React.useCallback(() => setLogs([]), [])
+  const clearLogs = React.useCallback(() => {
+    setLogs([])
+    writeStoredLogs([])
+  }, [])
 
   const value = React.useMemo<VigilContextValue>(
     () => ({

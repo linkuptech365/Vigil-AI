@@ -46,13 +46,13 @@ function Shell() {
             )}
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="config">
+        <TabsContent value="config" forceMount className="data-[state=inactive]:hidden">
           <ConfigTab />
         </TabsContent>
-        <TabsContent value="queue">
+        <TabsContent value="queue" forceMount className="data-[state=inactive]:hidden">
           <QueueTab />
         </TabsContent>
-        <TabsContent value="alerts">
+        <TabsContent value="alerts" forceMount className="data-[state=inactive]:hidden">
           <AlertsTab />
         </TabsContent>
       </Tabs>

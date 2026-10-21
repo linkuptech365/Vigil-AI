@@ -20,13 +20,13 @@ const LEVEL_STYLE: Record<LogLevel, { tag: string; className: string }> = {
 }
 
 export function TerminalConsole() {
-  const { logs, clearLogs } = useVigil()
+  const { logs, clearLogs, activeTab } = useVigil()
   const viewportRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
     const el = viewportRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [logs])
+    if (el && activeTab === "queue") el.scrollTop = el.scrollHeight
+  }, [logs, activeTab])
 
   return (
     <section
