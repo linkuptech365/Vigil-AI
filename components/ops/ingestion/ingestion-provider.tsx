@@ -21,7 +21,10 @@ import {
   type SamplingMode,
   type StreamSource,
 } from "@/lib/ops/ingestion-types"
+import { isLocalChannelId, parseLocalChannelId } from "@/lib/ops/local-source"
 import { secondsToTime, shanghaiClock, timeToSeconds } from "@/lib/ops/utils"
+import type { VideoItem } from "@/lib/vigil/types"
+import { useVigil } from "@/components/vigil/vigil-provider"
 
 interface SimState {
   streams: StreamSource[]
@@ -54,6 +57,10 @@ interface IngestionContextValue {
   totals: Totals
   selectedId: string
   selectedStream: StreamSource | undefined
+  /** 全局队列里的本地导入视频，与 CAM 通道并列接入 */
+  localVideos: VideoItem[]
+  /** 当前选中的是本地视频时有值，此时 selectedStream 为空 */
+  selectedLocalVideo: VideoItem | undefined
   selectChannel: (id: string) => void
   addStream: (input: NewStreamInput) => void
   removeStream: (id: string) => void
@@ -155,6 +162,7 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
   const [clips, setClips] = React.useState<BufferedClip[]>([])
   const [extraction, setExtraction] = React.useState<ExtractionState | null>(null)
   const [selectedId, setSelectedId] = React.useState(INITIAL_STREAMS[0].id)
+  const { queue: localVideos } = useVigil()
 
   const simRef = React.useRef(sim)
   const auxRef = React.useRef<Record<string, ChannelAux>>({})
@@ -351,9 +359,14 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
     }
   }, [sim.streams, buffers])
 
-  const resolvedSelectedId = sim.streams.some((s) => s.id === selectedId)
-    ? selectedId
-    : (sim.streams[0]?.id ?? "")
+  const selectedLocalVideo = isLocalChannelId(selectedId)
+    ? localVideos.find((v) => v.id === parseLocalChannelId(selectedId))
+    : undefined
+
+  const resolvedSelectedId =
+    selectedLocalVideo || sim.streams.some((s) => s.id === selectedId)
+      ? selectedId
+      : (sim.streams[0]?.id ?? "")
 
   const value = React.useMemo<IngestionContextValue>(
     () => ({
@@ -365,6 +378,8 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
       totals,
       selectedId: resolvedSelectedId,
       selectedStream: sim.streams.find((s) => s.id === resolvedSelectedId),
+      localVideos,
+      selectedLocalVideo,
       selectChannel: setSelectedId,
       addStream,
       removeStream,
@@ -380,6 +395,8 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
       extraction,
       totals,
       resolvedSelectedId,
+      localVideos,
+      selectedLocalVideo,
       addStream,
       removeStream,
       toggleOffline,

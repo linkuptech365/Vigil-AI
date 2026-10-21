@@ -11,12 +11,14 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { CAMERAS } from "@/lib/ops/data"
+import { localSliceLabel } from "@/lib/ops/local-slice"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { FRAME_COUNT, candidateLabel, frameMark, frameTag } from "@/lib/ops/vlm-data"
 import { cn } from "@/lib/utils"
@@ -127,7 +129,7 @@ function StreamOutput() {
       >
         {phase === "idle" && (
           <p className="text-muted-foreground">
-            选择送检切片与模型后，点击「执行大模型深度研判」，8 帧时序关键帧将与初筛元数据一并送入 VLM。
+            选择送检切片与模型后，点击「执行大模型深度研判」，时序关键帧将与初筛元数据一并送入 VLM。
           </p>
         )}
         {phase === "thinking" && (
@@ -240,9 +242,120 @@ function FrameStrip() {
   )
 }
 
+function LocalFrameStrip() {
+  const { activeLocal, localFrames, localFramesLoading, localFramesError, phase, evidenceFrames } = useVlm()
+  const [selected, setSelected] = React.useState(0)
+  const sliceId = activeLocal?.id
+
+  React.useEffect(() => {
+    setSelected(0)
+  }, [sliceId])
+
+  if (!activeLocal) return null
+
+  const usable = localFrames.filter((f) => !!f.base64)
+  const evidence = evidenceFrames ?? []
+  const showEvidence = evidence.length > 0
+
+  if (usable.length === 0) {
+    return (
+      <div
+        className="flex min-h-24 items-center justify-center gap-2 rounded-md border border-dashed border-border px-3 py-4 text-xs text-muted-foreground"
+        role="status"
+      >
+        {localFramesLoading ? (
+          <>
+            <Spinner className="size-3.5" />
+            正在从原视频重新抽取该切片的关键帧…
+          </>
+        ) : (
+          (localFramesError ?? "该切片暂无关键帧图像，请在检测队列中重新分析该视频。")
+        )}
+      </div>
+    )
+  }
+
+  const current = usable[Math.min(selected, usable.length - 1)]
+
+  return (
+    <div className="flex flex-col gap-2">
+      <ol
+        className="grid grid-cols-4 gap-2 md:grid-cols-8"
+        aria-label={`送入模型的 ${usable.length} 帧真实关键帧`}
+      >
+        {usable.map((frame, index) => {
+          const isEvidence = showEvidence && evidence.includes(index)
+          const isSelected = selected === index
+          return (
+            <li key={`${frame.timestamp}-${index}`}>
+              <button
+                type="button"
+                onClick={() => setSelected(index)}
+                aria-pressed={isSelected}
+                aria-label={`第 ${index + 1} 帧，${frame.timestamp}${isEvidence ? "，模型引用的关键证据帧" : ""}`}
+                className={cn(
+                  "relative block w-full overflow-hidden rounded-md border bg-black text-left outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring",
+                  isEvidence ? "border-signal ring-2 ring-signal/60" : "border-border",
+                  isSelected && !isEvidence && "border-primary",
+                  phase === "thinking" && "animate-pulse",
+                  showEvidence && !isEvidence && "opacity-55"
+                )}
+                style={phase === "thinking" ? { animationDelay: `${index * 120}ms` } : undefined}
+              >
+                <div className="relative aspect-video overflow-hidden">
+                  <img src={frame.base64} alt="" className="size-full object-cover" />
+                  <span className="absolute top-1 left-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">
+                    #{index + 1}
+                  </span>
+                  {isEvidence && (
+                    <span className="absolute top-1 right-1 rounded bg-signal px-1 text-[10px] font-medium text-black">
+                      证据
+                    </span>
+                  )}
+                  <span className="absolute right-1 bottom-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white tabular-nums">
+                    {frame.timestamp}
+                  </span>
+                </div>
+              </button>
+            </li>
+          )
+        })}
+      </ol>
+      <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+        <span className="font-mono text-foreground">
+          #{Math.min(selected, usable.length - 1) + 1} · {current.timestamp}
+        </span>
+        <span>
+          {activeLocal.video.name} · 切片 {activeLocal.chunk.index}/{activeLocal.chunk.total} ·{" "}
+          {activeLocal.chunk.startStr}-{activeLocal.chunk.endStr}
+        </span>
+        {showEvidence && evidence.includes(Math.min(selected, usable.length - 1)) && (
+          <Badge variant="outline" className="border-signal/50 text-signal">
+            模型引用的关键证据
+          </Badge>
+        )}
+      </p>
+    </div>
+  )
+}
+
 export function VlmInferenceRunner() {
-  const { models, model, setModelId, candidates, activeClip, setClipId, phase, run } = useVlm()
+  const {
+    models,
+    model,
+    setModelId,
+    candidates,
+    activeClip,
+    setClipId,
+    selectionId,
+    localSlices,
+    activeLocal,
+    localFramesLoading,
+    phase,
+    run,
+  } = useVlm()
   const busy = phase === "thinking" || phase === "streaming"
+  const hasSelection = !!activeClip || !!activeLocal
 
   return (
     <Card className="gap-0 py-0">
@@ -252,7 +365,7 @@ export function VlmInferenceRunner() {
           多模态推理跑道 (VLM Inference Runway)
         </CardTitle>
         <CardDescription className="text-xs">
-          从一级初筛送检队列中选取候选切片，按时序抽取 8 帧连同初筛元数据送入多模态大模型。
+          从实时通道候选或本地视频切片中选取一项，按时序抽取关键帧连同初筛元数据送入多模态大模型。
         </CardDescription>
       </CardHeader>
       <div className="flex flex-col gap-4 p-4">
@@ -271,18 +384,31 @@ export function VlmInferenceRunner() {
               </SelectGroup>
             </SelectContent>
           </Select>
-          <Select value={activeClip?.id ?? ""} onValueChange={setClipId} disabled={busy}>
+          <Select value={selectionId ?? ""} onValueChange={setClipId} disabled={busy}>
             <SelectTrigger size="sm" className="w-full min-w-0 xl:flex-1" aria-label="选择待研判的候选切片">
               <SelectValue placeholder="暂无可研判的候选切片" />
             </SelectTrigger>
             <SelectContent>
-              <SelectGroup>
-                {candidates.map((clip) => (
-                  <SelectItem key={clip.id} value={clip.id}>
-                    {candidateLabel(clip)}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
+              {candidates.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>实时通道候选</SelectLabel>
+                  {candidates.map((clip) => (
+                    <SelectItem key={clip.id} value={clip.id}>
+                      {candidateLabel(clip)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              {localSlices.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>本地视频切片（来自检测队列）</SelectLabel>
+                  {localSlices.map((slice) => (
+                    <SelectItem key={slice.id} value={slice.id}>
+                      {localSliceLabel(slice)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
             </SelectContent>
           </Select>
         </div>
@@ -293,10 +419,10 @@ export function VlmInferenceRunner() {
           </p>
         </div>
 
-        <FrameStrip />
+        {activeLocal ? <LocalFrameStrip /> : <FrameStrip />}
 
         <div className="flex items-center gap-3">
-          <Button onClick={run} disabled={busy || !activeClip}>
+          <Button onClick={run} disabled={busy || !hasSelection || localFramesLoading}>
             {busy ? (
               <Spinner data-icon="inline-start" />
             ) : phase === "done" ? (
@@ -306,7 +432,7 @@ export function VlmInferenceRunner() {
             )}
             {phase === "done" ? "重新研判 (Re-run)" : "执行大模型深度研判 (Run VLM Reasoning)"}
           </Button>
-          {phase === "thinking" && <span className="text-xs text-muted-foreground">模型正在理解 8 帧时序画面…</span>}
+          {phase === "thinking" && <span className="text-xs text-muted-foreground">模型正在理解时序关键帧画面…</span>}
         </div>
 
         <StreamOutput />

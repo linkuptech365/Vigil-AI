@@ -70,6 +70,58 @@ export interface VideoItem {
   keyframeWindow?: { startSec: number; endSec: number }
   /** 由 /api/v1/vlm/analyze 返回的真实（或离线兜底）研判报告 */
   vlmReport?: VlmAnalysisReport
+  /** 一级初筛的真实结果（浏览器逐秒像素差分），分析完成前为空 */
+  prescreen?: PrescreenResult
+  /** 分段分析的逐切片记录，是三个标签页共用的单一数据源 */
+  chunks?: ChunkRecord[]
+}
+
+export interface PrescreenSegment {
+  start: string
+  end: string
+  startSeconds: number
+  endSeconds: number
+  peakSeconds?: number
+  peakRate?: number
+}
+
+export interface PrescreenResult {
+  durationSec: number
+  /** 初筛实际耗时（毫秒） */
+  elapsedMs: number
+  motionSegments: PrescreenSegment[]
+  staticRatioPercent: number
+  scanStepSeconds: number
+  scannedAt: string
+}
+
+export type ChunkStatus = "pending" | "analyzing" | "alert" | "safe" | "failed"
+
+export interface ChunkFrame {
+  timestamp: string
+  seconds: number
+  reason?: "baseline" | "motion" | "patrol"
+  /** data:image/jpeg;base64,...；刷新页面后不再持久化，需要时从视频重新抽取 */
+  base64?: string
+}
+
+export interface ChunkRecord {
+  /** 从 1 起 */
+  index: number
+  total: number
+  startSec: number
+  endSec: number
+  startStr: string
+  endStr: string
+  status: ChunkStatus
+  frames: ChunkFrame[]
+  ruleId?: string
+  ruleName?: string
+  confidence?: number
+  /** 本切片的研判报告（含推理文本、规则裁决） */
+  report?: VlmAnalysisReport
+  error?: string
+  analyzedAt?: string
 }
 
 export interface FrameTestState {

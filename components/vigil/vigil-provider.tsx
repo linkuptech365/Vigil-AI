@@ -38,6 +38,8 @@ import type {
 } from "@/lib/ops/video-types"
 import { normalizeSeverity } from "@/lib/vigil/rules"
 import type {
+  ChunkFrame,
+  ChunkRecord,
   FrameTestState,
   LogLevel,
   LogLine,
@@ -110,7 +112,23 @@ function readStoredQueue(): VideoItem[] | null {
   }
 }
 
-function writeStoredQueue(queue: VideoItem[]) {
+/** 切片帧像素只保留在内存：刷新后按需从视频重新抽取，避免撑爆 localStorage 配额 */
+function stripChunkPixels(queue: VideoItem[]): VideoItem[] {
+  return queue.map((v) =>
+    v.chunks
+      ? {
+          ...v,
+          chunks: v.chunks.map((c) => ({
+            ...c,
+            frames: c.frames.map(({ base64: _base64, ...frame }) => frame),
+          })),
+        }
+      : v
+  )
+}
+
+function writeStoredQueue(rawQueue: VideoItem[]) {
+  const queue = stripChunkPixels(rawQueue)
   try {
     if (queue.length === 0) {
       window.localStorage.removeItem(QUEUE_STORAGE_KEY)
@@ -199,6 +217,12 @@ interface VigilContextValue {
   clearQueue: () => void
   removeVideo: (id: string) => void
   analyzeOne: (video: VideoItem) => Promise<void>
+  /** 写回某个切片的记录（二级研判重跑后同步到单一数据源） */
+  updateChunk: (videoId: string, index: number, patch: Partial<ChunkRecord>) => void
+  /** 从视频重新抽取某切片的帧（刷新页面后帧像素不再持久化） */
+  recaptureChunkFrames: (videoId: string, index: number) => Promise<ChunkFrame[]>
+  /** 当前规则库中适用于本地视频的规则，用于二级研判重跑 */
+  getLocalPromptRules: () => VlmPromptRule[]
   analyzeAll: () => Promise<void>
   batchRunning: boolean
   logs: LogLine[]
@@ -218,6 +242,19 @@ export function useVigil() {
 }
 
 const MAX_VLM_FRAMES = 16
+
+function toPendingChunk(chunk: VideoChunk): ChunkRecord {
+  return {
+    index: chunk.index,
+    total: chunk.total,
+    startSec: chunk.startTime,
+    endSec: chunk.endTime,
+    startStr: chunk.startStr,
+    endStr: chunk.endStr,
+    status: "pending",
+    frames: [],
+  }
+}
 
 function toVlmFrames(video: VideoItem): VlmKeyframeInput[] {
   const extracted = video.keyframes
@@ -591,6 +628,50 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     setQueue((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)))
   }, [])
 
+  const updateChunk = React.useCallback((videoId: string, index: number, patch: Partial<ChunkRecord>) => {
+    setQueue((prev) =>
+      prev.map((v) =>
+        v.id === videoId && v.chunks
+          ? { ...v, chunks: v.chunks.map((c) => (c.index === index ? { ...c, ...patch } : c)) }
+          : v
+      )
+    )
+  }, [])
+
+  const getLocalPromptRules = React.useCallback((): VlmPromptRule[] => {
+    return matchRulesForSource(rulesRef.current, { kind: "local" }).map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      description: ruleDescription(rule),
+      sensitivity: ruleSensitivity(rule),
+      severity: rule.severity,
+      cooldownSeconds: rule.cooldownSeconds,
+    }))
+  }, [])
+
+  const recaptureChunkFrames = React.useCallback(
+    async (videoId: string, index: number): Promise<ChunkFrame[]> => {
+      const video = queueRef.current.find((v) => v.id === videoId)
+      const chunk = video?.chunks?.find((c) => c.index === index)
+      if (!video || !chunk) throw new Error("找不到对应的切片记录")
+      const src = getVideoSrc(video)
+      if (!src) throw new Error("视频源不可播放，无法重新抽帧")
+      const captured = await captureChunkFrames(src, chunk.startSec, chunk.endSec, chunk.index, {
+        motionSegments: video.prescreen?.motionSegments,
+        totalChunks: chunk.total,
+      })
+      const frames: ChunkFrame[] = captured.map((f) => ({
+        timestamp: f.timestamp,
+        seconds: f.seconds,
+        reason: f.reason,
+        base64: f.base64,
+      }))
+      updateChunk(videoId, index, { frames })
+      return frames
+    },
+    [updateChunk]
+  )
+
   const analyzeOne = React.useCallback(
     async (video: VideoItem) => {
       if (busyRef.current.has(video.id)) return
@@ -635,6 +716,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         chunkProgress: undefined,
         alertEventCount: undefined,
         analyzedAt: undefined,
+        prescreen: undefined,
+        chunks: undefined,
       })
 
       let keyframes: VideoItem["keyframes"]
@@ -649,8 +732,21 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         if (playableSrc) {
           try {
             session = await openCaptureSession(playableSrc)
+            const scanStartedAt = performance.now()
             scan = await scanVideoMotion(session)
+            const scanElapsedMs = Math.round(performance.now() - scanStartedAt)
             chunks = planVideoChunks(session.duration)
+            patchVideo(video.id, {
+              prescreen: {
+                durationSec: session.duration,
+                elapsedMs: scanElapsedMs,
+                motionSegments: scan.motionSegments,
+                staticRatioPercent: scan.staticRatioPercent,
+                scanStepSeconds: scan.scanStepSeconds,
+                scannedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+              },
+              chunks: chunks.map(toPendingChunk),
+            })
             const fullLength = formatClock(session.duration)
             if (scan.motionSegments.length > 0) {
               const ranges = scan.motionSegments.map((seg) => `${seg.start}-${seg.end}`).join(", ")
@@ -741,6 +837,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
               endStr: formatClock(video.durationSec),
             },
           ]
+          patchVideo(video.id, { chunks: chunks.map(toPendingChunk) })
         }
 
         const promptRules: VlmPromptRule[] = matched.map((rule) => ({
@@ -780,14 +877,27 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             })
           }
 
+          updateChunk(video.id, chunk.index, { status: "analyzing" })
+
           try {
             let chunkFrames = legacyFrames
+            let frameRecords: ChunkFrame[] = legacyFrames.map((k) => ({
+              timestamp: k.timecode,
+              seconds: k.timestampSec,
+              base64: k.imageUrl,
+            }))
             if (session && scan) {
               const captured = await captureChunkFrames(session, chunk.startTime, chunk.endTime, chunk.index, {
                 motionSegments: scan.motionSegments,
                 totalChunks: chunk.total,
               })
               chunkFrames = toKeyframeInputs(captured)
+              frameRecords = captured.map((f) => ({
+                timestamp: f.timestamp,
+                seconds: f.seconds,
+                reason: f.reason,
+                base64: f.base64,
+              }))
               const frameList = captured
                 .map((frame) => `${frame.timestamp}[${FRAME_REASON_LABEL[frame.reason]}]`)
                 .join(", ")
@@ -821,6 +931,16 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             const report: VideoItem["vlmReport"] = { result, metrics, verdict, reasoning }
             lastReport = report
             lastConfidence = result.confidence
+            updateChunk(video.id, chunk.index, {
+              status: verdict.triggered && verdict.ruleId ? "alert" : "safe",
+              frames: frameRecords,
+              ruleId: verdict.ruleId ?? undefined,
+              ruleName: verdict.ruleName ?? undefined,
+              confidence: result.confidence,
+              report,
+              error: undefined,
+              analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+            })
 
             if (verdict.triggered && verdict.ruleId) {
               const matchedRule = matched.find((r) => r.id === verdict.ruleId)
@@ -901,10 +1021,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             }
           } catch (error) {
             failedChunks++
-            pushLog(
-              "warn",
-              `${tag} 切片分析失败：${error instanceof Error ? error.message : "未知错误"}，继续后续切片。`
-            )
+            const message = error instanceof Error ? error.message : "未知错误"
+            updateChunk(video.id, chunk.index, { status: "failed", error: message })
+            pushLog("warn", `${tag} 切片分析失败：${message}，继续后续切片。`)
           }
         }
 
@@ -955,7 +1074,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         busyRef.current.delete(video.id)
       }
     },
-    [apiKey, patchVideo, pushLog]
+    [apiKey, patchVideo, updateChunk, pushLog]
   )
 
   const runFrameTest = React.useCallback(
@@ -1108,6 +1227,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       clearQueue,
       removeVideo,
       analyzeOne,
+      updateChunk,
+      recaptureChunkFrames,
+      getLocalPromptRules,
       analyzeAll,
       batchRunning,
       logs,
@@ -1143,6 +1265,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       clearQueue,
       removeVideo,
       analyzeOne,
+      updateChunk,
+      recaptureChunkFrames,
+      getLocalPromptRules,
       analyzeAll,
       batchRunning,
       logs,

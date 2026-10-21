@@ -5,20 +5,14 @@ import { ArrowRight, ShieldAlert } from "lucide-react"
 
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { CAMERAS } from "@/lib/ops/data"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { allowedAngle, midpoint } from "@/lib/ops/perception-geometry"
 import type { RoiZone, TrackedEntity } from "@/lib/ops/perception-types"
 import { cn } from "@/lib/utils"
+import { LocalScreeningCanvas } from "./local-screening-canvas"
+import { PerceptionSourceSelect } from "./perception-source-select"
 import { usePerception, useTracking } from "./perception-provider"
 
 type Tone = "success" | "primary" | "warning" | "destructive"
@@ -88,20 +82,7 @@ function CanvasControls({ idPrefix, toggles, onToggle, className }: ControlsProp
         className
       )}
     >
-      <Select value={cameraId} onValueChange={setCameraId}>
-        <SelectTrigger size="sm" className="w-full" aria-label="切换摄像头通道">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            {CAMERAS.map((cam) => (
-              <SelectItem key={cam.id} value={cam.id}>
-                {cam.code} {cam.name}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
+      <PerceptionSourceSelect />
       {rows.map((row) => (
         <div key={row.key} className="flex items-center justify-between gap-3">
           <Label htmlFor={`${idPrefix}-${row.key}`} className="text-xs font-normal">
@@ -302,6 +283,12 @@ function BoxLayer({ entities, showLabels }: { entities: TrackedEntity[]; showLab
 }
 
 export function TrackingCanvas() {
+  const { selectedLocalVideo } = usePerception()
+  if (selectedLocalVideo) return <LocalScreeningCanvas video={selectedLocalVideo} />
+  return <LiveTrackingCanvas />
+}
+
+function LiveTrackingCanvas() {
   const { cameraId, zones, zoneRuntime } = usePerception()
   const { entities } = useTracking()
   const [toggles, setToggles] = React.useState<Toggles>({ trails: true, labels: true, roi: true })

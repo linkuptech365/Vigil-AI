@@ -34,16 +34,18 @@ function ScoreCard({ label, value, unit, hint, icon: Icon }: ScoreCardProps) {
 }
 
 export function IngestionScorecards() {
-  const { totals, streams } = useIngestion()
+  const { totals, streams, localVideos } = useIngestion()
   const dropping = streams.filter((s) => s.status === "frame_drop").length
+  const localCount = localVideos.length
+  const dropHint = dropping > 0 ? `，${dropping} 路出现丢帧` : ""
 
   return (
     <section aria-label="接入管道概览" className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <ScoreCard
         label="当前在线流路数"
-        value={`${totals.online} / ${totals.total}`}
-        unit="在线"
-        hint={dropping > 0 ? `${dropping} 路出现丢帧` : "全部通道健康"}
+        value={String(totals.online + localCount)}
+        unit="路在线"
+        hint={`${totals.online} 路监控 + ${localCount} 路本地视频${dropHint}`}
         icon={RadioTower}
       />
       <ScoreCard

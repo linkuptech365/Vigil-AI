@@ -17,6 +17,33 @@ import { RoiDialog } from "./roi-dialog"
 type DialogState = { seq: number; zone: RoiZone | null } | null
 
 export function RoiManager() {
+  const { selectedLocalVideo } = usePerception()
+  if (selectedLocalVideo) return <LocalRoiNotice name={selectedLocalVideo.name} />
+  return <LiveRoiManager />
+}
+
+function LocalRoiNotice({ name }: { name: string }) {
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="gap-1 border-b px-4 py-3">
+        <CardTitle className="text-sm">电子围栏与碰撞检测引擎 (ROI & Collision Engine)</CardTitle>
+        <CardDescription className="text-xs">本地录像回放初筛模式</CardDescription>
+      </CardHeader>
+      <CardContent className="p-4">
+        <Alert role="status">
+          <Radar />
+          <AlertTitle>围栏引擎在本地录像模式下不参与判定</AlertTitle>
+          <AlertDescription>
+            {name} 是离线录像，没有实时目标追踪与摄像头坐标系。这里改由 Level-1 逐秒运动初筛判定动作区间，
+            围栏碰撞只对 CAM-01 ~ CAM-04 实时通道生效。
+          </AlertDescription>
+        </Alert>
+      </CardContent>
+    </Card>
+  )
+}
+
+function LiveRoiManager() {
   const { cameraId, zones, zoneRuntime, updateZone, removeZone, simulateIntrusion, intrusionActive } =
     usePerception()
   const [dialog, setDialog] = React.useState<DialogState>(null)

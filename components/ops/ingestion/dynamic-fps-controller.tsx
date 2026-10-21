@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/utils"
 import { ChannelSelector } from "./channel-selector"
 import { useIngestion } from "./ingestion-provider"
+import { LocalSamplingCard } from "./local-sampling-card"
 
 const MOTION_SCALE_MAX = 40
 
@@ -55,8 +56,9 @@ function StateNode({
 }
 
 export function DynamicFpsController() {
-  const { selectedStream, histories, setSamplingMode, setFixedFps } = useIngestion()
+  const { selectedStream, selectedLocalVideo, histories, setSamplingMode, setFixedFps } = useIngestion()
 
+  if (selectedLocalVideo) return <LocalSamplingCard video={selectedLocalVideo} />
   if (!selectedStream) return null
   const history = histories[selectedStream.id] ?? []
   const mode = modeOf(selectedStream)

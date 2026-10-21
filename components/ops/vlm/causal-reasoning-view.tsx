@@ -22,8 +22,40 @@ const SEVERITY_STYLE: Record<VlmSeverity, string> = {
   SAFE: "border-success/50 bg-success/15 text-success",
 }
 
+function LocalScreeningPanel() {
+  const { activeLocal, localFrames } = useVlm()
+  if (!activeLocal) return null
+  const { chunk, video } = activeLocal
+
+  return (
+    <section
+      aria-labelledby="cv-limit-title"
+      className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 id="cv-limit-title" className="flex items-center gap-2 text-sm font-medium">
+          <EyeOff className="size-4 text-muted-foreground" aria-hidden="true" />
+          一级初筛送检来源
+        </h3>
+        <Badge variant="outline" className="border-primary/40 text-primary">
+          本地视频切片
+        </Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">送检切片 (Submitted Slice)</p>
+      <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs leading-relaxed">
+        {video.name} · 切片 {chunk.index}/{chunk.total} · {chunk.startStr}-{chunk.endStr} · 已抽取{" "}
+        {localFrames.filter((f) => !!f.base64).length} 帧真实关键帧
+      </p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        该切片由一级初筛从原视频中筛出活跃时段后，在浏览器内按时序抽帧；结论会同步写回检测队列中的对应切片记录。
+      </p>
+    </section>
+  )
+}
+
 function CvLimitationPanel() {
-  const { scenario, activeClip } = useVlm()
+  const { scenario, activeClip, activeLocal } = useVlm()
+  if (activeLocal) return <LocalScreeningPanel />
   if (!scenario || !activeClip) return null
 
   return (
@@ -119,7 +151,7 @@ function Verdict() {
 }
 
 function DeductionPanel() {
-  const { phase, result, scenario } = useVlm()
+  const { phase, result } = useVlm()
 
   return (
     <section
@@ -138,7 +170,7 @@ function DeductionPanel() {
         )}
       </div>
 
-      {result && scenario ? (
+      {result ? (
         <>
           <ChainSteps steps={result.reasoningChain} />
           <Verdict />

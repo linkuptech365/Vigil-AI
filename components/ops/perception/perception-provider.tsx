@@ -37,7 +37,10 @@ import type {
   TrackedEntity,
   ZoneRuntime,
 } from "@/lib/ops/perception-types"
+import { isLocalChannelId, parseLocalChannelId } from "@/lib/ops/local-source"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
+import type { VideoItem } from "@/lib/vigil/types"
+import { useVigil } from "@/components/vigil/vigil-provider"
 
 const TICK_MS = 100
 const TRAIL_EVERY = 3
@@ -57,8 +60,11 @@ interface TrackingContextValue {
 }
 
 interface PerceptionContextValue {
+  /** CAM-xx 或 local:<videoId> */
   cameraId: string
   setCameraId: (id: string) => void
+  localVideos: VideoItem[]
+  selectedLocalVideo: VideoItem | undefined
   zones: RoiZone[]
   zoneRuntime: Record<string, ZoneRuntime>
   updateZone: (id: string, patch: Partial<RoiZone>) => void
@@ -157,7 +163,14 @@ function triggerMessage(zone: RoiZone) {
 }
 
 export function PerceptionProvider({ children }: { children: React.ReactNode }) {
-  const [cameraId, setCameraId] = React.useState("CAM-02")
+  const [selectedSource, setSelectedSource] = React.useState("CAM-02")
+  const { queue: localVideos } = useVigil()
+  const selectedLocalVideo = isLocalChannelId(selectedSource)
+    ? localVideos.find((v) => v.id === parseLocalChannelId(selectedSource))
+    : undefined
+  // 本地视频被移除后回落到默认摄像头，避免下拉框指向不存在的选项
+  const cameraId = isLocalChannelId(selectedSource) && !selectedLocalVideo ? "CAM-02" : selectedSource
+  const setCameraId = setSelectedSource
   const [zones, setZones] = React.useState<RoiZone[]>(INITIAL_ZONES)
   const [zoneRuntime, setZoneRuntime] = React.useState<Record<string, ZoneRuntime>>({})
   const [entities, setEntities] = React.useState(buildInitialEntities)
@@ -458,7 +471,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
   }, [])
 
   const simulateIntrusion = React.useCallback(() => {
-    setCameraId("CAM-02")
+    setSelectedSource("CAM-02")
     const motion = motionRef.current[VIOLATOR_ID]
     if (motion.override) {
       toast.info("入侵模拟进行中", { description: "目标 #115 正在穿越 1号机加工红线禁区" })
@@ -490,8 +503,10 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     () => ({
       cameraId,
       setCameraId: (id) => {
-        if (CAMERAS.some((c) => c.id === id)) setCameraId(id)
+        if (CAMERAS.some((c) => c.id === id) || isLocalChannelId(id)) setSelectedSource(id)
       },
+      localVideos,
+      selectedLocalVideo,
       zones,
       zoneRuntime,
       updateZone,
@@ -505,6 +520,8 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     }),
     [
       cameraId,
+      localVideos,
+      selectedLocalVideo,
       zones,
       zoneRuntime,
       updateZone,

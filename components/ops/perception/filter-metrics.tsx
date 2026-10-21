@@ -1,12 +1,14 @@
 "use client"
 
 import * as React from "react"
-import { Coins, Filter, Layers, Send, type LucideIcon } from "lucide-react"
+import { Activity, Coins, Film, Filter, Layers, Send, Timer, type LucideIcon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { formatDuration } from "@/lib/ops/local-source"
 import { DAILY_SAVING_USD } from "@/lib/ops/perception-data"
 import type { SeriesPoint } from "@/lib/ops/perception-types"
+import type { VideoItem } from "@/lib/vigil/types"
 import { usePerception } from "./perception-provider"
 
 interface MetricCardProps {
@@ -128,7 +130,87 @@ function FrameTrendChart({ series }: { series: SeriesPoint[] }) {
   )
 }
 
+function LocalFilterMetrics({ video }: { video: VideoItem }) {
+  const prescreen = video.prescreen
+  const segments = prescreen?.motionSegments ?? []
+  const segmentText = prescreen
+    ? segments.length === 0
+      ? "全程静止"
+      : segments.map((s) => `${s.start}-${s.end}`).join(", ")
+    : "待初筛"
+  const staticRatio = prescreen ? prescreen.staticRatioPercent : null
+
+  return (
+    <section aria-label="本地视频一级初筛结果" className="grid grid-cols-1 gap-3 xl:grid-cols-12">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:col-span-7">
+        <MetricCard
+          label="视频全长 (Duration)"
+          value={formatDuration(prescreen?.durationSec ?? video.durationSec)}
+          unit="mm:ss"
+          hint={video.name}
+          icon={Film}
+        />
+        <MetricCard
+          label="初筛用时 (Screening Time)"
+          value={prescreen ? (prescreen.elapsedMs / 1000).toFixed(1) : "--"}
+          unit="秒"
+          hint={prescreen ? `每 ${prescreen.scanStepSeconds}s 采样一帧像素差分` : "尚未执行初筛"}
+          icon={Timer}
+        />
+        <MetricCard
+          label="识别动作时段 (Motion Segments)"
+          value={prescreen ? String(segments.length) : "--"}
+          unit="段"
+          hint={segmentText}
+          icon={Activity}
+        />
+        <MetricCard
+          label="静止占比 (Static Ratio)"
+          value={staticRatio === null ? "--" : staticRatio.toFixed(1)}
+          unit="%"
+          badge={staticRatio !== null && staticRatio > 0 ? "静止片段不送检大模型" : undefined}
+          hint="像素差分低于阈值的时长占比"
+          icon={Filter}
+        />
+      </div>
+      <Card className="gap-3 py-4 xl:col-span-5">
+        <CardHeader className="gap-1 px-4">
+          <CardTitle className="text-sm">动作时段明细</CardTitle>
+          <CardDescription className="text-xs">每个时段会按需切片并抽取关键帧。</CardDescription>
+        </CardHeader>
+        <CardContent className="px-4">
+          {segments.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {prescreen ? "本视频未检出动作时段。" : "开始分析后，这里会列出真实的动作时段。"}
+            </p>
+          ) : (
+            <ul className="scrollbar-thin flex max-h-32 flex-col gap-1.5 overflow-y-auto font-mono text-xs">
+              {segments.map((seg, i) => (
+                <li
+                  key={`${seg.startSeconds}-${seg.endSeconds}`}
+                  className="flex items-center justify-between rounded-md border border-border bg-background/60 px-2.5 py-1.5"
+                >
+                  <span>
+                    #{i + 1} {seg.start}-{seg.end}
+                  </span>
+                  <span className="text-muted-foreground">{formatDuration(seg.endSeconds - seg.startSeconds)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+    </section>
+  )
+}
+
 export function FilterMetrics() {
+  const { selectedLocalVideo } = usePerception()
+  if (selectedLocalVideo) return <LocalFilterMetrics video={selectedLocalVideo} />
+  return <LiveFilterMetrics />
+}
+
+function LiveFilterMetrics() {
   const { metrics, series } = usePerception()
   const escalatedRatio = metrics.escalatedFrames / metrics.ingested
   const filteredRate = (1 - escalatedRatio) * 100

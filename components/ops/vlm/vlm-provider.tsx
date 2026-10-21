@@ -3,8 +3,23 @@
 import * as React from "react"
 import { toast } from "sonner"
 
+import { useVigil } from "@/components/vigil/vigil-provider"
+import {
+  buildLocalSlices,
+  toLocalReasoningResult,
+  type LocalSlice,
+} from "@/lib/ops/local-slice"
 import type { EscalationClip } from "@/lib/ops/perception-types"
-import type { VlmFinalResult, VlmKeyframeInput, VlmMetrics, VlmStreamChunk } from "@/lib/ops/vlm-api-types"
+import type {
+  VlmAnalyzeRequest,
+  VlmFinalResult,
+  VlmKeyframeInput,
+  VlmMetrics,
+  VlmStreamChunk,
+} from "@/lib/ops/vlm-api-types"
+import type { ChunkFrame } from "@/lib/vigil/types"
+import { toRequestVideoPath } from "@/lib/vigil/video-path"
+import { getVideoSrc } from "@/lib/vigil/video-source"
 import { readVlmEndpoint, streamVlmAnalyze } from "@/lib/ops/vlm-client"
 import {
   FRAME_COUNT,
@@ -26,7 +41,17 @@ interface VlmContextValue {
   setModelId: (id: string) => void
   candidates: EscalationClip[]
   activeClip: EscalationClip | null
+  /** 实时通道候选 ID，或本地切片 ID（slice:*） */
   setClipId: (id: string) => void
+  /** 下拉框当前选中项 */
+  selectionId: string | null
+  /** 全局队列里已经开始分析的本地视频切片 */
+  localSlices: LocalSlice[]
+  activeLocal: LocalSlice | null
+  /** 本地切片的真实关键帧；刷新页面后会自动从视频重新抽取 */
+  localFrames: ChunkFrame[]
+  localFramesLoading: boolean
+  localFramesError: string | null
   scenario: VlmScenario | null
   phase: VlmPhase
   thinkingMessage: string
@@ -62,6 +87,11 @@ function buildKeyframes(): VlmKeyframeInput[] {
 
 function toZeroBased(frames: number[]) {
   return Array.from(new Set(frames.map((f) => f - 1).filter((f) => f >= 0 && f < FRAME_COUNT)))
+}
+
+/** 本地切片的关键帧下标本来就是从 0 起，只做越界过滤。 */
+function clampZeroBased(frames: number[], count: number) {
+  return Array.from(new Set(frames.filter((f) => Number.isInteger(f) && f >= 0 && f < count)))
 }
 
 function deriveChain(reasoning: string, intent: string) {
@@ -143,6 +173,10 @@ function toReasoningResult(
 
 export function VlmProvider({ children }: { children: React.ReactNode }) {
   const { clips } = usePerception()
+  const { queue, updateChunk, recaptureChunkFrames, getLocalPromptRules } = useVigil()
+  const [localFramesLoading, setLocalFramesLoading] = React.useState(false)
+  const [localFramesError, setLocalFramesError] = React.useState<string | null>(null)
+  const attemptedRecapture = React.useRef(new Set<string>())
   const [modelId, setModelIdState] = React.useState(VLM_MODELS[0].id)
   const [clipId, setClipIdState] = React.useState<string | null>(null)
   const [phase, setPhase] = React.useState<VlmPhase>("idle")
@@ -156,12 +190,63 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
 
   const model = VLM_MODELS.find((m) => m.id === modelId) ?? VLM_MODELS[0]
   const candidates = React.useMemo(() => clips.filter((clip) => clip.status !== "blocked"), [clips])
-  const activeClip =
-    candidates.find((clip) => clip.id === clipId) ??
-    candidates.find((clip) => clip.reason === "fall_suspect") ??
-    candidates[0] ??
-    null
+  const localSlices = React.useMemo(() => buildLocalSlices(queue), [queue])
+  const activeLocal = React.useMemo(
+    () => (clipId ? (localSlices.find((slice) => slice.id === clipId) ?? null) : null),
+    [localSlices, clipId]
+  )
+  const activeClip = activeLocal
+    ? null
+    : (candidates.find((clip) => clip.id === clipId) ??
+      candidates.find((clip) => clip.reason === "fall_suspect") ??
+      candidates[0] ??
+      null)
   const scenario = activeClip ? SCENARIOS[activeClip.reason] : null
+  const selectionId = activeLocal?.id ?? activeClip?.id ?? null
+
+  const localFrames = React.useMemo(() => activeLocal?.chunk.frames ?? [], [activeLocal])
+  const activeLocalId = activeLocal?.id ?? null
+  const needsRecapture =
+    !!activeLocal && activeLocal.chunk.status !== "analyzing" && !localFrames.some((f) => f.base64)
+
+  React.useEffect(() => {
+    if (!activeLocal || !needsRecapture || attemptedRecapture.current.has(activeLocal.id)) return
+    attemptedRecapture.current.add(activeLocal.id)
+    let cancelled = false
+    setLocalFramesLoading(true)
+    setLocalFramesError(null)
+    recaptureChunkFrames(activeLocal.video.id, activeLocal.chunk.index)
+      .catch((error: unknown) => {
+        if (!cancelled) setLocalFramesError(error instanceof Error ? error.message : "重新抽帧失败")
+      })
+      .finally(() => {
+        if (!cancelled) setLocalFramesLoading(false)
+      })
+    return () => {
+      cancelled = true
+      setLocalFramesLoading(false)
+    }
+    // 仅在切换切片时触发；recapture 完成后 needsRecapture 会自然变为 false
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeLocalId, needsRecapture])
+
+  const stored = React.useMemo(() => {
+    const report = activeLocal?.chunk.report
+    if (!activeLocal || !report) return null
+    const count = activeLocal.chunk.frames.length
+    return {
+      reasoning: report.reasoning,
+      metrics: report.metrics,
+      result: toLocalReasoningResult(
+        activeLocal,
+        report.metrics.model || "VLM",
+        report.result,
+        report.metrics,
+        report.reasoning,
+        count
+      ),
+    }
+  }, [activeLocal])
 
   const resetRun = React.useCallback(() => {
     abortRef.current?.abort()
@@ -194,7 +279,28 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
   )
 
   const run = React.useCallback(() => {
-    if (!activeClip || !scenario) return
+    const local = activeLocal
+    const localKeyframes: VlmKeyframeInput[] = local
+      ? local.chunk.frames
+          .filter((f) => !!f.base64)
+          .map((f, i) => ({ index: i, timestampSec: f.seconds, timecode: f.timestamp, imageUrl: f.base64 }))
+      : []
+    const localRules = local ? getLocalPromptRules() : []
+
+    if (local) {
+      if (localKeyframes.length === 0) {
+        toast.error("该切片没有可用的关键帧图像", {
+          description: localFramesError ?? "请等待关键帧重新抽取完成，或在检测队列中重新分析该视频。",
+        })
+        return
+      }
+      if (localRules.length === 0) {
+        toast.error("没有适用于本地视频的规则", { description: "请先在规则中心启用并绑定「本地视频」或「全部视频源」。" })
+        return
+      }
+    } else if (!activeClip || !scenario) {
+      return
+    }
 
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -231,11 +337,32 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           setCompletionTokens(estimateOutputTokens(text))
           break
         case "evidence":
-          setEvidenceFrames(toZeroBased(chunk.frames))
+          setEvidenceFrames(local ? clampZeroBased(chunk.frames, localKeyframes.length) : toZeroBased(chunk.frames))
           break
         case "done": {
           finished = true
-          const reasoningResult = toReasoningResult(activeClip, model, scenario, chunk.result, chunk.metrics, text)
+          let reasoningResult: VlmReasoningResult
+          if (local) {
+            reasoningResult = toLocalReasoningResult(
+              local,
+              chunk.metrics.model || model.name,
+              chunk.result,
+              chunk.metrics,
+              text,
+              localKeyframes.length
+            )
+            updateChunk(local.video.id, local.chunk.index, {
+              status: chunk.verdict.triggered && chunk.verdict.ruleId ? "alert" : "safe",
+              ruleId: chunk.verdict.ruleId ?? undefined,
+              ruleName: chunk.verdict.ruleName ?? undefined,
+              confidence: chunk.result.confidence,
+              report: { result: chunk.result, metrics: chunk.metrics, verdict: chunk.verdict, reasoning: text },
+              error: undefined,
+              analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+            })
+          } else {
+            reasoningResult = toReasoningResult(activeClip!, model, scenario!, chunk.result, chunk.metrics, text)
+          }
           setResult(reasoningResult)
           setMetrics(chunk.metrics)
           setCompletionTokens(chunk.metrics.outputTokens)
@@ -255,30 +382,41 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
 
     const { apiUrl, apiKey } = readVlmEndpoint()
 
-    streamVlmAnalyze(
-      {
-        videoPath: `${activeClip.cameraId}/${activeClip.id}`,
-        keyframes: buildKeyframes(),
-        apiUrl,
-        apiKey,
-        modelName: model.id,
-        sourceType: "channel",
-        sourceKey: activeClip.cameraId,
-        rules: [
-          {
-            id: `SCN-${activeClip.reason}`,
-            name: scenario.title,
-            description: `${scenario.title}。一级初筛观察：${scenario.cvSaw}`,
-            sensitivity: 0.6,
-            severity: scenario.severity === "SAFE" ? "INFO" : scenario.severity,
-            cooldownSeconds: 60,
-          },
-        ],
-        simulation: { ruleId: `SCN-${activeClip.reason}`, confidence: scenario.baseConfidence / 100 },
-      },
-      handleChunk,
-      controller.signal
-    )
+    const request: VlmAnalyzeRequest = local
+      ? {
+          videoPath: toRequestVideoPath(local.video),
+          name: local.video.name,
+          keyframes: localKeyframes,
+          apiUrl,
+          apiKey,
+          modelName: model.id,
+          sourceType: "local",
+          sourceKey: `LOCAL:${local.video.id}`,
+          rules: localRules,
+          simulation: { ruleId: local.chunk.ruleId ?? null, confidence: local.chunk.confidence },
+        }
+      : {
+          videoPath: `${activeClip!.cameraId}/${activeClip!.id}`,
+          keyframes: buildKeyframes(),
+          apiUrl,
+          apiKey,
+          modelName: model.id,
+          sourceType: "channel",
+          sourceKey: activeClip!.cameraId,
+          rules: [
+            {
+              id: `SCN-${activeClip!.reason}`,
+              name: scenario!.title,
+              description: `${scenario!.title}。一级初筛观察：${scenario!.cvSaw}`,
+              sensitivity: 0.6,
+              severity: scenario!.severity === "SAFE" ? "INFO" : scenario!.severity,
+              cooldownSeconds: 60,
+            },
+          ],
+          simulation: { ruleId: `SCN-${activeClip!.reason}`, confidence: scenario!.baseConfidence / 100 },
+        }
+
+    streamVlmAnalyze(request, handleChunk, controller.signal)
       .then(() => {
         if (!finished && !controller.signal.aborted) throw new Error("推理流意外中断，未收到最终结果")
       })
@@ -290,7 +428,15 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           description: error instanceof Error ? error.message : "未知错误",
         })
       })
-  }, [activeClip, scenario, model])
+  }, [activeClip, activeLocal, scenario, model, getLocalPromptRules, updateChunk, localFramesError])
+
+  const showStored = phase === "idle" && !result && !!stored
+  const shownResult = result ?? (showStored ? stored.result : null)
+  const shownMetrics = metrics ?? (showStored ? stored.metrics : null)
+  const shownPhase: VlmPhase = showStored ? "done" : phase
+  const shownText = showStored ? stored.reasoning : streamText
+  const shownEvidence = evidenceFrames ?? (showStored ? stored.result.evidenceKeyframes : null)
+  const shownCompletion = showStored ? stored.metrics.outputTokens : completionTokens
 
   const value = React.useMemo<VlmContextValue>(
     () => ({
@@ -300,15 +446,21 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       candidates,
       activeClip,
       setClipId,
+      selectionId,
+      localSlices,
+      activeLocal,
+      localFrames,
+      localFramesLoading,
+      localFramesError,
       scenario,
-      phase,
+      phase: shownPhase,
       thinkingMessage,
-      streamText,
-      promptTokens: metrics?.promptTokens ?? PROMPT_TOKENS_ESTIMATE,
-      completionTokens,
-      metrics,
-      evidenceFrames,
-      result,
+      streamText: shownText,
+      promptTokens: shownMetrics?.promptTokens ?? PROMPT_TOKENS_ESTIMATE,
+      completionTokens: shownCompletion,
+      metrics: shownMetrics,
+      evidenceFrames: shownEvidence,
+      result: shownResult,
       run,
     }),
     [
@@ -317,14 +469,20 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       candidates,
       activeClip,
       setClipId,
+      selectionId,
+      localSlices,
+      activeLocal,
+      localFrames,
+      localFramesLoading,
+      localFramesError,
       scenario,
-      phase,
+      shownPhase,
       thinkingMessage,
-      streamText,
-      completionTokens,
-      metrics,
-      evidenceFrames,
-      result,
+      shownText,
+      shownCompletion,
+      shownMetrics,
+      shownEvidence,
+      shownResult,
       run,
     ]
   )

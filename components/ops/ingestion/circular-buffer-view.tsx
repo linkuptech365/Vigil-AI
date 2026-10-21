@@ -21,6 +21,7 @@ import { secondsToTime, timeToSeconds } from "@/lib/ops/utils"
 import { cn } from "@/lib/utils"
 import { ChannelSelector } from "./channel-selector"
 import { useIngestion } from "./ingestion-provider"
+import { LocalChunkInspector } from "./local-chunk-inspector"
 
 const SEGMENT_STYLE: Record<SegmentKind, string> = {
   low: "bg-muted-foreground/40",
@@ -84,10 +85,12 @@ function Filmstrip({ clip }: { clip: BufferedClip }) {
 }
 
 export function CircularBufferView() {
-  const { selectedStream, histories, buffers, clips, extraction, triggerExtraction } = useIngestion()
+  const { selectedStream, selectedLocalVideo, histories, buffers, clips, extraction, triggerExtraction } =
+    useIngestion()
   const [activeClipId, setActiveClipId] = React.useState<string | null>(null)
   const [dispatched, setDispatched] = React.useState<string[]>([])
 
+  if (selectedLocalVideo) return <LocalChunkInspector video={selectedLocalVideo} />
   if (!selectedStream) return null
 
   const history = histories[selectedStream.id] ?? []
