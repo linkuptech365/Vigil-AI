@@ -59,7 +59,7 @@ export function buildUserPrompt(input: NormalizedInput, imageCount: number) {
     : "（未提供关键帧）"
   const pixels =
     imageCount > 0
-      ? `已随消息附带 ${imageCount} 帧画面，顺序与上表一致。`
+      ? `已随消息附带 ${imageCount} 帧真实画面（取自上表中的部分时刻），每张图前都有对应的采样时间点标签。`
       : "本次请求未附带像素帧，仅提供时序元数据；请据此谨慎推断并相应降低 confidence。"
 
   return [

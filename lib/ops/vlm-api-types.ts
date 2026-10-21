@@ -134,6 +134,8 @@ export interface VlmAnalyzeResponse {
 export interface VlmApiError {
   status: "error"
   message: string
+  /** 机器可读的错误码，例如 NO_VALID_IMAGE_FRAMES */
+  error?: string
 }
 
 /** 随队列条目保存的完整研判报告 */

@@ -35,10 +35,11 @@ RUN pnpm build
 # Stage 3: runner - 精简运行时（非 root）
 # ---------------------------------------------------------------------------
 FROM node:20-alpine AS runner
-RUN apk add --no-cache libc6-compat
+RUN apk add --no-cache libc6-compat ffmpeg
 WORKDIR /app
 
 ENV NODE_ENV=production
+ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"

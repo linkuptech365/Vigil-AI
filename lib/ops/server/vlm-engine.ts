@@ -56,6 +56,11 @@ function planEngine(input: NormalizedInput, requestHost: string | null): EngineP
   return { kind: "remote", url, protocol: detectProtocol(url) }
 }
 
+/** 本次请求是否会真正调用远端模型（否则走离线启发式，不需要像素帧） */
+export function willCallRemote(input: NormalizedInput, requestHost: string | null) {
+  return planEngine(input, requestHost).kind === "remote"
+}
+
 async function* runRemote(
   input: NormalizedInput,
   plan: Extract<EnginePlan, { kind: "remote" }>,
@@ -110,6 +115,9 @@ async function* runRemote(
     timeout.dispose()
   }
 
+  console.log(
+    `[VLM_RESPONSE] 模型 ${input.modelName} 返回 ${text.length} 字符，耗时 ${Math.round(performance.now() - startedAt)}ms，请求挂载 ${images.length} 帧`
+  )
   const result = parseFinalResult(text, input.rules, input.keyframes)
   if (!result) {
     return {

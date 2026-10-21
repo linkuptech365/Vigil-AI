@@ -44,16 +44,36 @@ function isSafeHttps(raw: string) {
   }
 }
 
-export function collectImages(frames: VlmKeyframeInput[], protocol: VlmProtocol) {
-  const images: string[] = []
+export interface RemoteImage {
+  url: string
+  /** 紧跟在图片之前发送的时间点标签，让模型把画面和时刻对应起来 */
+  label: string
+}
+
+export function collectImages(frames: VlmKeyframeInput[], protocol: VlmProtocol): RemoteImage[] {
+  const images: RemoteImage[] = []
   for (const frame of frames) {
     if (images.length >= MAX_IMAGES) break
     const url = frame.imageUrl
     if (!url || url.length > MAX_IMAGE_CHARS) continue
-    if (DATA_IMAGE.test(url)) images.push(url)
-    else if (protocol !== "ollama" && isSafeHttps(url)) images.push(url)
+    const label = `【采样时间点: ${frame.timecode}】`
+    if (DATA_IMAGE.test(url)) images.push({ url, label })
+    else if (protocol !== "ollama" && isSafeHttps(url)) images.push({ url, label })
   }
   return images
+}
+
+function base64Part(url: string) {
+  return url.startsWith("data:") ? url.slice(url.indexOf(",") + 1) : url
+}
+
+/** 发请求前把图像挂载凭据打到终端，便于确认像素帧真的进了请求体 */
+export function logDispatch(model: string, images: RemoteImage[]) {
+  console.log(`[VLM_DISPATCH] 目标模型: ${model}, 成功挂载图像帧数: ${images.length}`)
+  images.forEach((image, i) => {
+    const data = base64Part(image.url)
+    console.log(`  - 帧 #${i + 1} ${image.label}: Base64 长度 ${data.length} 字符, 预览: ${data.slice(0, 30)}...`)
+  })
 }
 
 export interface RemoteCall {
@@ -63,7 +83,7 @@ export interface RemoteCall {
   model: string
   system: string
   user: string
-  images: string[]
+  images: RemoteImage[]
   /** OpenAI 协议下是否请求 SSE 流式输出；false 时发送 `stream: false` */
   stream: boolean
   signal: AbortSignal
@@ -99,7 +119,7 @@ function buildBody(call: RemoteCall): Record<string, unknown> {
   const model = call.protocol === "ollama" ? call.model : (MODEL_ALIASES[call.model] ?? call.model)
 
   if (call.protocol === "ollama") {
-    const images = call.images.map((url) => url.slice(url.indexOf(",") + 1))
+    const images = call.images.map(({ url }) => url.slice(url.indexOf(",") + 1))
     return {
       model,
       messages: [
@@ -117,26 +137,49 @@ function buildBody(call: RemoteCall): Record<string, unknown> {
       input: {
         messages: [
           { role: "system", content: [{ text: call.system }] },
-          { role: "user", content: [...call.images.map((image) => ({ image })), { text: call.user }] },
+          { role: "user", content: [...call.images.map(({ url }) => ({ image: url })), { text: call.user }] },
         ],
       },
       parameters: { result_format: "message" },
     }
   }
 
-  const userContent = call.images.length
-    ? [{ type: "text", text: call.user }, ...call.images.map((url) => ({ type: "image_url", image_url: { url } }))]
-    : call.user
+  if (!call.images.length) {
+    return {
+      model,
+      messages: [
+        { role: "system", content: call.system },
+        { role: "user", content: call.user },
+      ],
+      stream: call.stream,
+      ...(call.stream ? { stream_options: { include_usage: true } } : {}),
+      temperature: 0.1,
+      max_tokens: 1500,
+    }
+  }
+
+  // OpenAI Vision 规范：单条 user 消息的 content 为图文混排数组，每张图前附一条时间点文本
+  const userContent: Array<
+    { type: "text"; text: string } | { type: "image_url"; image_url: { url: string; detail: "high" } }
+  > = [
+    {
+      type: "text",
+      text: `${call.system}\n\n${call.user}\n\n以下是待检视频在各关键时刻提取的连续画面采样帧，请逐帧审视并给出最终判决：`,
+    },
+  ]
+  for (const image of call.images) {
+    userContent.push({ type: "text", text: image.label })
+    userContent.push({ type: "image_url", image_url: { url: image.url, detail: "high" } })
+  }
+
   return {
     model,
-    messages: [
-      { role: "system", content: call.system },
-      { role: "user", content: userContent },
-    ],
+    messages: [{ role: "user", content: userContent }],
     stream: call.stream,
     ...(call.stream ? { stream_options: { include_usage: true } } : {}),
-    temperature: 0.2,
+    temperature: 0.1,
     max_tokens: 1500,
+    response_format: { type: "json_object" },
   }
 }
 
@@ -236,10 +279,13 @@ export async function* streamRemote(call: RemoteCall): AsyncGenerator<RemoteEven
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`
 
+  const body = buildBody(call)
+  logDispatch(String(body.model), call.images)
+
   const response = await fetch(call.url, {
     method: "POST",
     headers,
-    body: JSON.stringify(buildBody(call)),
+    body: JSON.stringify(body),
     redirect: "manual",
     cache: "no-store",
     signal: call.signal,

@@ -12,7 +12,9 @@ import type {
   VlmStreamChunk,
   VlmVerdict,
 } from "@/lib/ops/vlm-api-types"
-import { runAnalysis } from "@/lib/ops/server/vlm-engine"
+import { defaultKeyframes, extractRealFrames, MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
+import { PathGuardError } from "@/lib/ops/server/path-guard"
+import { runAnalysis, willCallRemote } from "@/lib/ops/server/vlm-engine"
 import type { EngineContext, NormalizedInput } from "@/lib/ops/server/vlm-shared"
 
 export const runtime = "nodejs"
@@ -23,8 +25,8 @@ const MAX_BODY_CHARS = 8_000_000
 const MAX_FRAMES = 16
 const DEFAULT_MODEL = "qwen2.5-vl-72b"
 
-function fail(message: string, status: number) {
-  const body: VlmApiError = { status: "error", message }
+function fail(message: string, status: number, code?: string) {
+  const body: VlmApiError = { status: "error", message, ...(code ? { error: code } : {}) }
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } })
 }
 
@@ -211,11 +213,69 @@ export async function POST(request: Request) {
 
   const abort = new AbortController()
   request.signal.addEventListener("abort", () => abort.abort(), { once: true })
+  const requestHost = request.headers.get("host")
   const ctx: EngineContext = {
     signal: abort.signal,
     pace: parsed.input.stream,
-    requestHost: request.headers.get("host"),
+    requestHost,
   }
 
-  return parsed.input.stream ? streamResponse(parsed.input, ctx, abort) : collectResponse(parsed.input, ctx)
+  let input = parsed.input
+  if (willCallRemote(input, requestHost)) {
+    const prepared = await attachRealFrames(input, abort.signal)
+    if ("error" in prepared) {
+      console.error(`[VLM_ERROR] ${prepared.error}`)
+      return fail(prepared.error, 400, "NO_VALID_IMAGE_FRAMES")
+    }
+    input = prepared.input
+  }
+
+  return input.stream ? streamResponse(input, ctx, abort) : collectResponse(input, ctx)
+}
+
+const FRAME_DATA_PREFIX = "data:image/jpeg;base64,"
+
+function countValidFrames(frames: VlmKeyframeInput[]) {
+  return frames.filter((frame) => {
+    const url = frame.imageUrl
+    if (!url) return false
+    const data = url.startsWith("data:") ? url.slice(url.indexOf(",") + 1) : url
+    return data.length > MIN_VALID_BASE64_CHARS
+  }).length
+}
+
+/**
+ * 发给远端视觉模型之前，必须让请求里带上真实像素帧。
+ * 客户端已带图则直接使用；否则按 videoPath 现场抽帧。没有任何有效帧时返回错误，不发起模型调用。
+ */
+async function attachRealFrames(
+  input: NormalizedInput,
+  signal: AbortSignal
+): Promise<{ input: NormalizedInput } | { error: string }> {
+  if (countValidFrames(input.keyframes) > 0) return { input }
+
+  const NO_FRAMES = "视频抽帧失败：未能提取到任何有效图像帧，已终止调用，不会向模型发送纯文本请求。"
+  if (!input.videoPath) {
+    // 实时通道没有本地文件，保持原有行为（仅元数据推理）
+    return input.sourceType === "local" ? { error: `${NO_FRAMES}（缺少 videoPath）` } : { input }
+  }
+
+  try {
+    const base = input.keyframes.length > 0 ? input.keyframes : await defaultKeyframes(input.videoPath)
+    const { frames, errors } = await extractRealFrames(input.videoPath, base, signal)
+    const valid = frames.filter((frame) => frame.base64.length > MIN_VALID_BASE64_CHARS)
+
+    if (valid.length === 0) {
+      return { error: `${NO_FRAMES}${errors.length ? `（${errors[0]}）` : ""}` }
+    }
+    const byIndex = new Map(valid.map((frame) => [frame.index, frame]))
+    const keyframes = base.map((keyframe) => {
+      const frame = byIndex.get(keyframe.index)
+      return frame ? { ...keyframe, imageUrl: `${FRAME_DATA_PREFIX}${frame.base64}` } : keyframe
+    })
+    return { input: { ...input, keyframes } }
+  } catch (error) {
+    if (input.sourceType !== "local" && error instanceof PathGuardError) return { input }
+    return { error: `${NO_FRAMES}（${error instanceof Error ? error.message : "未知错误"}）` }
+  }
 }
