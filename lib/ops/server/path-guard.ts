@@ -13,12 +13,18 @@ export class PathGuardError extends Error {
 
 const MAX_PATH_LENGTH = 1024
 
-function configuredRoots(): string[] {
-  const extra = (process.env.VIGIL_ALLOWED_ROOTS ?? "")
-    .split(path.delimiter)
+/** 环境变量追加的授权目录：VIGIL_ALLOWED_ROOTS（多个以系统分隔符隔开）与 VIGIL_SCAN_DIR。 */
+export function extraRoots(): string[] {
+  const allowed = (process.env.VIGIL_ALLOWED_ROOTS ?? "").split(path.delimiter)
+  const scanDir = process.env.VIGIL_SCAN_DIR ?? ""
+  return [...allowed, scanDir]
     .map((entry) => entry.trim())
     .filter(Boolean)
-  return [process.cwd(), os.tmpdir(), ...extra].map((root) => path.resolve(root))
+    .map((root) => path.resolve(root))
+}
+
+function configuredRoots(): string[] {
+  return [process.cwd(), os.tmpdir(), ...extraRoots()].map((root) => path.resolve(root))
 }
 
 function isInside(root: string, target: string) {
@@ -50,7 +56,7 @@ export interface SafePath {
  * 2. 词法归一化后必须落在允许根目录内（项目目录、系统临时目录、VIGIL_ALLOWED_ROOTS）
  * 3. realpath 之后再次校验，防止符号链接逃逸
  */
-export async function resolveSafePath(input: unknown, kind: "dir" | "file"): Promise<SafePath> {
+export function normalizeRawPath(input: unknown): string {
   if (typeof input !== "string") throw new PathGuardError(400, "路径参数必须是字符串")
   const raw = input.trim()
   if (!raw || raw.length > MAX_PATH_LENGTH || raw.includes("\0")) {
@@ -59,7 +65,11 @@ export async function resolveSafePath(input: unknown, kind: "dir" | "file"): Pro
   if (raw.split(/[\\/]+/).includes("..")) {
     throw new PathGuardError(400, "路径包含非法的上级目录跳转 (..)")
   }
+  return raw
+}
 
+export async function resolveSafePath(input: unknown, kind: "dir" | "file"): Promise<SafePath> {
+  const raw = normalizeRawPath(input)
   const resolved = path.resolve(raw)
   const notAllowed = new PathGuardError(
     403,

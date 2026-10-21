@@ -24,7 +24,7 @@ export function releaseAllLocalVideos() {
 /** 返回可直接交给 <video src> 的地址；没有可播放来源（如测试样本）时返回 null。 */
 export function getVideoSrc(video: VideoItem): string | null {
   if (video.source === "disk") {
-    return `/api/v1/videos/stream?path=${encodeURIComponent(video.path)}`
+    return `/api/v1/videos/stream?path=${encodeURIComponent(video.path || video.name)}`
   }
   return localVideoUrls.get(video.id) ?? null
 }

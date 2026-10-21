@@ -150,6 +150,7 @@ docker compose up -d
 | --- | --- | --- |
 | `PORT` | `3000` | 网关监听端口，Docker 镜像内固定为 3000 |
 | `VIGIL_ALLOWED_ROOTS` | `/data/videos:/tmp:/tmp/vigil-test` | 扫描与抽帧允许访问的目录白名单，Linux 以 `:` 分隔；项目目录与系统临时目录始终允许 |
+| `VIGIL_SCAN_DIR` | 空 | 可选。视频流接口按文件名/相对路径寻址时额外查找的根目录，同时自动加入白名单 |
 | `NEXT_PUBLIC_DEFAULT_VLM_MODEL` | `qwen2.5-vl-72b` | 默认二级研判模型标识 |
 | `VLM_API_URL` | `http://localhost:8000/api/v1/analyze` | VLM 推理网关地址 |
 | `VLM_API_KEY` | 空 | VLM 推理网关密钥，请勿提交到仓库 |

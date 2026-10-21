@@ -14,7 +14,6 @@ import {
   ScanEye,
   Siren,
   Trash2,
-  VideoOff,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -39,6 +38,8 @@ import {
   getVideoSrc,
   writeCastRequest,
 } from "@/lib/vigil/video-source"
+import { diagnosePlaybackFailure, type PlaybackFailure } from "@/lib/vigil/playback-diagnosis"
+import { PlaybackError } from "../playback-error"
 import { useVigil } from "../vigil-provider"
 
 const STATUS_CHIP: Record<VideoStatus, string> = {
@@ -93,14 +94,15 @@ export function VideoFeedCard({ video }: { video: VideoItem }) {
   const onScreen = useOnScreen(frameRef)
 
   const src = getVideoSrc(video)
-  const [failedSrc, setFailedSrc] = React.useState<string | null>(null)
+  const [failed, setFailed] = React.useState<{ src: string; failure: PlaybackFailure | null } | null>(null)
   const [userPaused, setUserPaused] = React.useState(false)
   const [playing, setPlaying] = React.useState(false)
   const [time, setTime] = React.useState(0)
   const [mediaDuration, setMediaDuration] = React.useState(0)
   const [dimensions, setDimensions] = React.useState<{ w: number; h: number } | null>(null)
 
-  const playable = hasMediaSrc(src) && failedSrc !== src
+  const playable = hasMediaSrc(src) && failed?.src !== src
+  const failure = failed?.src === src ? failed.failure : null
   const analyzing = video.status === "analyzing"
   const done = video.status === "safe" || video.status === "alert"
   const alerting = video.status === "alert" && video.ruleId !== undefined
@@ -190,6 +192,7 @@ export function VideoFeedCard({ video }: { video: VideoItem }) {
             muted
             loop
             playsInline
+            autoPlay={false}
             preload="metadata"
             aria-label={`${video.name} 监控画面`}
             className="absolute inset-0 size-full object-cover"
@@ -202,9 +205,16 @@ export function VideoFeedCard({ video }: { video: VideoItem }) {
               if (el.videoWidth > 0) setDimensions({ w: el.videoWidth, h: el.videoHeight })
             }}
             onError={(event) => {
+              const el = event.currentTarget
               suppressMediaError(event)
-              setFailedSrc(src)
+              if (!src || !el.getAttribute("src")) return
+              const mediaError = el.error
+              console.error("[VIDEO_PLAY_ERROR]", video.name, mediaError?.code, mediaError?.message)
               setPlaying(false)
+              setFailed({ src, failure: null })
+              void diagnosePlaybackFailure(src, mediaError?.code ?? null).then((result) => {
+                setFailed((current) => (current?.src === src ? { src, failure: result } : current))
+              })
             }}
           />
         ) : (
@@ -216,12 +226,7 @@ export function VideoFeedCard({ video }: { video: VideoItem }) {
               className="absolute inset-0 size-full object-cover"
               draggable={false}
             />
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-muted-foreground">
-              <VideoOff className="size-6" aria-hidden="true" />
-              <span className="text-xs">
-                {hasMediaSrc(src) ? "视频无法解码播放" : "无可播放画面（仅元数据）"}
-              </span>
-            </div>
+            <PlaybackError src={src} failure={failure} />
           </>
         )}
 
