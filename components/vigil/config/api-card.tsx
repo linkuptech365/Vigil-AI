@@ -1,6 +1,6 @@
 "use client"
 
-import { CircleAlert, CircleCheck, Link2, Network } from "lucide-react"
+import { CircleAlert, CircleCheck, Cpu, Link2, Network, RotateCcw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -14,6 +14,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import {
   InputGroup,
   InputGroupAddon,
+  InputGroupButton,
   InputGroupInput,
 } from "@/components/ui/input-group"
 import { Slider } from "@/components/ui/slider"
@@ -24,7 +25,9 @@ import { useVigil } from "../vigil-provider"
 import { ApiKeyField } from "./api-key-field"
 
 export function ApiCard() {
-  const { settings, updateSettings, applyPreset, ping, runPing } = useVigil()
+  const { settings, updateSettings, applyPreset, ping, runPing, modelName, setModelName } =
+    useVigil()
+  const recommendedModel = API_PRESETS.find((p) => p.id === settings.presetId)?.model
 
   return (
     <Card>
@@ -109,6 +112,39 @@ export function ApiCard() {
                 </p>
               )}
             </div>
+          </Field>
+
+          <Field>
+            <FieldLabel htmlFor="api-model">推理模型名称 (Model Name)</FieldLabel>
+            <InputGroup>
+              <InputGroupAddon>
+                <Cpu aria-hidden="true" />
+              </InputGroupAddon>
+              <InputGroupInput
+                id="api-model"
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="gpt-4o / gpt-6-astra / 自定义模型名"
+                value={modelName}
+                onChange={(event) => setModelName(event.target.value)}
+                className="font-mono"
+              />
+              {recommendedModel && modelName !== recommendedModel && (
+                <InputGroupAddon align="inline-end">
+                  <InputGroupButton
+                    variant="ghost"
+                    onClick={() => setModelName(recommendedModel)}
+                    aria-label={`恢复推荐模型 ${recommendedModel}`}
+                  >
+                    <RotateCcw aria-hidden="true" />
+                    恢复推荐
+                  </InputGroupButton>
+                </InputGroupAddon>
+              )}
+            </InputGroup>
+            <FieldDescription>
+              点击上方预设会自动填入推荐模型名，可随意修改；留空时使用网关默认模型。连通性测试与视频分析均使用此处填写的名称。
+            </FieldDescription>
           </Field>
 
           <Field>

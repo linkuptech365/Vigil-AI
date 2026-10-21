@@ -50,6 +50,7 @@ import type {
 export type TabId = "config" | "queue" | "alerts"
 
 const STORAGE_KEY = "vigil-ai:settings"
+const MODEL_STORAGE_KEY = "vigil_api_model"
 const MAX_LOGS = 400
 
 interface VigilContextValue {
@@ -61,6 +62,7 @@ interface VigilContextValue {
   ping: PingState
   runPing: () => Promise<void>
   modelName: string
+  setModelName: (value: string) => void
   scanning: boolean
   lastScan: string | null
   scanInfo: ScanInfo | null
@@ -176,6 +178,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS)
   const [hydrated, setHydrated] = React.useState(false)
   const [apiKey, setApiKeyState] = React.useState("")
+  const [modelName, setModelNameState] = React.useState(API_PRESETS[0].model)
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
   const [loadingGmp, setLoadingGmp] = React.useState(false)
@@ -190,6 +193,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
   const settingsRef = React.useRef(settings)
   const apiKeyRef = React.useRef(apiKey)
+  const modelNameRef = React.useRef(modelName)
   const queueRef = React.useRef(queue)
   const frameTestToken = React.useRef(0)
   const busyRef = React.useRef(new Set<string>())
@@ -203,6 +207,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     apiKeyRef.current = apiKey
   }, [apiKey])
+
+  React.useEffect(() => {
+    modelNameRef.current = modelName
+  }, [modelName])
 
   React.useEffect(() => {
     queueRef.current = queue
@@ -227,6 +235,15 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
+    }
+    try {
+      const savedModel = window.localStorage.getItem(MODEL_STORAGE_KEY)
+      if (savedModel !== null) {
+        modelNameRef.current = savedModel
+        setModelNameState(savedModel)
+      }
+    } catch {
+      // 隐私模式下 localStorage 不可读，沿用默认预设的模型名
     }
     setApiKeyState(readStoredApiKey())
     setHydrated(true)
@@ -257,23 +274,35 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const setModelName = React.useCallback((value: string) => {
+    modelNameRef.current = value
+    setModelNameState(value)
+    setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
+    try {
+      window.localStorage.setItem(MODEL_STORAGE_KEY, value)
+    } catch {
+      // 隐私模式下 localStorage 不可写，仅在当前页面内存中生效
+    }
+  }, [])
+
   const applyPreset = React.useCallback(
     (presetId: string) => {
       const preset = API_PRESETS.find((p) => p.id === presetId)
       if (!preset) return
       updateSettings({ presetId: preset.id, apiUrl: preset.url })
+      setModelName(preset.model)
     },
-    [updateSettings]
+    [updateSettings, setModelName]
   )
 
-  const modelName =
-    API_PRESETS.find((p) => p.id === settings.presetId)?.model ?? "Qwen2.5-VL"
-
   const runPing = React.useCallback(async () => {
-    const { apiUrl, presetId } = settingsRef.current
-    const model = API_PRESETS.find((p) => p.id === presetId)?.model ?? "Qwen2.5-VL"
+    const { apiUrl } = settingsRef.current
+    const model = modelNameRef.current.trim() || undefined
     setPing({ state: "testing" })
-    pushLog("req", `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}`)
+    pushLog(
+      "req",
+      `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}  model=${model ?? "(网关默认)"}`
+    )
 
     const reportFailure = (message: string) => {
       setPing({ state: "error", message })
@@ -425,7 +454,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       busyRef.current.add(video.id)
 
       const s = settingsRef.current
-      const model = API_PRESETS.find((p) => p.id === s.presetId)?.model ?? "Qwen2.5-VL"
+      const model = modelNameRef.current.trim() || undefined
       const enabled = RULE_IDS.filter((id) => s.rules[id])
       const frames = Math.max(1, Math.ceil(video.durationSec * s.samplingFps))
 
@@ -473,7 +502,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         const truth = video.truth
         pushLog(
           "req",
-          `POST /api/v1/vlm/analyze  model=${model}  frames=${vlmFrames.length}  rules=[${enabled
+          `POST /api/v1/vlm/analyze  model=${model ?? "(网关默认)"}  frames=${vlmFrames.length}  rules=[${enabled
             .map((r) => `"${r}"`)
             .join(",")}]  threshold=${s.threshold.toFixed(2)}`
         )
@@ -691,6 +720,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       ping,
       runPing,
       modelName,
+      setModelName,
       scanning,
       lastScan,
       scanInfo,
@@ -725,6 +755,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       ping,
       runPing,
       modelName,
+      setModelName,
       scanning,
       lastScan,
       scanInfo,
