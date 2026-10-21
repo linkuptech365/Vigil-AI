@@ -2,7 +2,8 @@ import path from "node:path"
 import { NextResponse } from "next/server"
 
 import { renderKeyframe, seedFrom } from "@/lib/ops/server/frame-svg"
-import { PathGuardError, resolveSafePath } from "@/lib/ops/server/path-guard"
+import { PathGuardError } from "@/lib/ops/server/path-guard"
+import { locateVideo } from "@/lib/ops/server/video-locator"
 import { readVideoMeta } from "@/lib/ops/server/video-meta"
 import {
   DEFAULT_VIDEO_EXTENSIONS,
@@ -64,7 +65,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { resolved, stat } = await resolveSafePath(body.videoPath, "file")
+    const { resolved, stat } = await locateVideo(body.videoPath)
     const ext = path.extname(resolved).toLowerCase()
     if (!(DEFAULT_VIDEO_EXTENSIONS as readonly string[]).includes(ext)) {
       return fail(400, "不支持的视频格式")

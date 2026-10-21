@@ -1,5 +1,7 @@
 import path from "node:path"
 
+import { sanitizeVideoPath } from "@/lib/vigil/video-path"
+
 import { extraRoots, normalizeRawPath, PathGuardError, resolveSafePath, type SafePath } from "./path-guard"
 
 export interface LocatedVideo extends SafePath {
@@ -8,30 +10,31 @@ export interface LocatedVideo extends SafePath {
   matchedIndex: number
 }
 
-function lastSegment(input: string) {
-  return input.split(/[\\/]+/).filter(Boolean).pop() ?? input
-}
+export { sanitizeVideoPath }
 
 /**
- * 按优先级生成候选物理路径：
- * 1. 绝对路径本身
+ * 按优先级生成候选物理路径（入参先剥离 "[本机]" 等 UI 标签并统一斜杠）：
+ * 1. 清洗后的绝对路径本身
  * 2. 相对工程根目录解析
  * 3. 工程根目录/vidso/<文件名>
  * 4. 工程根目录/public/videos/<文件名>
- * 5. VIGIL_ALLOWED_ROOTS / VIGIL_SCAN_DIR 各根目录下的相对路径与文件名
+ * 5. 工程根目录/<文件名>
+ * 6. VIGIL_ALLOWED_ROOTS / VIGIL_SCAN_DIR 各根目录下的相对路径与文件名
  */
 export function buildVideoCandidates(requested: string): string[] {
   const cwd = process.cwd()
-  const name = lastSegment(requested)
+  const { cleanedPath, fileName } = sanitizeVideoPath(requested)
   const list: string[] = []
+  if (!cleanedPath || !fileName) return list
 
-  if (path.isAbsolute(requested)) list.push(path.normalize(requested))
-  list.push(path.resolve(cwd, requested))
-  list.push(path.resolve(cwd, "vidso", name))
-  list.push(path.resolve(cwd, "public", "videos", name))
+  if (path.isAbsolute(cleanedPath)) list.push(path.normalize(cleanedPath))
+  list.push(path.resolve(cwd, cleanedPath))
+  list.push(path.resolve(cwd, "vidso", fileName))
+  list.push(path.resolve(cwd, "public", "videos", fileName))
+  list.push(path.resolve(cwd, fileName))
   for (const root of extraRoots()) {
-    if (!path.isAbsolute(requested)) list.push(path.resolve(root, requested))
-    list.push(path.resolve(root, name))
+    if (!path.isAbsolute(cleanedPath)) list.push(path.resolve(root, cleanedPath))
+    list.push(path.resolve(root, fileName))
   }
   return [...new Set(list)]
 }
@@ -44,6 +47,7 @@ export function buildVideoCandidates(requested: string): string[] {
 export async function locateVideo(input: unknown): Promise<LocatedVideo> {
   const requested = normalizeRawPath(input)
   const candidates = buildVideoCandidates(requested)
+  if (candidates.length === 0) throw new PathGuardError(400, "路径参数无效（清除显示标签后为空）")
 
   let forbidden: PathGuardError | null = null
   let invalid: PathGuardError | null = null

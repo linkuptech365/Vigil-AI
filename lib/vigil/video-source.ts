@@ -1,4 +1,5 @@
 import type { VideoItem } from "./types"
+import { toRequestVideoPath } from "./video-path"
 
 /** 本机导入的视频只存在于当前页面的 Blob URL 中，不写入 localStorage。 */
 const localVideoUrls = new Map<string, string>()
@@ -24,7 +25,7 @@ export function releaseAllLocalVideos() {
 /** 返回可直接交给 <video src> 的地址；没有可播放来源（如测试样本）时返回 null。 */
 export function getVideoSrc(video: VideoItem): string | null {
   if (video.source === "disk") {
-    return `/api/v1/videos/stream?path=${encodeURIComponent(video.path || video.name)}`
+    return `/api/v1/videos/stream?path=${encodeURIComponent(toRequestVideoPath(video))}`
   }
   return localVideoUrls.get(video.id) ?? null
 }

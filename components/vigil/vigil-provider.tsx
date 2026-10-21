@@ -46,6 +46,7 @@ import type {
   Settings,
   VideoItem,
 } from "@/lib/vigil/types"
+import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
 
 export type TabId = "config" | "queue" | "alerts"
@@ -609,7 +610,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           try {
             const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
               "/api/v1/extract-frames",
-              { videoPath: video.path, fps: s.samplingFps as SamplingFps }
+              { videoPath: toRequestVideoPath(video), fps: s.samplingFps as SamplingFps }
             )
             keyframes = result.keyframes
             keyframeWindow = result.windowRange
@@ -669,7 +670,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
         const hintedRule = video.truth.ruleId && promptRules.some((r) => r.id === video.truth.ruleId)
         const { result, metrics, verdict, reasoning } = await analyzeVlmOnce({
-          videoPath: video.path || video.name,
+          videoPath: toRequestVideoPath(video),
           name: video.name,
           keyframes: vlmFrames,
           apiUrl: s.apiUrl.trim() || undefined,
@@ -768,7 +769,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
           "/api/v1/extract-frames",
           {
-            videoPath: video.path,
+            videoPath: toRequestVideoPath(video),
             fps,
             ...(triggerSec !== null ? { triggerTimestampSec: triggerSec } : {}),
           }
