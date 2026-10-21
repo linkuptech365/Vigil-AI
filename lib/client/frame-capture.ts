@@ -1,4 +1,10 @@
 import type { VlmKeyframeInput } from "@/lib/ops/vlm-api-types"
+import {
+  PATROL_INTERVAL_SECONDS,
+  formatThresholdPercent,
+  resolveTier1Config,
+  type Tier1Sensitivity,
+} from "@/lib/vigil/sensitivity"
 
 export type FrameReason = "baseline" | "motion" | "patrol"
 
@@ -30,6 +36,20 @@ export interface MotionScan {
   staticRatioPercent: number
   /** 初筛的实际采样间隔（秒）。时长不超过 MAX_SCAN_SAMPLES 秒时为 1，即严格 1 FPS。 */
   scanStepSeconds: number
+  /** 本次初筛实际使用的灵敏度参数，随结果落库以便面板展示 */
+  sensitivity: Tier1Sensitivity
+  motionThresholdPercent: number
+  grayDiff: number
+  patrolIntervalSeconds: number
+}
+
+export interface ScanOptions {
+  sensitivity?: Tier1Sensitivity
+  /** 像素变动率阈值（%），不传则取档位预设 */
+  motionThreshold?: number
+  /** 灰度差阈值，不传则取档位预设 */
+  grayDiff?: number
+  onLog?: (message: string) => void
 }
 
 export interface VideoChunk {
@@ -54,8 +74,6 @@ const JPEG_QUALITY = 0.85
 
 const SCAN_WIDTH = 160
 const SCAN_HEIGHT = 90
-const PIXEL_DIFF_THRESHOLD = 24
-const MOTION_RATE_THRESHOLD = 0.03
 const MAX_SCAN_SAMPLES = 600
 const SEGMENT_MERGE_GAP_SEC = 2
 
@@ -70,6 +88,7 @@ export const CHUNK_WINDOW_SECONDS = 90
 const MIN_TAIL_CHUNK_SECONDS = 10
 const MAX_CHUNK_MOTION_FRAMES = 5
 const MIN_CHUNK_MOTION_FRAMES = 3
+const MAX_CHUNK_TOTAL_FRAMES = 7
 const CHUNK_PATROL_RATIOS = [0.25, 0.75]
 const CHUNK_FILL_RATIOS = [0.5, 0.25, 0.75]
 
@@ -136,7 +155,12 @@ function clampTime(seconds: number, duration: number) {
 }
 
 /** Level-1：按 1 FPS 在 160x90 灰度缩略图上做相邻帧差分，返回合并后的活跃时间段。 */
-async function scanMotionSegments(video: HTMLVideoElement, duration: number) {
+async function scanMotionSegments(
+  video: HTMLVideoElement,
+  duration: number,
+  grayDiff: number,
+  motionRateThreshold: number
+) {
   const canvas = document.createElement("canvas")
   canvas.width = SCAN_WIDTH
   canvas.height = SCAN_HEIGHT
@@ -162,10 +186,10 @@ async function scanMotionSegments(video: HTMLVideoElement, duration: number) {
     if (previous) {
       let changed = 0
       for (let i = 0; i < pixelCount; i++) {
-        if (Math.abs(gray[i] - previous[i]) > PIXEL_DIFF_THRESHOLD) changed++
+        if (Math.abs(gray[i] - previous[i]) > grayDiff) changed++
       }
       const rate = changed / pixelCount
-      if (rate > MOTION_RATE_THRESHOLD) {
+      if (rate > motionRateThreshold) {
         motionIntervals.push({ start: previousTime, end: time, peakRate: rate, peakAt: time })
       }
     }
@@ -294,8 +318,22 @@ export async function openCaptureSession(source: string | Blob): Promise<Capture
 }
 
 /** Level-1：对整段视频做一次运动初筛，结果供各切片挑帧时复用。 */
-export async function scanVideoMotion(session: CaptureSession): Promise<MotionScan> {
-  const { segments, step } = await scanMotionSegments(session.video, session.duration)
+export async function scanVideoMotion(
+  session: CaptureSession,
+  options: ScanOptions = {}
+): Promise<MotionScan> {
+  const preset = resolveTier1Config(options.sensitivity)
+  const motionThresholdPercent = options.motionThreshold ?? preset.motionThresholdPercent
+  const grayDiff = options.grayDiff ?? preset.grayDiff
+  options.onLog?.(
+    `[LEVEL-1] 启动初筛 (模式: ${preset.modeName}, 阈值: ${formatThresholdPercent(motionThresholdPercent)}%)...`
+  )
+  const { segments, step } = await scanMotionSegments(
+    session.video,
+    session.duration,
+    grayDiff,
+    motionThresholdPercent / 100
+  )
   const motionDuration = segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0)
   return {
     motionSegments: segments.map((segment) => ({
@@ -310,7 +348,63 @@ export async function scanVideoMotion(session: CaptureSession): Promise<MotionSc
       Math.min(100, Math.max(0, 100 - (motionDuration / session.duration) * 100))
     ),
     scanStepSeconds: step,
+    sensitivity: preset.mode,
+    motionThresholdPercent,
+    grayDiff,
+    patrolIntervalSeconds: preset.patrolIntervalSeconds,
   }
+}
+
+/** 动作区间之外的连续静止时段 */
+function staticGaps(segments: RawSegment[], start: number, end: number) {
+  const gaps: Array<[number, number]> = []
+  let cursor = start
+  for (const segment of [...segments].sort((a, b) => a.start - b.start)) {
+    if (segment.start > cursor) gaps.push([cursor, Math.min(segment.start, end)])
+    cursor = Math.max(cursor, segment.end)
+    if (cursor >= end) break
+  }
+  if (cursor < end) gaps.push([cursor, end])
+  return gaps
+}
+
+/**
+ * 保底巡检心跳：在每段静止区间内，把相邻已选帧（含区间端点）之间超过 interval 的空档
+ * 均匀补帧，保证任意长静止时段至少每 interval 秒有 1 帧送检，静止坐姿等违规不会被漏掉。
+ */
+function fillPatrolHeartbeats(
+  selected: Candidate[],
+  segments: RawSegment[],
+  start: number,
+  end: number,
+  interval: number,
+  limit: (t: number) => number,
+  maxTotal: number
+) {
+  if (!(interval > 0)) return selected
+  const result = [...selected]
+  const additions: Candidate[] = []
+  for (const [gapStart, gapEnd] of staticGaps(segments, start, end)) {
+    const anchors = [
+      gapStart,
+      ...result.map((item) => item.seconds).filter((t) => t > gapStart && t < gapEnd),
+      gapEnd,
+    ].sort((a, b) => a - b)
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const span = anchors[i + 1] - anchors[i]
+      if (span <= interval) continue
+      const count = Math.ceil(span / interval) - 1
+      for (let k = 1; k <= count; k++) {
+        additions.push({ seconds: limit(anchors[i] + (span * k) / (count + 1)), weight: 0.5, reason: "patrol" })
+      }
+    }
+  }
+  for (const candidate of additions) {
+    if (result.length >= maxTotal) break
+    if (result.some((item) => Math.abs(item.seconds - candidate.seconds) < MIN_FRAME_GAP_SEC)) continue
+    result.push(candidate)
+  }
+  return result.sort((a, b) => a.seconds - b.seconds)
 }
 
 function toRawSegment(segment: MotionSegment): RawSegment {
@@ -393,7 +487,7 @@ export async function captureChunkFrames(
   startTime: number,
   endTime: number,
   chunkIndex: number,
-  options: { motionSegments?: MotionSegment[]; totalChunks?: number } = {}
+  options: { motionSegments?: MotionSegment[]; totalChunks?: number; patrolIntervalSeconds?: number } = {}
 ): Promise<AdaptiveFrame[]> {
   const owned = isSession(videoSource) ? null : await openCaptureSession(videoSource)
   const session = owned ?? (videoSource as CaptureSession)
@@ -407,10 +501,19 @@ export async function captureChunkFrames(
 
     const withinChunk = (seconds: number) => Math.min(clampTime(Math.max(seconds, start), duration), end - END_GUARD_SEC)
     const segments = clipSegmentsToChunk(options.motionSegments ?? [], start, end)
-    const targets =
-      (options.totalChunks ?? 1) <= 1
-        ? selectFrameTimes(duration, segments)
-        : selectChunkFrameTimes(start, end, segments, withinChunk)
+    const singleChunk = (options.totalChunks ?? 1) <= 1
+    const base = singleChunk
+      ? selectFrameTimes(duration, segments)
+      : selectChunkFrameTimes(start, end, segments, withinChunk)
+    const targets = fillPatrolHeartbeats(
+      base,
+      segments,
+      start,
+      end,
+      options.patrolIntervalSeconds ?? PATROL_INTERVAL_SECONDS,
+      withinChunk,
+      singleChunk ? MAX_TOTAL_FRAMES : MAX_CHUNK_TOTAL_FRAMES
+    )
 
     const sourceWidth = video.videoWidth || FRAME_WIDTH
     const sourceHeight = video.videoHeight || 360

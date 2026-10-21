@@ -49,6 +49,7 @@ import type {
   VideoItem,
 } from "@/lib/vigil/types"
 import { buildEvidenceChain } from "@/lib/vigil/evidence"
+import { resolveTier1Config } from "@/lib/vigil/sensitivity"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { getVideoSrc, registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
 import {
@@ -392,7 +393,11 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       const raw = window.localStorage.getItem(STORAGE_KEY)
       if (raw) {
         const { rules: _legacyRules, ...saved } = JSON.parse(raw) as Partial<Settings> & { rules?: unknown }
-        setSettings((prev) => ({ ...prev, ...saved }))
+        setSettings((prev) => ({
+          ...prev,
+          ...saved,
+          tier1Sensitivity: resolveTier1Config(saved.tier1Sensitivity).mode,
+        }))
       }
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
@@ -480,7 +485,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     setPing({ state: "testing" })
     pushLog(
       "req",
-      `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}  model=${model ?? "(网关默认)"}`
+      `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}  model=${model ?? "(网关默���)"}`
     )
 
     const reportFailure = (message: string) => {
@@ -659,6 +664,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       const captured = await captureChunkFrames(src, chunk.startSec, chunk.endSec, chunk.index, {
         motionSegments: video.prescreen?.motionSegments,
         totalChunks: chunk.total,
+        patrolIntervalSeconds: video.prescreen?.patrolIntervalSeconds,
       })
       const frames: ChunkFrame[] = captured.map((f) => ({
         timestamp: f.timestamp,
@@ -733,7 +739,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           try {
             session = await openCaptureSession(playableSrc)
             const scanStartedAt = performance.now()
-            scan = await scanVideoMotion(session)
+            scan = await scanVideoMotion(session, {
+              sensitivity: settingsRef.current.tier1Sensitivity,
+              onLog: (message) => pushLog("info", message),
+            })
             const scanElapsedMs = Math.round(performance.now() - scanStartedAt)
             chunks = planVideoChunks(session.duration)
             patchVideo(video.id, {
@@ -744,6 +753,10 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
                 staticRatioPercent: scan.staticRatioPercent,
                 scanStepSeconds: scan.scanStepSeconds,
                 scannedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+                sensitivity: scan.sensitivity,
+                motionThresholdPercent: scan.motionThresholdPercent,
+                grayDiff: scan.grayDiff,
+                patrolIntervalSeconds: scan.patrolIntervalSeconds,
               },
               chunks: chunks.map(toPendingChunk),
             })
@@ -890,6 +903,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
               const captured = await captureChunkFrames(session, chunk.startTime, chunk.endTime, chunk.index, {
                 motionSegments: scan.motionSegments,
                 totalChunks: chunk.total,
+                patrolIntervalSeconds: scan.patrolIntervalSeconds,
               })
               chunkFrames = toKeyframeInputs(captured)
               frameRecords = captured.map((f) => ({

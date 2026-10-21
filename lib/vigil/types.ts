@@ -1,6 +1,7 @@
 import type { RuleSeverity } from "@/lib/ops/rules-types"
 import type { VlmAnalysisReport } from "@/lib/ops/vlm-api-types"
 import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
+import type { Tier1Sensitivity } from "./sensitivity"
 
 /** 规则库中的规则编号（如 RULE-01、RULE-99），由规则引擎动态下发，不再内置枚举。 */
 export type RuleId = string
@@ -93,6 +94,11 @@ export interface PrescreenResult {
   staticRatioPercent: number
   scanStepSeconds: number
   scannedAt: string
+  /** 本次初筛使用的灵敏度档位；旧记录没有该字段 */
+  sensitivity?: Tier1Sensitivity
+  motionThresholdPercent?: number
+  grayDiff?: number
+  patrolIntervalSeconds?: number
 }
 
 export type ChunkStatus = "pending" | "analyzing" | "alert" | "safe" | "failed"
@@ -158,6 +164,8 @@ export interface Settings {
   folderPath: string
   recursive: boolean
   formats: string[]
+  /** 一级初筛灵敏度档位，缺省为标准模式 */
+  tier1Sensitivity: Tier1Sensitivity
 }
 
 export type PingState =

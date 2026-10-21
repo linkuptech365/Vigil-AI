@@ -1,3 +1,4 @@
+import { DEFAULT_TIER1_SENSITIVITY } from "./sensitivity"
 import type { Settings, Truth, VideoItem } from "./types"
 
 export const DEMO_FOLDER = "/data/videos/surveillance_stream"
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
   folderPath: DEFAULT_FOLDER,
   recursive: true,
   formats: [...VIDEO_FORMATS],
+  tier1Sensitivity: DEFAULT_TIER1_SENSITIVITY,
 }
 
 type VideoSeed = Omit<VideoItem, "id" | "status" | "path"> & { dir: string }

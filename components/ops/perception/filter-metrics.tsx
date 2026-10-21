@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { formatDuration } from "@/lib/ops/local-source"
 import { DAILY_SAVING_USD } from "@/lib/ops/perception-data"
 import type { SeriesPoint } from "@/lib/ops/perception-types"
+import { resolveTier1Config, tier1BadgeText } from "@/lib/vigil/sensitivity"
 import type { VideoItem } from "@/lib/vigil/types"
 import { usePerception } from "./perception-provider"
 
@@ -154,7 +155,11 @@ function LocalFilterMetrics({ video }: { video: VideoItem }) {
           label="初筛用时 (Screening Time)"
           value={prescreen ? (prescreen.elapsedMs / 1000).toFixed(1) : "--"}
           unit="秒"
-          hint={prescreen ? `每 ${prescreen.scanStepSeconds}s 采样一帧像素差分` : "尚未执行初筛"}
+          hint={
+            prescreen
+              ? `${tier1BadgeText(resolveTier1Config(prescreen.sensitivity))} · 每 ${prescreen.scanStepSeconds}s 采样`
+              : "尚未执行初筛"
+          }
           icon={Timer}
         />
         <MetricCard
