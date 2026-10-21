@@ -64,6 +64,17 @@ export function detectProtocol(url: URL): VlmProtocol {
   return "openai"
 }
 
+/** 去掉末尾斜杠；OpenAI 协议下仅给到 `/v1` 时补全 `/chat/completions`，已完整的路径保持原样 */
+export function normalizeEndpoint(raw: string) {
+  const url = new URL(raw.trim())
+  const path = url.pathname.replace(/\/+$/, "")
+  url.pathname = path || "/"
+  if (detectProtocol(url) === "openai" && /\/v\d+$/i.test(path)) {
+    url.pathname = `${path}/chat/completions`
+  }
+  return url
+}
+
 export function protocolLabel(protocol: VlmProtocol) {
   if (protocol === "dashscope") return "DashScope"
   if (protocol === "ollama") return "Ollama"
@@ -99,6 +110,8 @@ export interface RemoteCall {
   system: string
   user: string
   images: string[]
+  /** OpenAI 协议下是否请求 SSE 流式输出；false 时发送 `stream: false` */
+  stream: boolean
   signal: AbortSignal
 }
 
@@ -166,8 +179,8 @@ function buildBody(call: RemoteCall): Record<string, unknown> {
       { role: "system", content: call.system },
       { role: "user", content: userContent },
     ],
-    stream: true,
-    stream_options: { include_usage: true },
+    stream: call.stream,
+    ...(call.stream ? { stream_options: { include_usage: true } } : {}),
     temperature: 0.2,
     max_tokens: 1500,
   }
@@ -217,6 +230,54 @@ function errorDetail(json: unknown) {
   return typeof candidate === "string" ? candidate.slice(0, 120) : ""
 }
 
+function statusReason(status: number) {
+  if (status === 401 || status === 403) return "鉴权失败，请检查 API Key"
+  if (status === 404) return "接口路径不存在，请检查端点 URL 与模型名称"
+  if (status === 400 || status === 422) return "请求参数错误，请检查模型名称与请求参数"
+  if (status === 413) return "请求体过大，请减少抽帧数量或压缩图片"
+  if (status === 429) return "触发限流或额度不足"
+  if (status >= 500) return "远端服务内部错误"
+  return "请求被拒绝"
+}
+
+export function logRemoteError(response: Pick<Response, "status" | "statusText">, body: string) {
+  console.error(`[VLM Remote Error] HTTP ${response.status} ${response.statusText} | Body: ${body.slice(0, 300)}`)
+}
+
+function snippet(text: string, max = 100) {
+  return text.replace(/\s+/g, " ").trim().slice(0, max)
+}
+
+async function* textLines(text: string): AsyncGenerator<string> {
+  for (const line of text.split("\n")) yield line.replace(/\r$/, "")
+}
+
+async function* openaiSseEvents(lines: AsyncIterable<string>): AsyncGenerator<RemoteEvent> {
+  for await (const line of lines) {
+    if (!line.startsWith("data:")) continue
+    const payload = line.slice(5).trim()
+    if (!payload) continue
+    if (payload === "[DONE]") return
+    const record = asRecord(parseJson(payload))
+    if (!record) continue
+    if (record.error) {
+      console.error(`[VLM Remote Error] SSE error event | Body: ${payload.slice(0, 300)}`)
+      throw new RemoteError(`流式响应返回错误${errorDetail(record) ? `（${errorDetail(record)}）` : ""}`)
+    }
+    const choice = Array.isArray(record.choices) ? asRecord(record.choices[0]) : null
+    const content = textFromContent(asRecord(choice?.delta)?.content)
+    if (content) yield { kind: "token", content }
+    const usage = asRecord(record.usage)
+    if (usage) {
+      yield {
+        kind: "usage",
+        promptTokens: pickNumber(usage, "prompt_tokens") ?? 0,
+        outputTokens: pickNumber(usage, "completion_tokens") ?? 0,
+      }
+    }
+  }
+}
+
 export async function* streamRemote(call: RemoteCall): AsyncGenerator<RemoteEvent> {
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`
@@ -231,12 +292,16 @@ export async function* streamRemote(call: RemoteCall): AsyncGenerator<RemoteEven
   })
 
   if (response.status >= 300 && response.status < 400) {
-    throw new RemoteError(`端点返回 HTTP ${response.status} 重定向，请直接填写最终地址`)
+    logRemoteError(response, response.headers.get("location") ?? "")
+    throw new RemoteError(`HTTP ${response.status} 重定向，请直接填写最终地址`)
   }
   if (!response.ok) {
-    const detail = errorDetail(parseJson((await response.text()).slice(0, 4000)))
-    const hint = response.status === 401 || response.status === 403 ? "，请检查 API Key" : ""
-    throw new RemoteError(`端点返回 HTTP ${response.status}${detail ? `（${detail}）` : ""}${hint}`)
+    const raw = await response.text().catch(() => "")
+    logRemoteError(response, raw)
+    const detail = errorDetail(parseJson(raw))
+    throw new RemoteError(
+      `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}：${statusReason(response.status)}${detail ? `（${detail}）` : ""}`
+    )
   }
   if (!response.body) throw new RemoteError("端点未返回响应体")
 
@@ -261,29 +326,27 @@ export async function* streamRemote(call: RemoteCall): AsyncGenerator<RemoteEven
   }
 
   if (call.protocol === "openai" && contentType.includes("text/event-stream")) {
-    for await (const line of readLines(response.body)) {
-      if (!line.startsWith("data:")) continue
-      const payload = line.slice(5).trim()
-      if (payload === "[DONE]") return
-      const record = asRecord(parseJson(payload))
-      if (!record) continue
-      const choice = Array.isArray(record.choices) ? asRecord(record.choices[0]) : null
-      const content = textFromContent(asRecord(choice?.delta)?.content)
-      if (content) yield { kind: "token", content }
-      const usage = asRecord(record.usage)
-      if (usage) {
-        yield {
-          kind: "usage",
-          promptTokens: pickNumber(usage, "prompt_tokens") ?? 0,
-          outputTokens: pickNumber(usage, "completion_tokens") ?? 0,
-        }
-      }
-    }
+    yield* openaiSseEvents(readLines(response.body))
     return
   }
 
-  const json = asRecord(parseJson(await response.text()))
-  if (!json) throw new RemoteError("端点响应不是有效的 JSON")
+  const raw = await response.text()
+  // 部分网关忽略 stream:false 或不带 SSE 的 Content-Type，按内容识别，避免直接 JSON.parse 抛语法错误
+  if (call.protocol === "openai" && /^\s*data:/.test(raw)) {
+    yield* openaiSseEvents(textLines(raw))
+    return
+  }
+
+  const json = asRecord(parseJson(raw))
+  if (!json) {
+    logRemoteError(response, raw)
+    throw new RemoteError(`HTTP ${response.status} 响应不是有效的 JSON${raw.trim() ? `（${snippet(raw)}）` : "（空响应体）"}，请检查端点路径是否为 /chat/completions`)
+  }
+  if (json.error && !json.choices && !json.output) {
+    logRemoteError(response, raw)
+    const detail = errorDetail(json)
+    throw new RemoteError(`远端返回错误${detail ? `（${detail}）` : ""}`)
+  }
 
   if (call.protocol === "dashscope") {
     const output = asRecord(json.output)
@@ -319,6 +382,9 @@ export function describeRemoteError(error: unknown, url: URL) {
   const name = error instanceof Error ? error.name : ""
   const cause = error instanceof Error ? (error.cause as { code?: string } | undefined) : undefined
   const code = cause?.code ?? ""
+  console.error(
+    `[VLM Remote Error] Network | ${name || "Error"} ${code} ${error instanceof Error ? error.message : String(error)} | ${url.origin}${url.pathname}`
+  )
 
   if (name === "TimeoutError" || name === "AbortError" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
     return "远端模型 30s 内无响应（超时）"

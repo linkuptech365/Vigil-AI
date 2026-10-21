@@ -7,6 +7,7 @@ import {
   collectImages,
   describeRemoteError,
   detectProtocol,
+  normalizeEndpoint,
   parseFinalResult,
   protocolLabel,
   streamRemote,
@@ -36,7 +37,7 @@ function planEngine(input: NormalizedInput, requestHost: string | null): EngineP
 
   let url: URL
   try {
-    url = new URL(input.apiUrl)
+    url = normalizeEndpoint(input.apiUrl)
   } catch {
     return { kind: "fallback", reason: "API 端点格式无效" }
   }
@@ -86,6 +87,7 @@ async function* runRemote(
       system: SYSTEM_PROMPT,
       user: userPrompt,
       images,
+      stream: input.remoteStream,
       signal: timeout.signal,
     })) {
       if (event.kind === "usage") {

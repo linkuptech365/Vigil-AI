@@ -88,6 +88,7 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
       modelName: cleanText(record.modelName, 128) ?? DEFAULT_MODEL,
       ruleScenario: cleanText(record.ruleScenario, 400) ?? "",
       stream: record.stream !== false,
+      remoteStream: record.remoteStream === true,
       simulation: parseSimulation(record.simulation),
     },
   }

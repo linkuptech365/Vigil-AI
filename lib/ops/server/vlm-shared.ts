@@ -9,6 +9,8 @@ export interface NormalizedInput {
   modelName: string
   ruleScenario: string
   stream: boolean
+  /** 向远端模型发起流式（SSE）请求；默认 false，即 `stream: false` */
+  remoteStream: boolean
   simulation?: VlmSimulationHint
 }
 
