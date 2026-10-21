@@ -38,6 +38,7 @@ import {
   pointInPolygon,
   type Vec2,
 } from "./rule-geometry"
+import { loadRules, seedRules, writeRules } from "@/lib/storage/rules-store"
 import { extractTags, matchScenario, tagLabel } from "./rule-semantic"
 
 /* ---------------------------------------------------------------- constants */
@@ -93,7 +94,6 @@ interface EngineState {
   events: ClusterEvent[]
   pulseSeq: number
   eventSeq: number
-  ruleSeq: number
   lastIncidentTs: number
 }
 
@@ -105,10 +105,7 @@ function ruleTags(rule: InspectionRule) {
 
 function seedState(): EngineState {
   const now = Date.now()
-  const rules: InspectionRule[] = INITIAL_INSPECTION_RULES.map((rule) => ({
-    ...rule,
-    boundChannels: [...rule.boundChannels],
-  }))
+  const rules: InspectionRule[] = loadRules()
 
   const windows = new Map<string, WindowState>()
   const seededStart = now - 41_000
@@ -152,31 +149,30 @@ function seedState(): EngineState {
     events,
     pulseSeq: 100,
     eventSeq: events.length,
-    ruleSeq: maxNumericRuleSeq(rules),
     lastIncidentTs: 0,
   }
 }
 
-function maxNumericRuleSeq(rules: InspectionRule[]) {
-  return rules.reduce((max, rule) => {
-    const match = /^RULE-(\d+)$/.exec(rule.id)
-    return match ? Math.max(max, Number(match[1])) : max
-  }, 0)
+/** 版本升级后新增的内置规则会补进已有规则库；已存在的规则（含用户改动）一律不动。 */
+function mergeMissingSeeds(state: EngineState) {
+  const missing = seedRules().filter((seed) => !state.rules.some((rule) => rule.id === seed.id))
+  if (missing.length === 0) return
+  const next = [...state.rules, ...missing]
+  try {
+    writeRules(next)
+  } catch (error) {
+    console.error("[rule-engine] 新增内置规则写盘失败，仅在内存中生效：", error)
+  }
+  state.rules = next
 }
 
 function engine(): EngineState {
-  if (!globalStore.__vigilRuleEngine) globalStore.__vigilRuleEngine = seedState()
-  const state = globalStore.__vigilRuleEngine
-  for (const seed of INITIAL_INSPECTION_RULES) {
-    if (!state.rules.some((rule) => rule.id === seed.id)) {
-      state.rules.push({
-        ...seed,
-        boundChannels: [...seed.boundChannels],
-        actions: seed.actions ? { ...seed.actions } : undefined,
-      })
-    }
+  if (!globalStore.__vigilRuleEngine) {
+    const state = seedState()
+    mergeMissingSeeds(state)
+    globalStore.__vigilRuleEngine = state
   }
-  return state
+  return globalStore.__vigilRuleEngine
 }
 
 function windowKey(channelId: string, ruleId: string) {
@@ -201,11 +197,30 @@ export function defaultRuleForChannel(channelId: string) {
   return engine().rules.find((rule) => rule.enabled && bindsSource(rule, { kind: "channel", channelId }))
 }
 
+function cloneRule(rule: InspectionRule): InspectionRule {
+  return {
+    ...rule,
+    boundChannels: [...rule.boundChannels],
+    actions: rule.actions ? { ...rule.actions } : undefined,
+  }
+}
+
+/** 先写盘、成功后再替换内存状态，写盘失败时内存与文件保持一致并向上抛出。 */
+function commitRules(state: EngineState, next: InspectionRule[]) {
+  writeRules(next)
+  state.rules = next
+}
+
+function newCustomRuleId(existing: InspectionRule[]) {
+  let stamp = Date.now()
+  while (existing.some((rule) => rule.id === `RULE-CUSTOM-${stamp}`)) stamp += 1
+  return `RULE-CUSTOM-${stamp}`
+}
+
 export function createCustomRule(input: CreateRuleRequest): InspectionRule {
   const state = engine()
-  state.ruleSeq += 1
   const rule: InspectionRule = {
-    id: `RULE-${String(state.ruleSeq).padStart(2, "0")}`,
+    id: newCustomRuleId(state.rules),
     name: input.name,
     type: "PROMPT_SEMANTIC",
     prompt: input.prompt,
@@ -218,13 +233,16 @@ export function createCustomRule(input: CreateRuleRequest): InspectionRule {
     sensitivity: input.sensitivity,
     actions: { ...input.actions },
   }
-  state.rules.push(rule)
-  return { ...rule, boundChannels: [...rule.boundChannels] }
+  commitRules(state, [...state.rules, rule])
+  return cloneRule(rule)
 }
 
 export function updateRule(ruleId: string, patch: UpdateRuleRequest): InspectionRule | null {
-  const rule = findRule(ruleId)
-  if (!rule) return null
+  const state = engine()
+  const current = state.rules.find((rule) => rule.id === ruleId)
+  if (!current) return null
+
+  const rule = cloneRule(current)
   if (patch.enabled !== undefined) rule.enabled = patch.enabled
   if (patch.severity !== undefined) rule.severity = patch.severity
   if (patch.cooldownSeconds !== undefined) rule.cooldownSeconds = patch.cooldownSeconds
@@ -236,7 +254,34 @@ export function updateRule(ruleId: string, patch: UpdateRuleRequest): Inspection
     if (rule.type === "PROMPT_SEMANTIC") rule.prompt = patch.description
     else rule.logic = patch.description
   }
-  return { ...rule, boundChannels: [...rule.boundChannels] }
+
+  commitRules(
+    state,
+    state.rules.map((item) => (item.id === ruleId ? rule : item))
+  )
+  return cloneRule(rule)
+}
+
+export type DeleteRuleResult = "deleted" | "not_found" | "builtin"
+
+/** 自定义规则物理删除；内置规则只能停用，不允许删除。 */
+export function deleteRule(ruleId: string): DeleteRuleResult {
+  const state = engine()
+  const target = state.rules.find((rule) => rule.id === ruleId)
+  if (!target) return "not_found"
+  if (!target.custom) return "builtin"
+  commitRules(
+    state,
+    state.rules.filter((rule) => rule.id !== ruleId)
+  )
+  return "deleted"
+}
+
+/** 恢复出厂：规则库重置为内置规则，自定义规则与所有改动一并清除。 */
+export function resetRules(): InspectionRule[] {
+  const state = engine()
+  commitRules(state, seedRules())
+  return listRules()
 }
 
 /* ------------------------------------------------- sliding-window suppression */
@@ -489,7 +534,7 @@ function evaluateGeometry(
       }
     }
   }
-  return { miss: "目标未进入任何 ROI 区域，也未穿越绊线" }
+  return { miss: "目标未进入任��� ROI 区域，也未穿越绊线" }
 }
 
 function evaluateSemantic(rule: InspectionRule, req: RuleEvaluateRequest, confidence: number): RuleVerdict {

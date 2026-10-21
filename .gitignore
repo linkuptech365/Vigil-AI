@@ -32,6 +32,9 @@ pnpm-debug.log*
 .env*
 !.env.example
 
+# runtime data (rules.json 等本地持久化文件)
+/data/
+
 # vercel
 .vercel
 

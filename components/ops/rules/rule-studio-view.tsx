@@ -34,6 +34,7 @@ import type {
 } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { CustomRuleDialog } from "./custom-rule-dialog"
+import { DeleteRuleButton, ResetRulesButton } from "./rule-danger-actions"
 import { useRules } from "./rules-provider"
 
 const TYPE_META: Record<InspectionRuleType, { label: string; className: string }> = {
@@ -125,7 +126,7 @@ function SensitivityField({
 }
 
 function RuleCard({ rule }: { rule: InspectionRule }) {
-  const { updateRule } = useRules()
+  const { updateRule, deleteRule } = useRules()
   const ids = {
     switch: `${rule.id}-enabled`,
     severity: `${rule.id}-severity`,
@@ -162,12 +163,15 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
             {rule.name}
           </label>
         </div>
-        <Switch
-          id={ids.switch}
-          checked={rule.enabled}
-          onCheckedChange={(checked) => updateRule(rule.id, { enabled: checked })}
-          aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.id}`}
-        />
+        <div className="flex shrink-0 items-center gap-1">
+          <DeleteRuleButton rule={rule} onDelete={deleteRule} />
+          <Switch
+            id={ids.switch}
+            checked={rule.enabled}
+            onCheckedChange={(checked) => updateRule(rule.id, { enabled: checked })}
+            aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.id}`}
+          />
+        </div>
       </div>
 
       <DescriptionEditor
@@ -288,7 +292,7 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
 }
 
 export function RuleStudioView() {
-  const { rules, setCustomDialogOpen } = useRules()
+  const { rules, setCustomDialogOpen, resetRules } = useRules()
   const enabled = rules.filter((rule) => rule.enabled).length
 
   return (
@@ -301,10 +305,13 @@ export function RuleStudioView() {
               几何/阈值规则由一级引擎确定性判定，语义规则由大模型按 Prompt 研判。共 {rules.length} 条，{enabled} 条已启用。
             </CardDescription>
           </div>
-          <Button type="button" size="sm" onClick={() => setCustomDialogOpen(true)}>
-            <Plus data-icon="inline-start" />
-            新建自然语言规则
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ResetRulesButton onReset={resetRules} />
+            <Button type="button" size="sm" onClick={() => setCustomDialogOpen(true)}>
+              <Plus data-icon="inline-start" />
+              新建自然语言规则
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="px-4">

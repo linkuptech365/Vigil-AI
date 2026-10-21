@@ -11,13 +11,16 @@ services:
       NODE_ENV: production
       PORT: "3000"
       VIGIL_ALLOWED_ROOTS: /data/videos:/tmp
+      VIGIL_DATA_DIR: /app/data
     env_file:
       - path: .env
         required: false
     volumes:
       - ./videos:/data/videos
       - vigil_storage:/tmp/vigil-test
+      - vigil_data:/app/data
     restart: unless-stopped
 
 volumes:
   vigil_storage:
+  vigil_data:

@@ -1,8 +1,8 @@
-import type { UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
+import type { DeleteRuleResponse, UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
 import { ALL_CHANNELS, COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
-import { listRules, updateRule } from "@/lib/ops/server/rule-engine"
+import { deleteRule, listRules, updateRule } from "@/lib/ops/server/rule-engine"
 import { isRecord, jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
 
 export const runtime = "nodejs"
@@ -88,9 +88,39 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     return jsonError(400, "INVALID_REQUEST", "没有可更新的字段")
   }
 
-  const rule = updateRule(id, patch)
+  let rule
+  try {
+    rule = updateRule(id, patch)
+  } catch (error) {
+    return persistFailure(error)
+  }
   if (!rule) return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
 
   const response: UpdateRuleResponse = { rule, rules: listRules() }
   return jsonOk(response)
+}
+
+export const PUT = PATCH
+
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params
+
+  let result
+  try {
+    result = deleteRule(id)
+  } catch (error) {
+    return persistFailure(error)
+  }
+  if (result === "not_found") return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
+  if (result === "builtin") {
+    return jsonError(409, "BUILTIN_RULE", `${id} 是内置规则，不能删除，只能停用（enabled: false）`)
+  }
+
+  const response: DeleteRuleResponse = { deletedId: id, rules: listRules() }
+  return jsonOk(response)
+}
+
+function persistFailure(error: unknown) {
+  console.error("[rules] 规则写盘失败：", error)
+  return jsonError(500, "PERSIST_FAILED", "规则写入数据目录失败，请检查 VIGIL_DATA_DIR 的写权限")
 }

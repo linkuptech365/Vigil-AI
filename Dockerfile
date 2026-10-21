@@ -51,8 +51,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 # /data/videos: 物理监控录像挂载点；/tmp/vigil-test: GMP 基准算例写入目录
-RUN mkdir -p /data/videos /tmp/vigil-test \
-    && chown -R nextjs:nodejs /data /tmp/vigil-test
+# /app/data: 规则库持久化目录（rules.json），compose 以命名卷挂载；
+# 预先创建并赋权，命名卷首次挂载时会继承该目录的属主
+RUN mkdir -p /data/videos /tmp/vigil-test /app/data \
+    && chown -R nextjs:nodejs /data /tmp/vigil-test /app/data
 
 USER nextjs
 

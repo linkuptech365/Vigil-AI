@@ -139,6 +139,7 @@ docker compose up -d
 | --- | --- | --- |
 | `/data/videos` | 绑定挂载 `./videos` | 物理监控录像，在 `/console` 中填写此路径进行目录扫描 |
 | `/tmp/vigil-test` | 命名卷 `vigil_storage` | GMP 基准算例写入目录，容器重建后保留 |
+| `/app/data` | 命名卷 `vigil_data` | 规则库 `rules.json`，新建、修改、删除规则均写入此处，容器重建后保留 |
 
 镜像采用三阶段构建（deps、builder、runner），运行时使用非 root 用户 `nextjs:nodejs`，并通过 `HEALTHCHECK` 探测 `/api/v1/health`。
 
@@ -150,6 +151,7 @@ docker compose up -d
 | --- | --- | --- |
 | `PORT` | `3000` | 网关监听端口，Docker 镜像内固定为 3000 |
 | `VIGIL_ALLOWED_ROOTS` | `/data/videos:/tmp:/tmp/vigil-test` | 扫描与抽帧允许访问的目录白名单，Linux 以 `:` 分隔；项目目录与系统临时目录始终允许 |
+| `VIGIL_DATA_DIR` | `<cwd>/data` | 规则库持久化目录，规则保存为其中的 `rules.json`；Docker 内为 `/app/data`，以命名卷 `vigil_data` 挂载，容器重建后保留 |
 | `VIGIL_SCAN_DIR` | 空 | 可选。视频流接口按文件名/相对路径寻址时额外查找的根目录，同时自动加入白名单 |
 | `NEXT_PUBLIC_DEFAULT_VLM_MODEL` | `qwen2.5-vl-72b` | 默认二级研判模型标识 |
 | `VLM_API_URL` | `http://localhost:8000/api/v1/analyze` | VLM 推理网关地址 |
@@ -176,7 +178,7 @@ docker compose up -d
 
 | 方法 | 路径 | 说明 | 关键参数 |
 | --- | --- | --- | --- |
-| `POST` | `/scan-folder` | 扫描白名单目录下的视频文件，读取真实元数据 | `folderPath`, `recursive?`, `filterExtensions?` |
+| `POST` | `/scan-folder` | 扫描白名单目录下的视频文件��读取真实元数据 | `folderPath`, `recursive?`, `filterExtensions?` |
 | `POST` | `/extract-frames` | 对指定视频生成 8 帧关键帧与运动评分 | `videoPath`, `fps?` (1 / 2 / 5), `triggerTimestampSec?` |
 | `POST` | `/vlm/analyze` | 多模态研判，SSE 流式返回思考过程与最终结论 | `videoPath?`, `keyframes?`, `apiUrl?`, `apiKey?`, `modelName?`, `ruleScenario?`, `stream?` |
 | `POST` | `/samples/provision` | 将 4 个 GMP 基准算例写入 `/tmp/vigil-test` 并返回文件清单 | 无 |

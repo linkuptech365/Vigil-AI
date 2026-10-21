@@ -23,6 +23,7 @@ import { DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { type RuleStudioTab, useOps } from "./ops-provider"
+import { DeleteRuleButton, ResetRulesButton } from "./rules/rule-danger-actions"
 import { RuleScopePicker } from "./rules/rule-scope-picker"
 import { useServerRules } from "./rules/use-server-rules"
 
@@ -45,7 +46,7 @@ const TYPE_LABEL: Record<InspectionRule["type"], string> = {
 }
 
 function RuleRow({ rule }: { rule: InspectionRule }) {
-  const { updateRule } = useServerRules()
+  const { updateRule, deleteRule } = useServerRules()
   const switchId = `rule-switch-${rule.id}`
   const serverSensitivity = rule.sensitivity
   const [draft, setDraft] = React.useState(serverSensitivity)
@@ -84,12 +85,15 @@ function RuleRow({ rule }: { rule: InspectionRule }) {
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">{rule.prompt ?? rule.logic}</p>
         </div>
-        <Switch
-          id={switchId}
-          checked={rule.enabled}
-          onCheckedChange={(enabled) => void updateRule(rule.id, { enabled })}
-          aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.name}`}
-        />
+        <div className="flex shrink-0 items-center gap-1">
+          <DeleteRuleButton rule={rule} onDelete={deleteRule} />
+          <Switch
+            id={switchId}
+            checked={rule.enabled}
+            onCheckedChange={(enabled) => void updateRule(rule.id, { enabled })}
+            aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.name}`}
+          />
+        </div>
       </div>
 
       {draft !== undefined && (
@@ -230,7 +234,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
 
 export function RuleStudioModal() {
   const { ruleStudio, setRuleStudioOpen, setRuleStudioTab } = useOps()
-  const { rules, rulesError } = useServerRules()
+  const { rules, rulesError, resetRules } = useServerRules()
   const enabledCount = rules.filter((rule) => rule.enabled).length
 
   return (
@@ -259,6 +263,9 @@ export function RuleStudioModal() {
             value="list"
             className="scrollbar-thin -mr-2 min-h-0 flex-1 overflow-y-auto pr-2"
           >
+            <div className="mb-3 flex justify-end">
+              <ResetRulesButton onReset={resetRules} />
+            </div>
             <ul className="flex flex-col gap-3">
               {rules.map((rule) => (
                 <RuleRow key={rule.id} rule={rule} />

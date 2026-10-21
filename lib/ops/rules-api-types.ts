@@ -207,3 +207,7 @@ export interface UpdateRuleRequest {
 export interface UpdateRuleResponse extends RulesListResponse {
   rule: InspectionRule
 }
+
+export interface DeleteRuleResponse extends RulesListResponse {
+  deletedId: string
+}

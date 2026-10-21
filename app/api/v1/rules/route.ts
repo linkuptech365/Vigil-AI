@@ -72,7 +72,13 @@ export async function POST(request: Request) {
     severity: rawSeverity as RuleSeverity | undefined,
   }
 
-  const rule = createCustomRule(input)
+  let rule
+  try {
+    rule = createCustomRule(input)
+  } catch (error) {
+    console.error("[rules] 规则写盘失败：", error)
+    return jsonError(500, "PERSIST_FAILED", "规则写入数据目录失败，请检查 VIGIL_DATA_DIR 的写权限")
+  }
   const response: CreateRuleResponse = { rule, rules: listRules() }
   return jsonOk(response, 201)
 }

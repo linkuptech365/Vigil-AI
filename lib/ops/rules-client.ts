@@ -41,13 +41,13 @@ export async function getJson<T>(url: string): Promise<T> {
   return parse<T>(response)
 }
 
-export async function sendJson<T>(url: string, method: "POST" | "PATCH", body: unknown): Promise<T> {
+export async function sendJson<T>(url: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
   let response: Response
   try {
     response = await fetch(url, {
       method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
     throw new RulesApiError("无法连接到规则引擎服务", "NETWORK_ERROR", 0)

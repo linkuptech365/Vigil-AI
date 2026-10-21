@@ -84,6 +84,8 @@ interface RulesContextValue {
   rulesError: boolean
   updateRule: (id: string, patch: RulePatch) => Promise<void>
   addCustomRule: (input: CustomRuleInput) => Promise<boolean>
+  deleteRule: (id: string) => Promise<boolean>
+  resetRules: () => Promise<boolean>
   metrics: DeduplicationMetrics
   cooldowns: Record<string, ChannelCooldown>
   engineReady: boolean
@@ -112,7 +114,7 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
   const [customDialogOpen, setCustomDialogOpen] = React.useState(false)
   const [now, setNow] = React.useState(() => Date.now())
 
-  const { rules, rulesError, updateRule, addCustomRule } = useServerRules()
+  const { rules, rulesError, updateRule, addCustomRule, deleteRule, resetRules } = useServerRules()
   const {
     data: snapshot,
     error: snapshotError,
@@ -186,6 +188,8 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
       rulesError: Boolean(rulesError),
       updateRule,
       addCustomRule,
+      deleteRule,
+      resetRules,
       metrics,
       cooldowns,
       engineReady: snapshot !== undefined,
@@ -203,6 +207,8 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
       rulesError,
       updateRule,
       addCustomRule,
+      deleteRule,
+      resetRules,
       metrics,
       cooldowns,
       snapshot,
