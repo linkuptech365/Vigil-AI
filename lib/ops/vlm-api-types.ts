@@ -33,7 +33,10 @@ export interface VlmSimulationHint {
 }
 
 export interface VlmAnalyzeRequest {
+  /** 视频路径或文件名，服务端经 video-locator 自动寻址到物理文件 */
   videoPath?: string
+  /** 视频文件名；videoPath 缺失时作为寻址兜底 */
+  name?: string
   keyframes?: VlmKeyframeInput[]
   apiUrl?: string
   apiKey?: string

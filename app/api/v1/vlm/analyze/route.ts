@@ -14,6 +14,7 @@ import type {
 } from "@/lib/ops/vlm-api-types"
 import { defaultKeyframes, extractRealFrames, MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
 import { PathGuardError } from "@/lib/ops/server/path-guard"
+import { locateVideo } from "@/lib/ops/server/video-locator"
 import { runAnalysis, willCallRemote } from "@/lib/ops/server/vlm-engine"
 import type { EngineContext, NormalizedInput } from "@/lib/ops/server/vlm-shared"
 
@@ -110,6 +111,15 @@ function parseSourceType(value: unknown): VlmSourceType | undefined {
   return value === "local" || value === "channel" ? value : undefined
 }
 
+/** 前端视频对象的路径字段并不统一，按优先级宽容取值；最后兜底用文件名交给寻址器补全。 */
+function pickVideoPath(record: Record<string, unknown>) {
+  for (const key of ["videoPath", "path", "filePath", "name"] as const) {
+    const value = cleanText(record[key], 1024)
+    if (value) return value
+  }
+  return undefined
+}
+
 function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: string } {
   const record = asRecord(body)
   if (!record) return { error: "请求体必须是 JSON 对象" }
@@ -117,7 +127,7 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
   const keyframes = parseKeyframes(record.keyframes)
   if (typeof keyframes === "string") return { error: keyframes }
 
-  const videoPath = cleanText(record.videoPath, 1024)
+  const videoPath = pickVideoPath(record)
   if (!videoPath && keyframes.length === 0) return { error: "需要提供 keyframes 或 videoPath 之一" }
 
   const rules = parseRules(record.rules)
@@ -225,7 +235,7 @@ export async function POST(request: Request) {
     const prepared = await attachRealFrames(input, abort.signal)
     if ("error" in prepared) {
       console.error(`[VLM_ERROR] ${prepared.error}`)
-      return fail(prepared.error, 400, "NO_VALID_IMAGE_FRAMES")
+      return fail(prepared.error, 400, prepared.code ?? "NO_VALID_IMAGE_FRAMES")
     }
     input = prepared.input
   }
@@ -251,7 +261,7 @@ function countValidFrames(frames: VlmKeyframeInput[]) {
 async function attachRealFrames(
   input: NormalizedInput,
   signal: AbortSignal
-): Promise<{ input: NormalizedInput } | { error: string }> {
+): Promise<{ input: NormalizedInput } | { error: string; code?: string }> {
   if (countValidFrames(input.keyframes) > 0) return { input }
 
   const NO_FRAMES = "视频抽帧失败：未能提取到任何有效图像帧，已终止调用，不会向模型发送纯文本请求。"
@@ -260,9 +270,24 @@ async function attachRealFrames(
     return input.sourceType === "local" ? { error: `${NO_FRAMES}（缺少 videoPath）` } : { input }
   }
 
+  let resolvedPath: string
   try {
-    const base = input.keyframes.length > 0 ? input.keyframes : await defaultKeyframes(input.videoPath)
-    const { frames, errors } = await extractRealFrames(input.videoPath, base, signal)
+    resolvedPath = (await locateVideo(input.videoPath)).resolved
+    console.log(`[VLM_LOCATE] raw=${input.videoPath} resolved=${resolvedPath}`)
+  } catch (error) {
+    if (!(error instanceof PathGuardError)) throw error
+    // 实时通道的 videoPath 只是 "通道/片段" 标识，不是文件，沿用仅元数据推理
+    if (input.sourceType !== "local") return { input }
+    console.error(`[VLM_ERROR] 无法定位视频物理路径: rawPath=${input.videoPath}, reason=${error.message}`)
+    return {
+      error: `未能定位到视频文件：${input.videoPath}，请检查是否存放在 vidso/ 或 public/ 目录（${error.message}）`,
+      code: "VIDEO_NOT_FOUND",
+    }
+  }
+
+  try {
+    const base = input.keyframes.length > 0 ? input.keyframes : await defaultKeyframes(resolvedPath)
+    const { frames, errors } = await extractRealFrames(resolvedPath, base, signal)
     const valid = frames.filter((frame) => frame.base64.length > MIN_VALID_BASE64_CHARS)
 
     if (valid.length === 0) {

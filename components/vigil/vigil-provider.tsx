@@ -669,6 +669,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
         const hintedRule = video.truth.ruleId && promptRules.some((r) => r.id === video.truth.ruleId)
         const { result, metrics, verdict, reasoning } = await analyzeVlmOnce({
+          videoPath: video.path || video.name,
+          name: video.name,
           keyframes: vlmFrames,
           apiUrl: s.apiUrl.trim() || undefined,
           apiKey: apiKeyRef.current || undefined,
