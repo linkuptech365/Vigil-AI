@@ -47,7 +47,8 @@ import type {
   VideoItem,
 } from "@/lib/vigil/types"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
-import { registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
+import { getVideoSrc, registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
+import { captureVideoFramesFromSrc, toKeyframeInputs } from "@/lib/client/frame-capture"
 
 export type TabId = "config" | "queue" | "alerts"
 
@@ -606,7 +607,25 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
       let keyframeWindow: VideoItem["keyframeWindow"]
 
       try {
-        if (video.source === "disk") {
+        let clientFrames: VlmKeyframeInput[] = []
+        const playableSrc = getVideoSrc(video)
+        if (playableSrc) {
+          try {
+            clientFrames = toKeyframeInputs(await captureVideoFramesFromSrc(playableSrc))
+            pushLog(
+              "sample",
+              `[PREPROCESS] 浏览器 Canvas 抽帧完成：${clientFrames.length} 帧 (640px JPEG)，将优先直传 VLM，无需服务端访问磁盘。`
+            )
+          } catch (error) {
+            clientFrames = []
+            pushLog(
+              "warn",
+              `[PREPROCESS] 浏览器抽帧失败：${error instanceof Error ? error.message : "未知错误"}，回退到服务端抽帧。`
+            )
+          }
+        }
+
+        if (clientFrames.length === 0 && video.source === "disk") {
           try {
             const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
               "/api/v1/extract-frames",
@@ -621,7 +640,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             )
           }
         }
-        const vlmFrames = toVlmFrames({ ...video, keyframes })
+        const vlmFrames = clientFrames.length > 0 ? clientFrames : toVlmFrames({ ...video, keyframes })
         pushLog(
           "sample",
           `[PREPROCESS] 抽取采样帧: ${vlmFrames.length} 帧 (640x360, ${s.samplingFps} FPS, 时长: ${formatDuration(video.durationSec)})`

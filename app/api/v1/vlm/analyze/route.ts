@@ -65,6 +65,30 @@ function parseKeyframes(value: unknown): VlmKeyframeInput[] | string {
   return Array.from({ length: MAX_FRAMES }, (_, i) => frames[Math.round((i * (frames.length - 1)) / (MAX_FRAMES - 1))])
 }
 
+const CLIENT_FRAME_DATA_URL = /^data:image\/(?:jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/
+const RAW_BASE64 = /^[A-Za-z0-9+/=]+$/
+
+/** 兼容浏览器 Canvas 抽帧的 frames: [{ timestamp, base64 }] 形态，转成 keyframes。 */
+function parseClientFrames(value: unknown): VlmKeyframeInput[] {
+  if (!Array.isArray(value)) return []
+  const frames: VlmKeyframeInput[] = []
+  for (const item of value.slice(0, MAX_FRAMES)) {
+    const record = asRecord(item)
+    const base64 = typeof record?.base64 === "string" ? record.base64.trim() : ""
+    if (!record || !base64) continue
+    const imageUrl = base64.startsWith("data:") ? base64 : RAW_BASE64.test(base64) ? `data:image/jpeg;base64,${base64}` : ""
+    if (!CLIENT_FRAME_DATA_URL.test(imageUrl)) continue
+    const timestampSec = Number.parseFloat(String(record.timestamp ?? "")) || 0
+    frames.push({ index: frames.length, timestampSec, timecode: formatClock(timestampSec), imageUrl })
+  }
+  return frames
+}
+
+function formatClock(totalSec: number) {
+  const minutes = Math.floor(totalSec / 60)
+  return `${String(minutes).padStart(2, "0")}:${(totalSec - minutes * 60).toFixed(1).padStart(4, "0")}`
+}
+
 function parseSimulation(value: unknown): VlmSimulationHint | undefined {
   const record = asRecord(value)
   if (!record) return undefined
@@ -124,8 +148,10 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
   const record = asRecord(body)
   if (!record) return { error: "请求体必须是 JSON 对象" }
 
-  const keyframes = parseKeyframes(record.keyframes)
-  if (typeof keyframes === "string") return { error: keyframes }
+  const parsedKeyframes = parseKeyframes(record.keyframes)
+  if (typeof parsedKeyframes === "string") return { error: parsedKeyframes }
+  const clientFrames = parseClientFrames(record.frames)
+  const keyframes = countValidFrames(parsedKeyframes) === 0 && clientFrames.length > 0 ? clientFrames : parsedKeyframes
 
   const videoPath = pickVideoPath(record)
   if (!videoPath && keyframes.length === 0) return { error: "需要提供 keyframes 或 videoPath 之一" }
@@ -262,7 +288,11 @@ async function attachRealFrames(
   input: NormalizedInput,
   signal: AbortSignal
 ): Promise<{ input: NormalizedInput } | { error: string; code?: string }> {
-  if (countValidFrames(input.keyframes) > 0) return { input }
+  const clientFrameCount = countValidFrames(input.keyframes)
+  if (clientFrameCount > 0) {
+    console.log(`[VLM_ANALYZE] 优先使用客户端直传的 ${clientFrameCount} 帧图像，跳过服务端磁盘寻址`)
+    return { input }
+  }
 
   const NO_FRAMES = "视频抽帧失败：未能提取到任何有效图像帧，已终止调用，不会向模型发送纯文本请求。"
   if (!input.videoPath) {
