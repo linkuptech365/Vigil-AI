@@ -146,5 +146,19 @@ export function useServerRules() {
     }
   }, [mutate])
 
-  return { rules, rulesError: Boolean(error), updateRule, addCustomRule, deleteRule, resetRules }
+  const loadGmpPreset = React.useCallback(async () => {
+    try {
+      const response = await sendJson<RulesListResponse>(`${RULES_ENDPOINT}/preset/gmp`, "POST")
+      await mutate({ rules: response.rules }, { revalidate: false })
+      toast.success("已载入 GMP 洁净室标准预设", {
+        description: "防护穿戴、行为姿态、无菌操作 3 条规则已启用并保存。",
+      })
+      return true
+    } catch (caught) {
+      toast.error("载入 GMP 预设失败", { description: errorMessage(caught) })
+      return false
+    }
+  }, [mutate])
+
+  return { rules, rulesError: Boolean(error), updateRule, addCustomRule, deleteRule, resetRules, loadGmpPreset }
 }

@@ -1,6 +1,6 @@
 "use client"
 
-import { RotateCcw, Trash2 } from "lucide-react"
+import { RotateCcw, ShieldCheck, Trash2 } from "lucide-react"
 
 import {
   AlertDialog,
@@ -50,6 +50,31 @@ export function DeleteRuleButton({
           <AlertDialogAction variant="destructive" onClick={() => void onDelete(rule.id)}>
             确认删除
           </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+export function LoadGmpPresetButton({ onLoad }: { onLoad: () => Promise<boolean> }) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button type="button" size="sm" variant="secondary">
+          <ShieldCheck data-icon="inline-start" />
+          加载 GMP 洁净室标准预设
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>加载 GMP 洁净室标准预设？</AlertDialogTitle>
+          <AlertDialogDescription>
+            将写入并启用 3 条语义规则：防护穿戴合规（严重）、行为规范与靠墙检测（警告）、试剂容器摆放与无菌操作（警告），默认绑定全部视频源。若这 3 条规则已存在，会恢复为预设内容；其他规则不受影响。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>取消</AlertDialogCancel>
+          <AlertDialogAction onClick={() => void onLoad()}>确认加载</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

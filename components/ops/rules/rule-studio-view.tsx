@@ -34,7 +34,7 @@ import type {
 } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { CustomRuleDialog } from "./custom-rule-dialog"
-import { DeleteRuleButton, ResetRulesButton } from "./rule-danger-actions"
+import { DeleteRuleButton, LoadGmpPresetButton, ResetRulesButton } from "./rule-danger-actions"
 import { useRules } from "./rules-provider"
 
 const TYPE_META: Record<InspectionRuleType, { label: string; className: string }> = {
@@ -292,7 +292,7 @@ function RuleCard({ rule }: { rule: InspectionRule }) {
 }
 
 export function RuleStudioView() {
-  const { rules, setCustomDialogOpen, resetRules } = useRules()
+  const { rules, setCustomDialogOpen, resetRules, loadGmpPreset } = useRules()
   const enabled = rules.filter((rule) => rule.enabled).length
 
   return (
@@ -306,6 +306,7 @@ export function RuleStudioView() {
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <LoadGmpPresetButton onLoad={loadGmpPreset} />
             <ResetRulesButton onReset={resetRules} />
             <Button type="button" size="sm" onClick={() => setCustomDialogOpen(true)}>
               <Plus data-icon="inline-start" />

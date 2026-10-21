@@ -23,7 +23,7 @@ import { DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
 import { type RuleStudioTab, useOps } from "./ops-provider"
-import { DeleteRuleButton, ResetRulesButton } from "./rules/rule-danger-actions"
+import { DeleteRuleButton, LoadGmpPresetButton, ResetRulesButton } from "./rules/rule-danger-actions"
 import { RuleScopePicker } from "./rules/rule-scope-picker"
 import { useServerRules } from "./rules/use-server-rules"
 
@@ -234,7 +234,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
 
 export function RuleStudioModal() {
   const { ruleStudio, setRuleStudioOpen, setRuleStudioTab } = useOps()
-  const { rules, rulesError, resetRules } = useServerRules()
+  const { rules, rulesError, resetRules, loadGmpPreset } = useServerRules()
   const enabledCount = rules.filter((rule) => rule.enabled).length
 
   return (
@@ -263,7 +263,8 @@ export function RuleStudioModal() {
             value="list"
             className="scrollbar-thin -mr-2 min-h-0 flex-1 overflow-y-auto pr-2"
           >
-            <div className="mb-3 flex justify-end">
+            <div className="mb-3 flex flex-wrap justify-end gap-2">
+              <LoadGmpPresetButton onLoad={loadGmpPreset} />
               <ResetRulesButton onReset={resetRules} />
             </div>
             <ul className="flex flex-col gap-3">

@@ -1,3 +1,4 @@
+import { GMP_CLEANROOM_RULES } from "./gmp-cleanroom-rules"
 import { GMP_RULE_SEEDS } from "./gmp-suite"
 import type {
   DeduplicationMetrics,
@@ -88,7 +89,11 @@ const BASE_INSPECTION_RULES: InspectionRule[] = [
   },
 ]
 
-export const INITIAL_INSPECTION_RULES: InspectionRule[] = [...BASE_INSPECTION_RULES, ...GMP_RULE_SEEDS]
+export const INITIAL_INSPECTION_RULES: InspectionRule[] = [
+  ...BASE_INSPECTION_RULES,
+  ...GMP_RULE_SEEDS,
+  ...GMP_CLEANROOM_RULES,
+]
 
 export const INITIAL_DEDUP_METRICS: DeduplicationMetrics = {
   rawTriggersCount: 184,

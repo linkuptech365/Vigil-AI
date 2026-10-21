@@ -38,6 +38,7 @@ import {
   pointInPolygon,
   type Vec2,
 } from "./rule-geometry"
+import { GMP_CLEANROOM_RULES } from "@/lib/ops/gmp-cleanroom-rules"
 import { loadRules, seedRules, writeRules } from "@/lib/storage/rules-store"
 import { extractTags, matchScenario, tagLabel } from "./rule-semantic"
 
@@ -277,10 +278,21 @@ export function deleteRule(ruleId: string): DeleteRuleResult {
   return "deleted"
 }
 
-/** 恢复出厂：规则库重置为内置规则，自定义规则与所有改动一并清除。 */
+/** 恢复出厂：规则��重置为内置规则，自定义规则与所有改动一并清除。 */
 export function resetRules(): InspectionRule[] {
   const state = engine()
   commitRules(state, seedRules())
+  return listRules()
+}
+
+/** 载入 GMP 洁净室标准预设：已存在的同 ID 规则恢复为预设值并启用，缺失的补入；其他规则不动。 */
+export function applyGmpPreset(): InspectionRule[] {
+  const state = engine()
+  const presets = new Map(GMP_CLEANROOM_RULES.map((rule) => [rule.id, cloneRule(rule)]))
+  const replaced = state.rules.map((rule) => presets.get(rule.id) ?? rule)
+  const present = new Set(replaced.map((rule) => rule.id))
+  const missing = [...presets.values()].filter((rule) => !present.has(rule.id))
+  commitRules(state, [...replaced, ...missing])
   return listRules()
 }
 
