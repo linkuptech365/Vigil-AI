@@ -12,24 +12,53 @@ export const dynamic = "force-dynamic"
 
 const SUITE_DIR_NAME = "vigil-test"
 
+/** 按优先级查找随项目发布的有效 H.264 MP4，算例直接复制它们，保证浏览器可以解码播放。 */
+const SOURCE_DIRS = ["public/videos", "public/ops/video"]
+
+async function listSourceClips(): Promise<string[]> {
+  for (const relative of SOURCE_DIRS) {
+    const dir = path.join(process.cwd(), relative)
+    try {
+      const names = (await fs.readdir(dir))
+        .filter((name) => name.toLowerCase().endsWith(".mp4"))
+        .sort()
+      if (names.length > 0) return names.map((name) => path.join(dir, name))
+    } catch {
+      // 目录不存在时继续尝试下一个
+    }
+  }
+  return []
+}
+
 export async function POST() {
   const directory = path.join(os.tmpdir(), SUITE_DIR_NAME)
 
   try {
     await fs.mkdir(directory, { recursive: true })
+    const clips = await listSourceClips()
 
     const cases: GmpProvisionedCase[] = []
-    for (const gmpCase of GMP_CASES) {
+    let playableCount = 0
+    for (const [index, gmpCase] of GMP_CASES.entries()) {
       const filePath = path.join(directory, gmpCase.fileName)
-      const content = buildMp4({
-        durationSec: gmpCase.durationSec,
-        width: gmpCase.width,
-        height: gmpCase.height,
-        sizeBytes: gmpCase.sizeKB * 1024,
-        seed: gmpCase.fileName,
-      })
-      await fs.writeFile(filePath, content)
-      cases.push({ ...gmpCase, path: filePath, sizeBytes: content.length })
+      if (clips.length > 0) {
+        // copyFile 逐字节复制，不经过任何文本处理，不会损坏二进制内容
+        await fs.copyFile(clips[index % clips.length], filePath)
+        playableCount += 1
+      } else {
+        await fs.writeFile(
+          filePath,
+          buildMp4({
+            durationSec: gmpCase.durationSec,
+            width: gmpCase.width,
+            height: gmpCase.height,
+            sizeBytes: gmpCase.sizeKB * 1024,
+            seed: gmpCase.fileName,
+          })
+        )
+      }
+      const stat = await fs.stat(filePath)
+      cases.push({ ...gmpCase, path: filePath, sizeBytes: stat.size })
     }
 
     const response: GmpProvisionResponse = {
@@ -39,7 +68,11 @@ export async function POST() {
       cases,
       rules: listRules().filter((rule) => rule.id.startsWith("RULE-BIO-")),
       generatedAt: new Date().toISOString(),
-      note: "样本文件携带真实的 mp4 容器头部（时长、分辨率），可被扫描接口解析；媒体数据为占位填充，不含可播放画面。",
+      playable: playableCount === GMP_CASES.length,
+      note:
+        playableCount === GMP_CASES.length
+          ? `4 个算例已从项目内置的有效 H.264 MP4 复制生成，可在浏览器中直接播放；时长与分辨率以文件真实元数据为准。`
+          : "未找到可复制的内置 MP4，已回退为仅含容器头部的占位文件：可被扫描，但无法解码播放。",
     }
     return jsonOk(response)
   } catch (error) {

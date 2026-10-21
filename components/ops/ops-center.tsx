@@ -12,7 +12,8 @@ import { DispatchTab } from "./dispatch/dispatch-tab"
 import { IncidentFeed } from "./incident-feed"
 import { IngestionPipeline } from "./ingestion/ingestion-pipeline"
 import { IngestionProvider } from "./ingestion/ingestion-provider"
-import { MonitorGrid } from "./monitor-grid"
+import { MonitorSection } from "./monitor-section"
+import { VideoDetailDialog } from "@/components/vigil/video-detail-dialog"
 import { OpsHeader } from "./ops-header"
 import { OpsProvider, useOps } from "./ops-provider"
 import { PerceptionProvider } from "./perception/perception-provider"
@@ -79,7 +80,7 @@ function OpsShell() {
             className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,65fr)_minmax(0,35fr)]"
           >
             <div className="scrollbar-thin flex min-h-0 flex-col gap-6 lg:overflow-y-auto lg:pr-2">
-              <MonitorGrid />
+              <MonitorSection />
               <VideoSearchBar />
             </div>
             <IncidentFeed className="lg:h-full" />
@@ -104,6 +105,7 @@ function OpsShell() {
       <AlertDrawer />
       <RuleStudioModal />
       <AuditTrailView />
+      <VideoDetailDialog />
     </TooltipProvider>
   )
 }

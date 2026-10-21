@@ -19,8 +19,22 @@ export interface LocateRequest {
 
 export type GridLayout = "grid" | "focus" | "single"
 export type RuleStudioTab = "list" | "custom"
+export type MonitorMode = "live" | "library"
+export type LibraryGrid = 2 | 3
+
+export interface VideoTarget {
+  videoId: string
+  timestampSec?: number
+  nonce: number
+}
 
 interface OpsContextValue {
+  mode: MonitorMode
+  setMode: (mode: MonitorMode) => void
+  libraryGrid: LibraryGrid
+  setLibraryGrid: (grid: LibraryGrid) => void
+  videoTarget: VideoTarget | null
+  locateVideo: (videoId: string, timestampSec?: number) => void
   layout: GridLayout
   setLayout: (layout: GridLayout) => void
   focusId: string
@@ -74,6 +88,15 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [showOverlays, setShowOverlays] = React.useState(true)
   const [liveFeeds, setLiveFeeds] = React.useState<Record<string, LiveFeed>>({})
   const seekNonce = React.useRef(0)
+  const [mode, setMode] = React.useState<MonitorMode>("live")
+  const [libraryGrid, setLibraryGrid] = React.useState<LibraryGrid>(2)
+  const [videoTarget, setVideoTarget] = React.useState<VideoTarget | null>(null)
+
+  const locateVideo = React.useCallback((videoId: string, timestampSec?: number) => {
+    seekNonce.current += 1
+    setVideoTarget({ videoId, timestampSec, nonce: seekNonce.current })
+    setMode("library")
+  }, [])
 
   const pushLiveFeed = React.useCallback((feed: Omit<LiveFeed, "pushedAt">) => {
     setLiveFeeds((prev) => ({ ...prev, [feed.channelId]: { ...feed, pushedAt: Date.now() } }))
@@ -231,6 +254,12 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
 
   const value = React.useMemo<OpsContextValue>(
     () => ({
+      mode,
+      setMode,
+      libraryGrid,
+      setLibraryGrid,
+      videoTarget,
+      locateVideo,
       layout,
       setLayout,
       focusId,
@@ -260,6 +289,10 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       stopReplay: () => setReplay(null),
     }),
     [
+      mode,
+      libraryGrid,
+      videoTarget,
+      locateVideo,
       layout,
       setLayout,
       focusId,

@@ -31,7 +31,8 @@ export interface GmpProvisionResponse {
   cases: GmpProvisionedCase[]
   rules: InspectionRule[]
   generatedAt: string
-  /** 样本只携带容器头部元数据（时长/分辨率），不含可播放的视频画面 */
+  /** true 表示算例是有效的 H.264 MP4，可在浏览器中解码播放；false 表示仅含容器头部的占位文件 */
+  playable: boolean
   note: string
 }
 

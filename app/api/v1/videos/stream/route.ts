@@ -41,8 +41,11 @@ function parseRange(header: string, size: number): ByteRange {
 }
 
 /**
- * 以 Range 方式流式输出磁盘上的视频，供 <video> 拖动进度条与监控大屏投屏使用。
- * 路径必须通过 path-guard 校验（项目目录 / 系统临时目录 / VIGIL_ALLOWED_ROOTS）。
+ * GET /api/v1/videos/stream?path=<绝对路径>
+ *
+ * 以 HTTP Range（206 Partial Content）流式输出磁盘视频，让 <video> 可以拖动进度条、分段缓冲。
+ * 路径统一经 path-guard 校验：只允许项目根目录、系统临时目录（含 /tmp/vigil-test）以及
+ * VIGIL_ALLOWED_ROOTS 追加的目录（如 /data/videos），并在 realpath 之后再校验一次以防符号链接逃逸。
  */
 export async function GET(request: NextRequest) {
   let safe: Awaited<ReturnType<typeof resolveSafePath>>

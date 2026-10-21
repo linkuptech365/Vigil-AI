@@ -6,6 +6,7 @@ import { GlobalErrorBarrier } from "@/components/ops/global-error-barrier"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
+import { VigilProvider } from "@/components/vigil/vigil-provider"
 import { cn } from "@/lib/utils"
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" })
@@ -45,7 +46,9 @@ export default function RootLayout({
       <body>
         <GlobalErrorBarrier />
         <ThemeProvider forcedTheme="dark" defaultTheme="dark">
-          <TooltipProvider>{children}</TooltipProvider>
+          <TooltipProvider>
+            <VigilProvider>{children}</VigilProvider>
+          </TooltipProvider>
           <Toaster position="bottom-right" />
         </ThemeProvider>
       </body>

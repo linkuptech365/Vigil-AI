@@ -10,7 +10,7 @@ import { ConfigTab } from "./config/config-tab"
 import { FrameTestDialog } from "./frame-test-dialog"
 import { QueueTab } from "./queue/queue-tab"
 import { VideoDetailDialog } from "./video-detail-dialog"
-import { type TabId, VigilProvider, useVigil } from "./vigil-provider"
+import { type TabId, useVigil } from "./vigil-provider"
 
 function Shell() {
   const { activeTab, setActiveTab, queue } = useVigil()
@@ -63,9 +63,5 @@ function Shell() {
 }
 
 export function VigilApp() {
-  return (
-    <VigilProvider>
-      <Shell />
-    </VigilProvider>
-  )
+  return <Shell />
 }
