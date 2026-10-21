@@ -3,6 +3,7 @@
 import * as React from "react"
 import { toast } from "sonner"
 
+import { useModelProfiles } from "@/components/vigil/config/use-model-profiles"
 import { useVigil } from "@/components/vigil/vigil-provider"
 import {
   buildLocalSlices,
@@ -20,18 +21,27 @@ import type {
 import type { ChunkFrame } from "@/lib/vigil/types"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { getVideoSrc } from "@/lib/vigil/video-source"
-import { readVlmEndpoint, streamVlmAnalyze } from "@/lib/ops/vlm-client"
+import { streamVlmAnalyze } from "@/lib/ops/vlm-client"
 import {
   FRAME_COUNT,
   SCENARIOS,
-  VLM_MODELS,
   eventIdOf,
   frameMark,
   frameSeconds,
   frameTag,
 } from "@/lib/ops/vlm-data"
 import type { VlmModelConfig, VlmPhase, VlmReasoningResult, VlmScenario } from "@/lib/ops/vlm-types"
+import { MODEL_PROVIDERS, profileReadiness } from "@/lib/vigil/model-registry"
 import { usePerception } from "../perception/perception-provider"
+
+const NO_MODEL: VlmModelConfig = {
+  id: "",
+  name: "未配置可用模型",
+  provider: "请到「配置」页添加并启用模型",
+  latencyMs: 0,
+  contextWindow: "-",
+  costPer1kTokens: 0,
+}
 
 const PROMPT_TOKENS_ESTIMATE = 380 + FRAME_COUNT * 255
 
@@ -177,7 +187,8 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
   const [localFramesLoading, setLocalFramesLoading] = React.useState(false)
   const [localFramesError, setLocalFramesError] = React.useState<string | null>(null)
   const attemptedRecapture = React.useRef(new Set<string>())
-  const [modelId, setModelIdState] = React.useState(VLM_MODELS[0].id)
+  const { profiles, defaultProfile } = useModelProfiles()
+  const [modelId, setModelIdState] = React.useState<string | null>(null)
   const [clipId, setClipIdState] = React.useState<string | null>(null)
   const [phase, setPhase] = React.useState<VlmPhase>("idle")
   const [thinkingMessage, setThinkingMessage] = React.useState("")
@@ -188,7 +199,25 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
   const [result, setResult] = React.useState<VlmReasoningResult | null>(null)
   const abortRef = React.useRef<AbortController | null>(null)
 
-  const model = VLM_MODELS.find((m) => m.id === modelId) ?? VLM_MODELS[0]
+  const models = React.useMemo<VlmModelConfig[]>(
+    () =>
+      profiles
+        .filter((profile) => profile.enabled)
+        .map((profile) => ({
+          id: profile.id,
+          name: profile.isDefault ? `${profile.name}（全局默认）` : profile.name,
+          provider: `${MODEL_PROVIDERS.find((p) => p.id === profile.provider)?.label ?? profile.provider} · ${profile.modelName}`,
+          latencyMs: 0,
+          contextWindow: "-",
+          costPer1kTokens: 0,
+        })),
+    [profiles]
+  )
+  const model =
+    models.find((m) => m.id === modelId) ??
+    models.find((m) => m.id === defaultProfile?.id) ??
+    models[0] ??
+    NO_MODEL
   const candidates = React.useMemo(() => clips.filter((clip) => clip.status !== "blocked"), [clips])
   const localSlices = React.useMemo(() => buildLocalSlices(queue), [queue])
   const activeLocal = React.useMemo(
@@ -279,6 +308,15 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
   )
 
   const run = React.useCallback(() => {
+    const profile = profiles.find((item) => item.id === model.id)
+    const readiness = profile ? profileReadiness(profile) : { ready: false, reason: "尚未配置可用模型" }
+    if (!profile || !readiness.ready) {
+      toast.error("所选模型不可用", {
+        description: `${profile?.name ?? "未选择模型"}：${readiness.reason ?? "请先在「配置」页完成模型配置。"}`,
+      })
+      return
+    }
+
     const local = activeLocal
     const localKeyframes: VlmKeyframeInput[] = local
       ? local.chunk.frames
@@ -380,16 +418,12 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    const { apiUrl, apiKey } = readVlmEndpoint()
-
     const request: VlmAnalyzeRequest = local
       ? {
           videoPath: toRequestVideoPath(local.video),
           name: local.video.name,
           keyframes: localKeyframes,
-          apiUrl,
-          apiKey,
-          modelName: model.id,
+          modelProfileId: profile.id,
           sourceType: "local",
           sourceKey: `LOCAL:${local.video.id}`,
           rules: localRules,
@@ -398,9 +432,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       : {
           videoPath: `${activeClip!.cameraId}/${activeClip!.id}`,
           keyframes: buildKeyframes(),
-          apiUrl,
-          apiKey,
-          modelName: model.id,
+          modelProfileId: profile.id,
           sourceType: "channel",
           sourceKey: activeClip!.cameraId,
           rules: [
@@ -428,7 +460,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           description: error instanceof Error ? error.message : "未知错误",
         })
       })
-  }, [activeClip, activeLocal, scenario, model, getLocalPromptRules, updateChunk, localFramesError])
+  }, [activeClip, activeLocal, scenario, model, profiles, getLocalPromptRules, updateChunk, localFramesError])
 
   const showStored = phase === "idle" && !result && !!stored
   const shownResult = result ?? (showStored ? stored.result : null)
@@ -440,7 +472,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
 
   const value = React.useMemo<VlmContextValue>(
     () => ({
-      models: VLM_MODELS,
+      models,
       model,
       setModelId,
       candidates,

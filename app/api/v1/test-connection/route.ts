@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server"
 
 import type {
-  ConnectionTestRequest,
   ConnectionTestResponse,
   HealthResponse,
 } from "@/lib/ops/api-types"
+
+import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -24,9 +25,30 @@ function fail(message: string, endpoint: string, rttMs = 0) {
   return respond({ status: "error", rttMs, modelDetected: "", endpoint, message }, 400)
 }
 
-function parseRequest(body: unknown): ConnectionTestRequest | null {
+interface ResolvedTestInput {
+  apiUrl: string
+  apiKey?: string
+  modelName?: string
+}
+
+function parseRequest(body: unknown): ResolvedTestInput | { error: string } | null {
   if (!body || typeof body !== "object") return null
-  const { apiUrl, apiKey, modelName } = body as Record<string, unknown>
+  const { apiUrl: rawApiUrl, apiKey: rawApiKey, modelName: rawModelName, modelProfileId } = body as Record<string, unknown>
+
+  if (typeof modelProfileId === "string" && modelProfileId.trim()) {
+    const profile = getProfile(modelProfileId.trim())
+    if (!profile) return { error: `模型档案 ${modelProfileId} 不存在` }
+    if (!profile.baseUrl.trim()) return { error: `模型「${profile.name}」尚未填写 Base URL` }
+    return {
+      apiUrl: resolveEndpointUrl(profile),
+      apiKey: profile.apiKey || undefined,
+      modelName: profile.modelName || undefined,
+    }
+  }
+
+  const apiUrl = rawApiUrl
+  const apiKey = rawApiKey
+  const modelName = rawModelName
   if (typeof apiUrl !== "string") return null
   return {
     apiUrl: apiUrl.trim(),
@@ -148,7 +170,8 @@ export async function POST(request: Request) {
   }
 
   const input = parseRequest(payload)
-  if (!input) return fail("缺少必填字段 apiUrl（字符串）", "")
+  if (!input) return fail("缺少必填字段 apiUrl（字符串）或 modelProfileId", "")
+  if ("error" in input) return fail(input.error, "")
 
   if (input.apiUrl === "") {
     return pingGatewayItself("/api/v1/health")

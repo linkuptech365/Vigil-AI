@@ -4,7 +4,6 @@ import * as React from "react"
 import { toast } from "sonner"
 
 import {
-  API_PRESETS,
   DEFAULT_SETTINGS,
   VIDEO_FORMATS,
   createInitialQueue,
@@ -13,19 +12,16 @@ import {
   hashString,
   truthForLocalFile,
 } from "@/lib/vigil/data"
-import type {
-  ConnectionTestRequest,
-  ConnectionTestResponse,
-} from "@/lib/ops/api-types"
 import { GMP_AUTOSCAN_KEY, provisionGmpSuite } from "@/lib/ops/gmp-client"
 import { postVideoApi } from "@/lib/ops/video-client"
-import {
-  analyzeVlmOnce,
-  formatTimecode,
-  readStoredApiKey,
-  storeApiKey,
-} from "@/lib/ops/vlm-client"
+import { analyzeVlmOnce, formatTimecode, storeApiKey } from "@/lib/ops/vlm-client"
 import { useServerRules } from "@/components/ops/rules/use-server-rules"
+import {
+  testModelProfile,
+  useModelProfiles,
+  type ProfileTestResult,
+} from "@/components/vigil/config/use-model-profiles"
+import { profileReadiness, type PublicModelProfile } from "@/lib/vigil/model-registry"
 import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
 import type { VlmKeyframeInput, VlmPromptRule } from "@/lib/ops/vlm-api-types"
 import type {
@@ -69,7 +65,6 @@ import {
 export type TabId = "config" | "queue" | "alerts"
 
 const STORAGE_KEY = "vigil-ai:settings"
-const MODEL_STORAGE_KEY = "vigil_api_model"
 const QUEUE_STORAGE_KEY = "vigil_queue_state"
 const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
 const MAX_LOGS = 200
@@ -195,13 +190,11 @@ function writeStoredLogs(logs: LogLine[]) {
 interface VigilContextValue {
   settings: Settings
   updateSettings: (patch: Partial<Settings>) => void
-  applyPreset: (presetId: string) => void
-  apiKey: string
-  setApiKey: (value: string) => void
+  /** 全局默认模型档案；null 表示尚未加载或没有启用的模型 */
+  defaultProfile: PublicModelProfile | null
+  /** 由服务端用档案内的 URL / Key / 模型名发起握手；测试默认模型时同步更新顶部状态灯 */
+  testProfile: (id: string) => Promise<ProfileTestResult>
   ping: PingState
-  runPing: () => Promise<void>
-  modelName: string
-  setModelName: (value: string) => void
   scanning: boolean
   lastScan: string | null
   scanInfo: ScanInfo | null
@@ -335,8 +328,6 @@ function readVideoDuration(file: File): Promise<number> {
 export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS)
   const [hydrated, setHydrated] = React.useState(false)
-  const [apiKey, setApiKeyState] = React.useState("")
-  const [modelName, setModelNameState] = React.useState(API_PRESETS[0].model)
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
   const [loadingGmp, setLoadingGmp] = React.useState(false)
@@ -350,10 +341,11 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [activeTab, setActiveTab] = React.useState<TabId>("config")
 
   const { rules } = useServerRules()
+  const { profiles, defaultProfile } = useModelProfiles()
   const rulesRef = React.useRef(rules)
   const settingsRef = React.useRef(settings)
-  const apiKeyRef = React.useRef(apiKey)
-  const modelNameRef = React.useRef(modelName)
+  const profilesRef = React.useRef(profiles)
+  const defaultProfileRef = React.useRef(defaultProfile)
   const queueRef = React.useRef(queue)
   const frameTestToken = React.useRef(0)
   const busyRef = React.useRef(new Set<string>())
@@ -369,12 +361,16 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   }, [settings])
 
   React.useEffect(() => {
-    apiKeyRef.current = apiKey
-  }, [apiKey])
+    profilesRef.current = profiles
+    defaultProfileRef.current = defaultProfile
+  }, [profiles, defaultProfile])
 
+  const defaultProfileSignature = defaultProfile
+    ? `${defaultProfile.id}|${defaultProfile.baseUrl}|${defaultProfile.modelName}|${defaultProfile.hasKey}`
+    : ""
   React.useEffect(() => {
-    modelNameRef.current = modelName
-  }, [modelName])
+    setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
+  }, [defaultProfileSignature])
 
   React.useEffect(() => {
     queueRef.current = queue
@@ -402,16 +398,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
     }
-    try {
-      const savedModel = window.localStorage.getItem(MODEL_STORAGE_KEY)
-      if (savedModel !== null) {
-        modelNameRef.current = savedModel
-        setModelNameState(savedModel)
-      }
-    } catch {
-      // 隐私模式下 localStorage 不可读，沿用默认预设的模型名
-    }
-    setApiKeyState(readStoredApiKey())
+    // 旧版把 Key 留在浏览器 sessionStorage；现在 Key 只存服务端，顺手清掉残留
+    storeApiKey("")
 
     const storedQueue = readStoredQueue()
     if (storedQueue) {
@@ -440,11 +428,6 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     writeStoredLogs(logs)
   }, [logs, hydrated])
 
-  const setApiKey = React.useCallback((value: string) => {
-    setApiKeyState(value)
-    storeApiKey(value)
-  }, [])
-
   React.useEffect(() => {
     if (!hydrated) return
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
@@ -453,78 +436,43 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const updateSettings = React.useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => ({ ...prev, ...patch }))
     if (patch.folderPath !== undefined) setScanInfo(null)
-    if (patch.apiUrl !== undefined) {
-      setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
-    }
   }, [])
 
-  const setModelName = React.useCallback((value: string) => {
-    modelNameRef.current = value
-    setModelNameState(value)
-    setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
-    try {
-      window.localStorage.setItem(MODEL_STORAGE_KEY, value)
-    } catch {
-      // 隐私模式下 localStorage 不可写，仅在当前页面内存中生效
-    }
+  const requireDefaultModel = React.useCallback((): PublicModelProfile | null => {
+    const profile = defaultProfileRef.current
+    const readiness = profile
+      ? profileReadiness(profile)
+      : { ready: false, reason: "模型配置仍在加载，或没有启用的默认模型" }
+    if (profile && readiness.ready) return profile
+    toast.error("尚未配置可用的默认模型", {
+      id: "model-not-ready",
+      description: profile ? `${profile.name}：${readiness.reason}` : readiness.reason,
+      action: { label: "去配置", onClick: () => setActiveTab("config") },
+    })
+    return null
   }, [])
 
-  const applyPreset = React.useCallback(
-    (presetId: string) => {
-      const preset = API_PRESETS.find((p) => p.id === presetId)
-      if (!preset) return
-      updateSettings({ presetId: preset.id, apiUrl: preset.url })
-      setModelName(preset.model)
-    },
-    [updateSettings, setModelName]
-  )
+  const testProfile = React.useCallback(
+    async (id: string): Promise<ProfileTestResult> => {
+      const profile = profilesRef.current.find((p) => p.id === id)
+      const isDefault = profile?.isDefault === true
+      if (isDefault) setPing({ state: "testing" })
+      pushLog("req", `POST /api/v1/test-connection  profile=${profile?.name ?? id}  model=${profile?.modelName ?? "-"}`)
 
-  const runPing = React.useCallback(async () => {
-    const { apiUrl } = settingsRef.current
-    const model = modelNameRef.current.trim() || undefined
-    setPing({ state: "testing" })
-    pushLog(
-      "req",
-      `POST /api/v1/test-connection  → ${apiUrl.trim() || "(本地网关)"}  model=${model ?? "(网关默���)"}`
-    )
-
-    const reportFailure = (message: string) => {
-      setPing({ state: "error", message })
-      pushLog("warn", `连通失败：${message}`)
-      toast.error("API 连通失败", {
-        description: `${message}。请检查端点地址拼写或网络防火墙。`,
-      })
-    }
-
-    try {
-      const response = await fetch("/api/v1/test-connection", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiUrl,
-          apiKey: apiKeyRef.current || undefined,
-          modelName: model,
-        } satisfies ConnectionTestRequest),
-        signal: AbortSignal.timeout(8000),
-      })
-      const result = (await response.json()) as ConnectionTestResponse
-
-      if (result.status === "success") {
-        setPing({
-          state: "ok",
-          latency: result.rttMs,
-          model: result.modelDetected,
-          message: result.message,
-        })
-        pushLog("ok", `握手成功  RTT ${result.rttMs}ms  model=${result.modelDetected}  ${result.message}`)
-        toast.success(`API 握手成功 · RTT ${result.rttMs}ms`, { description: result.message })
-        return
+      const result = await testModelProfile(id)
+      if (result.ok) {
+        if (isDefault) setPing({ state: "ok", latency: result.latency, model: result.model, message: result.message })
+        pushLog("ok", `握手成功  RTT ${result.latency}ms  model=${result.model}  ${result.message}`)
+        toast.success(`API 握手成功 · RTT ${result.latency}ms`, { description: result.message })
+      } else {
+        if (isDefault) setPing({ state: "error", message: result.message })
+        pushLog("warn", `连通失败：${result.message}`)
+        toast.error("API 连通失败", { description: result.message })
       }
-      reportFailure(result.message)
-    } catch {
-      reportFailure("无法连接 Vigil-AI 网关或网关响应超时")
-    }
-  }, [pushLog])
+      return result
+    },
+    [pushLog]
+  )
 
   const scanFolder = React.useCallback(async () => {
     const { folderPath, recursive, formats } = settingsRef.current
@@ -681,10 +629,12 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const analyzeOne = React.useCallback(
     async (video: VideoItem) => {
       if (busyRef.current.has(video.id)) return
+      const profile = requireDefaultModel()
+      if (!profile) return
       busyRef.current.add(video.id)
 
       const s = settingsRef.current
-      const model = modelNameRef.current.trim() || undefined
+      const model = profile.modelName
       const frames = Math.max(1, Math.ceil(video.durationSec * s.samplingFps))
       const sourceKey = `LOCAL:${video.id}`
 
@@ -863,11 +813,8 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         }))
         pushLog(
           "req",
-          `[LEVEL-2] 动态组装 ${promptRules.length} 条规则语义注入 VLM (${model ?? "网关默认模型"})...`
+          `[LEVEL-2] 动态组装 ${promptRules.length} 条规则语义注入 VLM (${profile.name} · ${model})...`
         )
-        if (!apiKeyRef.current) {
-          pushLog("warn", "未设置 API Key，以匿名模式调用（本地网关可忽略此提示）。")
-        }
 
         const hintedRule = video.truth.ruleId && promptRules.some((r) => r.id === video.truth.ruleId)
         const incidentIds = new Set<string>()
@@ -922,9 +869,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
               videoPath: toRequestVideoPath(video),
               name: video.name,
               keyframes: chunkFrames,
-              apiUrl: s.apiUrl.trim() || undefined,
-              apiKey: apiKeyRef.current || undefined,
-              modelName: model,
+              modelProfileId: profile.id,
               sourceType: "local",
               sourceKey,
               rules: promptRules,
@@ -1088,7 +1033,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         busyRef.current.delete(video.id)
       }
     },
-    [apiKey, patchVideo, updateChunk, pushLog]
+    [requireDefaultModel, patchVideo, updateChunk, pushLog]
   )
 
   const runFrameTest = React.useCallback(
@@ -1218,13 +1163,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     () => ({
       settings,
       updateSettings,
-      applyPreset,
-      apiKey,
-      setApiKey,
+      defaultProfile,
+      testProfile,
       ping,
-      runPing,
-      modelName,
-      setModelName,
       scanning,
       lastScan,
       scanInfo,
@@ -1256,13 +1197,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     [
       settings,
       updateSettings,
-      applyPreset,
-      apiKey,
-      setApiKey,
+      defaultProfile,
+      testProfile,
       ping,
-      runPing,
-      modelName,
-      setModelName,
       scanning,
       lastScan,
       scanInfo,

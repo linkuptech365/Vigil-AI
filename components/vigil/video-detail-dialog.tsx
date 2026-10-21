@@ -15,6 +15,7 @@ import { normalizeSeverity } from "@/lib/vigil/rules"
 import { EvidenceFrame, TimestampBadge } from "./evidence-frame"
 import { KeyframeGrid } from "./frame-test-dialog"
 import { SeverityBadge } from "./status-badges"
+import { useModelProfiles } from "./config/use-model-profiles"
 import { useVigil } from "./vigil-provider"
 
 function Section({
@@ -38,7 +39,9 @@ function Section({
 }
 
 export function VideoDetailDialog() {
-  const { queue, selectedId, setSelectedId, modelName } = useVigil()
+  const { queue, selectedId, setSelectedId } = useVigil()
+  const { defaultProfile } = useModelProfiles()
+  const modelName = defaultProfile?.modelName ?? ""
   const video = queue.find((v) => v.id === selectedId)
   const open = Boolean(video && (video.status === "alert" || video.status === "safe"))
   const isAlert = video?.status === "alert" && Boolean(video.ruleId)

@@ -38,6 +38,9 @@ export interface VlmAnalyzeRequest {
   /** 视频文件名；videoPath 缺失时作为寻址兜底 */
   name?: string
   keyframes?: VlmKeyframeInput[]
+  /** 配置中心的模型档案 ID；服务端据此注入 URL / Key / 模型名 */
+  modelProfileId?: string
+  /** 以下三项仅为兼容外部调用方；前端一律改用 modelProfileId */
   apiUrl?: string
   apiKey?: string
   modelName?: string

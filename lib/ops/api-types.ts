@@ -1,5 +1,7 @@
 export interface ConnectionTestRequest {
-  apiUrl: string
+  /** 传入后由服务端读取该档案的 URL / Key / 模型名，Key 不经过浏览器 */
+  modelProfileId?: string
+  apiUrl?: string
   apiKey?: string
   modelName?: string
 }

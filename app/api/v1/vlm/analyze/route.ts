@@ -13,7 +13,9 @@ import type {
   VlmVerdict,
 } from "@/lib/ops/vlm-api-types"
 import { defaultKeyframes, extractRealFrames, MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
+import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { PathGuardError } from "@/lib/ops/server/path-guard"
+import { profileReadiness } from "@/lib/vigil/model-registry"
 import { locateVideo } from "@/lib/ops/server/video-locator"
 import { runAnalysis, willCallRemote } from "@/lib/ops/server/vlm-engine"
 import type { EngineContext, NormalizedInput } from "@/lib/ops/server/vlm-shared"
@@ -144,7 +146,38 @@ function pickVideoPath(record: Record<string, unknown>) {
   return undefined
 }
 
-function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: string } {
+interface ResolvedModel {
+  apiUrl?: string
+  apiKey?: string
+  modelName: string
+}
+
+/** 优先按 modelProfileId 在服务端取档案（Key 不经浏览器）；无档案 ID 时保留旧的直传字段，兼容外部调用方。 */
+function resolveModel(record: Record<string, unknown>): ResolvedModel | { error: string; code: string } {
+  const profileId = cleanText(record.modelProfileId, 64)
+  if (!profileId) {
+    const apiKey = typeof record.apiKey === "string" && record.apiKey.trim() ? record.apiKey.trim().slice(0, 512) : undefined
+    return {
+      apiUrl: cleanText(record.apiUrl, 2048),
+      apiKey,
+      modelName: cleanText(record.modelName, 128) ?? DEFAULT_MODEL,
+    }
+  }
+
+  const profile = getProfile(profileId)
+  if (!profile) return { error: `模型档案 ${profileId} 不存在，请到配置中心检查模型网关`, code: "MODEL_NOT_FOUND" }
+  const readiness = profileReadiness({ ...profile, hasKey: profile.apiKey.length > 0 })
+  if (!readiness.ready) {
+    return { error: `模型「${profile.name}」尚未就绪：${readiness.reason}。请到配置中心完善后重试`, code: "MODEL_NOT_READY" }
+  }
+  return {
+    apiUrl: resolveEndpointUrl(profile),
+    apiKey: profile.apiKey || undefined,
+    modelName: profile.modelName,
+  }
+}
+
+function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: string; code?: string } {
   const record = asRecord(body)
   if (!record) return { error: "请求体必须是 JSON 对象" }
 
@@ -162,15 +195,16 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
   const sourceType = parseSourceType(record.sourceType)
   const sourceKey = cleanText(record.sourceKey, 256) ?? (sourceType === "local" ? `LOCAL:${videoPath ?? "unknown"}` : "unknown")
 
-  const apiKey = typeof record.apiKey === "string" && record.apiKey.trim() ? record.apiKey.trim().slice(0, 512) : undefined
+  const model = resolveModel(record)
+  if ("error" in model) return model
 
   return {
     input: {
       videoPath,
       keyframes,
-      apiUrl: cleanText(record.apiUrl, 2048),
-      apiKey,
-      modelName: cleanText(record.modelName, 128) ?? DEFAULT_MODEL,
+      apiUrl: model.apiUrl,
+      apiKey: model.apiKey,
+      modelName: model.modelName,
       sourceType,
       sourceKey,
       rules,
@@ -245,7 +279,7 @@ export async function POST(request: Request) {
   }
 
   const parsed = normalizeRequest(payload)
-  if ("error" in parsed) return fail(parsed.error, 400)
+  if ("error" in parsed) return fail(parsed.error, 400, parsed.code)
 
   const abort = new AbortController()
   request.signal.addEventListener("abort", () => abort.abort(), { once: true })
