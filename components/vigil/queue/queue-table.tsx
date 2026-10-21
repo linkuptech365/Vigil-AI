@@ -15,10 +15,11 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
 import { RULES } from "@/lib/vigil/rules"
+import type { VideoItem } from "@/lib/vigil/types"
 import { VideoStatusBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
 
-export function QueueTable() {
+export function QueueTable({ videos }: { videos?: VideoItem[] }) {
   const {
     queue,
     analyzeOne,
@@ -62,7 +63,7 @@ export function QueueTable() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {queue.map((video) => {
+          {(videos ?? queue).map((video) => {
             const analyzing = video.status === "analyzing"
             const done = video.status === "safe" || video.status === "alert"
             return (

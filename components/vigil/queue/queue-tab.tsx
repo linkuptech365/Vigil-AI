@@ -1,13 +1,18 @@
 "use client"
 
-import { FlaskConical, ListX, Play } from "lucide-react"
+import * as React from "react"
+import { FlaskConical, ListX, Play, SearchX } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Spinner } from "@/components/ui/spinner"
 import { GMP_SUITE_LABEL } from "@/lib/ops/gmp-suite"
 import { useVigil } from "../vigil-provider"
 import { QueueTable } from "./queue-table"
+import { QueueToolbar } from "./queue-toolbar"
 import { TerminalConsole } from "./terminal-console"
+import { useQueueViewMode } from "./use-queue-view-mode"
+import { VideoGrid } from "./video-grid"
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
   return (
@@ -20,6 +25,17 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 
 export function QueueTab() {
   const { queue, loadGmpSuite, loadingGmp, scanning, clearQueue, analyzeAll, batchRunning } = useVigil()
+
+  const [viewMode, setViewMode] = useQueueViewMode()
+  const [query, setQuery] = React.useState("")
+
+  const visible = React.useMemo(() => {
+    const keyword = query.trim().toLowerCase()
+    if (!keyword) return queue
+    return queue.filter(
+      (v) => v.name.toLowerCase().includes(keyword) || v.path.toLowerCase().includes(keyword)
+    )
+  }, [queue, query])
 
   const pending = queue.filter((v) => v.status === "pending").length
   const alerts = queue.filter((v) => v.status === "alert").length
@@ -62,7 +78,34 @@ export function QueueTab() {
         </div>
       </div>
 
-      <QueueTable />
+      {queue.length > 0 && (
+        <QueueToolbar
+          query={query}
+          onQueryChange={setQuery}
+          mode={viewMode}
+          onModeChange={setViewMode}
+          total={queue.length}
+          shown={visible.length}
+        />
+      )}
+
+      {queue.length === 0 ? (
+        <QueueTable />
+      ) : visible.length === 0 ? (
+        <Empty className="rounded-xl border border-dashed border-border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <SearchX />
+            </EmptyMedia>
+            <EmptyTitle>没有匹配的视频</EmptyTitle>
+            <EmptyDescription>换一个关键词，或清除搜索框中的内容。</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : viewMode === "grid" ? (
+        <VideoGrid videos={visible} />
+      ) : (
+        <QueueTable videos={visible} />
+      )}
       <TerminalConsole />
     </div>
   )

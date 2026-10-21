@@ -3,11 +3,12 @@
 import * as React from "react"
 import { toast } from "sonner"
 
-import { INITIAL_ALERTS, NEW_EVENT_TEMPLATES, SEARCH_MOMENTS } from "@/lib/ops/data"
+import { CAMERAS, INITIAL_ALERTS, NEW_EVENT_TEMPLATES, SEARCH_MOMENTS } from "@/lib/ops/data"
 import type { LiveFeed } from "@/lib/ops/ingestion-types"
 import type { AlertEvent, AlertStatus, ChannelId, ReplayState, SeekTarget } from "@/lib/ops/types"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 import { defaultIncidentSec, formatClock, isChannelId } from "@/lib/ops/video-scenarios"
+import { CAST_REQUEST_KEY, parseCastRequest } from "@/lib/vigil/video-source"
 
 export interface LocateRequest {
   channelId: string
@@ -86,6 +87,29 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       return next
     })
   }, [])
+
+  React.useEffect(() => {
+    const consume = (raw: string | null) => {
+      const request = parseCastRequest(raw)
+      const camera = request ? CAMERAS.find((c) => c.id === request.channelId) : undefined
+      if (!request || !camera) return
+      pushLiveFeed({
+        channelId: camera.id,
+        protocol: "MP4",
+        url: request.url,
+        label: request.label,
+        fallbackSrc: camera.video,
+      })
+      setFocusId(camera.id)
+      window.localStorage.removeItem(CAST_REQUEST_KEY)
+    }
+    consume(window.localStorage.getItem(CAST_REQUEST_KEY))
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === CAST_REQUEST_KEY) consume(event.newValue)
+    }
+    window.addEventListener("storage", onStorage)
+    return () => window.removeEventListener("storage", onStorage)
+  }, [pushLiveFeed])
 
   const mutedRef = React.useRef(muted)
   React.useEffect(() => {

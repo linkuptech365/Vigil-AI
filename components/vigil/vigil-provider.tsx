@@ -46,6 +46,7 @@ import type {
   Settings,
   VideoItem,
 } from "@/lib/vigil/types"
+import { registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
 
 export type TabId = "config" | "queue" | "alerts"
 
@@ -539,6 +540,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         }
       })
 
+      candidates.forEach((file, i) => registerLocalVideo(items[i].id, file))
       setQueue((prev) => {
         const known = new Set(prev.map((v) => v.id))
         return [...prev, ...items.filter((v) => !known.has(v.id))]
@@ -809,12 +811,14 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
   const clearQueue = React.useCallback(() => {
     queueRef.current = []
+    releaseAllLocalVideos()
     setQueue([])
     writeStoredQueue([])
     pushLog("info", "检测队列已清空。")
   }, [pushLog])
 
   const removeVideo = React.useCallback((id: string) => {
+    releaseLocalVideo(id)
     setQueue((prev) => prev.filter((v) => v.id !== id))
   }, [])
 
