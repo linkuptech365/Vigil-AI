@@ -35,6 +35,16 @@ export interface VideoItem {
   /** 被折叠进既有事件证据链的重复触发次数 */
   suppressedCount?: number
   incidentId?: string
+  /** 违规发生的视频时间码，如 "00:16"，与证据帧一一对应 */
+  timestamp?: string
+  /** 触发违规的抓拍证据帧（data:image/jpeg;base64,...）；老记录或服务端抽帧时为空 */
+  evidenceFrameBase64?: string
+  /** 证据帧是本次送检的第几张采样帧（从 1 起） */
+  evidenceFrameIndex?: number
+  /** 本次送检的采样帧总数 */
+  evidenceFrameTotal?: number
+  /** 证据帧所属的动作区间，如 "00:11 - 00:21" */
+  motionSegment?: string
   analyzedAt?: string
   samplingFps?: number
   frames?: number

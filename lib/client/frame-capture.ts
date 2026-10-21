@@ -14,6 +14,8 @@ export interface AdaptiveFrame {
 export interface MotionSegment {
   start: string
   end: string
+  startSeconds: number
+  endSeconds: number
 }
 
 export interface AdaptiveCaptureResult {
@@ -258,6 +260,8 @@ export async function captureAdaptiveFrames(source: string | Blob): Promise<Adap
       motionSegments: segments.map((segment) => ({
         start: formatClock(segment.start),
         end: formatClock(segment.end),
+        startSeconds: segment.start,
+        endSeconds: segment.end,
       })),
       staticRatioPercent,
       scanStepSeconds: step,

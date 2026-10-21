@@ -1,6 +1,6 @@
 "use client"
 
-import { CircleCheck, ClipboardList, Cpu, Film, ListChecks, TriangleAlert } from "lucide-react"
+import { Camera, CircleCheck, ClipboardList, Cpu, Film, ListChecks, TriangleAlert } from "lucide-react"
 
 import {
   Dialog,
@@ -12,6 +12,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { formatDuration, formatSize } from "@/lib/vigil/data"
 import { normalizeSeverity } from "@/lib/vigil/rules"
+import { EvidenceFrame, TimestampBadge } from "./evidence-frame"
 import { KeyframeGrid } from "./frame-test-dialog"
 import { SeverityBadge } from "./status-badges"
 import { useVigil } from "./vigil-provider"
@@ -63,6 +64,7 @@ export function VideoDetailDialog() {
         })
       : []
   const evidencePoints = isAlert ? reportEvidence : []
+  const evidenceTimestamp = video?.timestamp ?? report?.result.timestampOffset.replace(/\.\d+$/, "")
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && setSelectedId(null)}>
@@ -89,6 +91,27 @@ export function VideoDetailDialog() {
 
             <ScrollArea className="max-h-[60vh]">
               <div className="flex flex-col gap-6 p-6">
+                {isAlert && (
+                  <Section icon={Camera} title="违规抓拍证据">
+                    <EvidenceFrame
+                      variant="full"
+                      src={video.evidenceFrameBase64}
+                      alt={`${ruleName}在 ${evidenceTimestamp ?? "未知时间"} 的违规抓拍`}
+                    />
+                    {evidenceTimestamp ? (
+                      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                        <TimestampBadge timestamp={evidenceTimestamp} />
+                        <span>
+                          采样时间点 {evidenceTimestamp}
+                          {video.evidenceFrameIndex && video.evidenceFrameTotal
+                            ? `（第 ${video.evidenceFrameIndex}/${video.evidenceFrameTotal} 采样帧）`
+                            : ""}
+                        </span>
+                        {video.motionSegment ? <span>· 所属动作区间 {video.motionSegment}</span> : null}
+                      </p>
+                    ) : null}
+                  </Section>
+                )}
                 {video.keyframes && video.keyframeWindow && (
                   <Section
                     icon={Film}

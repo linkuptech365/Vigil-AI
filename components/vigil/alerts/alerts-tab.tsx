@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { normalizeSeverity } from "@/lib/vigil/rules"
+import { EvidenceFrame, TimestampBadge } from "../evidence-frame"
 import { SeverityBadge } from "../status-badges"
 import { useVigil } from "../vigil-provider"
 
@@ -50,11 +51,27 @@ export function AlertsTab() {
             <li key={video.id}>
               <Card className="h-full border-destructive/30">
                 <CardContent className="flex h-full flex-col gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(video.id)}
+                    aria-label={`查看「${ruleName}」的证据大图与处置链`}
+                    className="group relative block rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  >
+                    <EvidenceFrame
+                      variant="thumb"
+                      src={video.evidenceFrameBase64}
+                      alt={`${ruleName}在 ${video.timestamp ?? "未知时间"} 的违规抓拍`}
+                    />
+                    <span className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/70 text-xs font-medium text-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                      查看大图与处置链
+                    </span>
+                  </button>
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <SeverityBadge severity={severity} />
                         <h3 className="text-sm font-semibold">{ruleName}</h3>
+                        {video.timestamp ? <TimestampBadge timestamp={video.timestamp} /> : null}
                       </div>
                       <p className="truncate font-mono text-xs text-muted-foreground" title={video.name}>
                         {video.name}

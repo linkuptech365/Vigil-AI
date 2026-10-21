@@ -36,11 +36,16 @@ export function offsetToSeconds(offset: string) {
   return Number(minutes) * 60 + Number(seconds) + Number(millis.padEnd(3, "0")) / 1000
 }
 
-function parseOffset(value: unknown) {
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return formatOffset(value)
-  const raw = text(value)
-  const seconds = offsetToSeconds(raw)
-  return seconds === null ? "00:00.000" : formatOffset(seconds)
+/** 模型给出的时间点；缺失或格式不合法时返回 null，由调用方用帧编号兜底。 */
+function readOffsetSeconds(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value
+  return offsetToSeconds(text(value))
+}
+
+function readFrameIndex(value: unknown) {
+  const numeric =
+    typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : Number.NaN
+  return Number.isInteger(numeric) ? numeric : null
 }
 
 function parseBbox(value: unknown): VlmBbox | null {
@@ -97,14 +102,19 @@ function coerceResult(
   confidence = Math.round(Math.min(1, Math.max(0, confidence)) * 1000) / 1000
 
   const reasoning = text(record.reasoning) || text(record.intentAnalysis) || text(record.summary)
-  const timestampOffset = triggered ? parseOffset(record.timestamp_offset ?? record.timestampOffset) : "00:00.000"
+  // 证据锚点：优先采用模型指明的帧编号，其次按时间点就近匹配；两者都缺失时才退到 0 秒
+  const reportedSeconds = triggered ? readOffsetSeconds(record.timestamp_offset ?? record.timestampOffset) : null
+  const reportedIndex = triggered ? readFrameIndex(record.frame_index ?? record.frameIndex) : null
+  const modelFrame = reportedIndex === null ? undefined : frames.find((frame) => frame.index === reportedIndex)
+  const anchorSeconds = reportedSeconds ?? modelFrame?.timestampSec ?? 0
+  const timestampOffset = formatOffset(triggered ? anchorSeconds : 0)
   const severity: VlmSeverity = triggered
     ? SEVERITIES.has(severityRaw) && severityRaw !== "SAFE"
       ? (severityRaw as VlmSeverity)
       : matched.severity
     : "SAFE"
 
-  const evidenceFrame = triggered ? nearestFrameIndex(frames, offsetToSeconds(timestampOffset) ?? 0) : null
+  const evidenceFrame = triggered ? (modelFrame?.index ?? nearestFrameIndex(frames, anchorSeconds)) : null
 
   return {
     triggered,

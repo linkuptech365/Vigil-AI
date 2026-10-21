@@ -46,6 +46,7 @@ import type {
   Settings,
   VideoItem,
 } from "@/lib/vigil/types"
+import { buildEvidenceChain } from "@/lib/vigil/evidence"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { getVideoSrc, registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
 import {
@@ -109,9 +110,15 @@ function writeStoredQueue(queue: VideoItem[]) {
     try {
       window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(queue))
     } catch {
-      // 配额不足时丢弃体积最大的抽帧缩略图，仍保留分析结论
-      const slim = queue.map(({ keyframes: _keyframes, ...rest }) => rest)
-      window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(slim))
+      try {
+        // 配额不足：先丢弃抽帧缩略图，保留证据抓拍帧
+        const withoutKeyframes = queue.map(({ keyframes: _keyframes, ...rest }) => rest)
+        window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(withoutKeyframes))
+      } catch {
+        // 仍然放不下：连证据帧也丢弃，只保留分析结论
+        const slim = queue.map(({ keyframes: _keyframes, evidenceFrameBase64: _evidence, ...rest }) => rest)
+        window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(slim))
+      }
     }
   } catch {
     // 隐私模式或存储已满：仅在当前页面内存中生效
@@ -611,6 +618,11 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         suppressedCount: undefined,
         incidentId: undefined,
         suppressedReason: undefined,
+        timestamp: undefined,
+        evidenceFrameBase64: undefined,
+        evidenceFrameIndex: undefined,
+        evidenceFrameTotal: undefined,
+        motionSegment: undefined,
         analyzedAt: undefined,
       })
 
@@ -749,10 +761,12 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
         const matchedRule = verdict.ruleId ? matched.find((r) => r.id === verdict.ruleId) : undefined
         let status: VideoItem["status"] = "safe"
         let suppressedReason: string | undefined
+        let evidence: ReturnType<typeof buildEvidenceChain> | null = null
         const hit = verdict.triggered && verdict.ruleId
 
         if (hit) {
           status = "alert"
+          evidence = buildEvidenceChain(result, vlmFrames, adaptive?.motionSegments)
           const threshold = verdict.threshold ?? 0
           pushLog(
             "alert",
@@ -768,6 +782,19 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
             pushLog(
               "ok",
               `[SUPPRESSION] 规则冷却窗口 ${sup.windowSeconds}s 激活，新预警 ${sup.incidentId ?? ""} 入库并派发至处置联动看板`
+            )
+          }
+          const incidentId = sup?.incidentId ?? video.id
+          const segmentLabel = evidence.motionSegment ?? "未落入动作区间"
+          if (evidence.frameBase64) {
+            pushLog(
+              "ok",
+              `[EVIDENCE] 违规时间锚点: ${evidence.timestamp} (${segmentLabel})，现场证据切片已存证入库 [${incidentId}]`
+            )
+          } else {
+            pushLog(
+              "warn",
+              `[EVIDENCE] 违规时间锚点: ${evidence.timestamp} (${segmentLabel})，本次无像素帧，仅记录时序锚点 [${incidentId}]`
             )
           }
         } else if (verdict.belowThreshold && verdict.ruleId) {
@@ -789,6 +816,11 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
           suppressedCount: hit ? verdict.suppression?.suppressedCount : undefined,
           incidentId: hit ? (verdict.suppression?.incidentId ?? undefined) : undefined,
           suppressedReason,
+          timestamp: evidence?.timestamp,
+          evidenceFrameBase64: evidence?.frameBase64,
+          evidenceFrameIndex: evidence?.frameIndex,
+          evidenceFrameTotal: evidence?.frameTotal,
+          motionSegment: evidence?.motionSegment,
           samplingFps: s.samplingFps,
           frames,
           keyframes,
