@@ -1,6 +1,7 @@
 "use client"
 
 import type { LocateOptions } from "@/lib/ops/types"
+import { DemoEmptyState, DemoOnly } from "../demo-empty-state"
 import { CausalReasoningView } from "./causal-reasoning-view"
 import { VideoRagStudio } from "./video-rag-studio"
 import { VlmInferenceRunner } from "./vlm-inference-runner"
@@ -22,7 +23,16 @@ export function VlmTab({ onLocate }: VlmTabProps) {
         </div>
         <VlmInferenceRunner />
         <CausalReasoningView />
-        <VideoRagStudio onLocate={onLocate} />
+        <DemoOnly
+          fallback={
+            <DemoEmptyState
+              title="Video-RAG 语料库尚未建立"
+              description="当前没有可检索的真实视频切片索引。示例语料仅在开启演示数据时显示。"
+            />
+          }
+        >
+          <VideoRagStudio onLocate={onLocate} />
+        </DemoOnly>
       </div>
     </VlmProvider>
   )

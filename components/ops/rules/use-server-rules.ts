@@ -11,7 +11,6 @@ import type {
   UpdateRuleResponse,
 } from "@/lib/ops/rules-api-types"
 import { RULES_ENDPOINT, errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
-import { INITIAL_INSPECTION_RULES } from "@/lib/ops/rules-data"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { loadStoredRules, saveStoredRules } from "@/lib/ops/storage/audit-storage"
 
@@ -22,6 +21,8 @@ export interface CustomRuleInput {
   actions: Record<RuleActionKey, boolean>
   boundChannels?: string[]
 }
+
+const NO_RULES: InspectionRule[] = []
 
 /** description 是 VLM 语义判定依据：语义规则落到 prompt，确定性规则落到 logic。 */
 export type RulePatch = Partial<InspectionRule> & { description?: string }
@@ -59,7 +60,7 @@ export function useServerRules() {
     if (data) saveStoredRules(data.rules)
   }, [data])
 
-  const rules = data?.rules ?? cached ?? INITIAL_INSPECTION_RULES
+  const rules = data?.rules ?? cached ?? NO_RULES
 
   const updateRule = React.useCallback(
     async (id: string, patch: RulePatch) => {
@@ -71,7 +72,7 @@ export function useServerRules() {
           },
           {
             optimisticData: (current) => ({
-              rules: (current?.rules ?? INITIAL_INSPECTION_RULES).map((rule) =>
+              rules: (current?.rules ?? NO_RULES).map((rule) =>
                 rule.id === id ? applyPatch(rule, patch) : rule
               ),
             }),
@@ -115,7 +116,7 @@ export function useServerRules() {
           },
           {
             optimisticData: (current) => ({
-              rules: (current?.rules ?? INITIAL_INSPECTION_RULES).filter((rule) => rule.id !== id),
+              rules: (current?.rules ?? NO_RULES).filter((rule) => rule.id !== id),
             }),
             rollbackOnError: true,
             populateCache: true,

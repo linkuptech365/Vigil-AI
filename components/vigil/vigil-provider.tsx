@@ -1,6 +1,8 @@
 "use client"
 
 import * as React from "react"
+
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { toast } from "sonner"
 
 import {
@@ -66,6 +68,10 @@ export type TabId = "config" | "live" | "queue" | "alerts"
 
 const STORAGE_KEY = "vigil-ai:settings"
 const QUEUE_STORAGE_KEY = "vigil_queue_state"
+
+function isDemoVideo(video: VideoItem) {
+  return video.id.startsWith("seed-") || video.path.startsWith("/data/videos/test_samples") || video.path.includes("/demo")
+}
 const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
 const MAX_LOGS = 200
 /** 一级初筛：采样帧平均变化率低于 2% 视为画面静止，跳过大模型推理。 */
@@ -327,6 +333,9 @@ function readVideoDuration(file: File): Promise<number> {
 
 export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS)
+  const { enabled: demoEnabled } = useDemoMode()
+  const demoEnabledRef = React.useRef(demoEnabled)
+  demoEnabledRef.current = demoEnabled
   const [hydrated, setHydrated] = React.useState(false)
   const [ping, setPing] = React.useState<PingState>({ state: "idle" })
   const [scanning, setScanning] = React.useState(false)
@@ -334,7 +343,7 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
   const [lastScan, setLastScan] = React.useState<string | null>(null)
   const [scanInfo, setScanInfo] = React.useState<ScanInfo | null>(null)
   const [frameTest, setFrameTest] = React.useState<FrameTestState | null>(null)
-  const [queue, setQueue] = React.useState<VideoItem[]>(createInitialQueue)
+  const [queue, setQueue] = React.useState<VideoItem[]>(() => (demoEnabled ? createInitialQueue() : []))
   const [logs, setLogs] = React.useState<LogLine[]>([])
   const [batchRunning, setBatchRunning] = React.useState(false)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
@@ -403,8 +412,9 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
 
     const storedQueue = readStoredQueue()
     if (storedQueue) {
-      queueRef.current = storedQueue
-      setQueue(storedQueue)
+      const visible = demoEnabledRef.current ? storedQueue : storedQueue.filter((v) => !isDemoVideo(v))
+      queueRef.current = visible
+      setQueue(visible)
     }
 
     const storedLogs = readStoredLogs()
@@ -1106,6 +1116,14 @@ export function VigilProvider({ children }: { children: React.ReactNode }) {
     setBatchRunning(false)
     toast.success("全量分析完成")
   }, [queue, analyzeOne, pushLog])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    setQueue((prev) => {
+      if (!demoEnabled) return prev.some(isDemoVideo) ? prev.filter((v) => !isDemoVideo(v)) : prev
+      return prev.length === 0 ? createInitialQueue() : prev
+    })
+  }, [demoEnabled, hydrated])
 
   const addSamples = React.useCallback(() => {
     const samples = createTestSamples(3)

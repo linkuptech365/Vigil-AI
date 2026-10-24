@@ -13,12 +13,19 @@ import {
   getJson,
   sendJson,
 } from "@/lib/ops/rules-client"
-import { ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT, INITIAL_DEDUP_METRICS } from "@/lib/ops/rules-data"
+import { ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { ChannelCooldown, DeduplicationMetrics, InspectionRule } from "@/lib/ops/rules-types"
 
 import { type CustomRuleInput, type RulePatch, useServerRules } from "./use-server-rules"
 
 export type { CustomRuleInput }
+
+const EMPTY_DEDUP_METRICS: DeduplicationMetrics = {
+  rawTriggersCount: 0,
+  suppressedCount: 0,
+  incidentCount: 0,
+  correlatedCount: 0,
+}
 
 const TICK_MS = 500
 const IDLE_POLL_MS = 5000
@@ -131,7 +138,7 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const cooldowns = React.useMemo(() => projectCooldowns(snapshot, now), [snapshot, now])
-  const metrics = snapshot?.metrics ?? INITIAL_DEDUP_METRICS
+  const metrics = snapshot?.metrics ?? EMPTY_DEDUP_METRICS
 
   const refreshAfterTrigger = React.useCallback(async () => {
     await Promise.all([mutateSnapshot(), mutateGlobal(CLUSTER_ENDPOINT)])
@@ -143,7 +150,7 @@ export function RulesProvider({ children }: { children: React.ReactNode }) {
         const response = await sendJson<SuppressResponse>(SUPPRESS_ENDPOINT, "POST", { channelId })
         if (response.suppressed) {
           toast.info("重复触发已被服务端抑制", {
-            description: `证据已追加到工单 ${response.incidentId}，剩余冷却 ${response.cooldownRemainingSec} 秒。`,
+            description: `证据已追加到工单 ${response.incidentId}��剩余冷却 ${response.cooldownRemainingSec} 秒。`,
           })
         } else {
           toast.warning("服务端已创建新工单并派发声光告警", {

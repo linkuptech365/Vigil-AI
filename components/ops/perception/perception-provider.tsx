@@ -41,6 +41,11 @@ import { isLocalChannelId, parseLocalChannelId } from "@/lib/ops/local-source"
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 import type { VideoItem } from "@/lib/vigil/types"
 import { useVigil } from "@/components/vigil/vigil-provider"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
+import { useStreams } from "@/components/vigil/streams/use-streams"
+
+const EMPTY_METRICS: PerceptionMetrics = { ingested: 0, escalatedFrames: 0, clips: 0 }
+const EMPTY_SERIES: SeriesPoint[] = Array.from({ length: 30 }, () => ({ ingested: 0, escalated: 0 }))
 
 const TICK_MS = 100
 const TRAIL_EVERY = 3
@@ -163,20 +168,30 @@ function triggerMessage(zone: RoiZone) {
 }
 
 export function PerceptionProvider({ children }: { children: React.ReactNode }) {
-  const [selectedSource, setSelectedSource] = React.useState("CAM-02")
+  const { enabled: demo } = useDemoMode()
+  const { streams } = useStreams()
+  const [selectedSource, setSelectedSource] = React.useState(demo ? "CAM-02" : "")
   const { queue: localVideos } = useVigil()
   const selectedLocalVideo = isLocalChannelId(selectedSource)
     ? localVideos.find((v) => v.id === parseLocalChannelId(selectedSource))
     : undefined
-  // 本地视频被移除后回落到默认摄像头，避免下拉框指向不存在的选项
-  const cameraId = isLocalChannelId(selectedSource) && !selectedLocalVideo ? "CAM-02" : selectedSource
+  const defaultSource = demo ? "CAM-02" : (streams[0]?.id ?? "")
+  // 本地视频被移除、通道被删除或尚未选择时回落到默认通道，避免下拉框指向不存在的选项
+  const sourceMissing = isLocalChannelId(selectedSource)
+    ? !selectedLocalVideo
+    : !demo && !streams.some((s) => s.id === selectedSource)
+  const cameraId = selectedSource === "" || sourceMissing ? defaultSource : selectedSource
   const setCameraId = setSelectedSource
-  const [zones, setZones] = React.useState<RoiZone[]>(INITIAL_ZONES)
+  const [zones, setZones] = React.useState<RoiZone[]>(demo ? INITIAL_ZONES : [])
   const [zoneRuntime, setZoneRuntime] = React.useState<Record<string, ZoneRuntime>>({})
-  const [entities, setEntities] = React.useState(buildInitialEntities)
-  const [clips, setClips] = React.useState<EscalationClip[]>(INITIAL_CLIPS)
-  const [metrics, setMetrics] = React.useState<PerceptionMetrics>(INITIAL_METRICS)
-  const [series, setSeries] = React.useState<SeriesPoint[]>(INITIAL_SERIES)
+  const [entities, setEntities] = React.useState<Record<string, TrackedEntity[]>>(() =>
+    demo ? buildInitialEntities() : {}
+  )
+  const [clips, setClips] = React.useState<EscalationClip[]>(demo ? INITIAL_CLIPS : [])
+  const [metrics, setMetrics] = React.useState<PerceptionMetrics>(
+    demo ? INITIAL_METRICS : EMPTY_METRICS
+  )
+  const [series, setSeries] = React.useState<SeriesPoint[]>(demo ? INITIAL_SERIES : EMPTY_SERIES)
   const [intrusionActive, setIntrusionActive] = React.useState(false)
 
   const zonesRef = React.useRef(zones)
@@ -240,6 +255,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
   )
 
   React.useEffect(() => {
+    if (!demo) return
     let last = Date.now()
     let tick = 0
 
@@ -367,9 +383,10 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     }, TICK_MS)
 
     return () => window.clearInterval(id)
-  }, [fireZone])
+  }, [fireZone, demo])
 
   React.useEffect(() => {
+    if (!demo) return
     let seconds = 0
     const id = window.setInterval(() => {
       seconds += 1
@@ -394,7 +411,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
       })
     }, 1000)
     return () => window.clearInterval(id)
-  }, [])
+  }, [demo])
 
   React.useEffect(() => {
     const id = window.setInterval(() => {
@@ -413,6 +430,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
   }, [])
 
   React.useEffect(() => {
+    if (!demo) return
     let index = 0
     const id = window.setInterval(() => {
       const template = AUTO_CLIP_TEMPLATES[index % AUTO_CLIP_TEMPLATES.length]
@@ -420,7 +438,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
       pushClip(template.cameraId, template.reason, template.confidence)
     }, 11_000)
     return () => window.clearInterval(id)
-  }, [pushClip])
+  }, [pushClip, demo])
 
   const updateZone = React.useCallback((id: string, patch: Partial<RoiZone>) => {
     setZones((prev) => prev.map((z) => (z.id === id ? { ...z, ...patch } : z)))
@@ -471,6 +489,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
   }, [])
 
   const simulateIntrusion = React.useCallback(() => {
+    if (!demo) return
     setSelectedSource("CAM-02")
     const motion = motionRef.current[VIOLATOR_ID]
     if (motion.override) {
@@ -495,7 +514,7 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     }
     setIntrusionActive(true)
     toast.warning("已注入模拟事件", { description: "目标 #115 正在穿越 1号机加工红线禁区" })
-  }, [])
+  }, [demo])
 
   const trackingValue = React.useMemo(() => ({ entities }), [entities])
 
@@ -503,7 +522,8 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     () => ({
       cameraId,
       setCameraId: (id) => {
-        if (CAMERAS.some((c) => c.id === id) || isLocalChannelId(id)) setSelectedSource(id)
+        const known = demo ? CAMERAS.some((c) => c.id === id) : streams.some((s) => s.id === id)
+        if (known || isLocalChannelId(id)) setSelectedSource(id)
       },
       localVideos,
       selectedLocalVideo,
@@ -519,6 +539,8 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
       simulateIntrusion,
     }),
     [
+      demo,
+      streams,
       cameraId,
       localVideos,
       selectedLocalVideo,

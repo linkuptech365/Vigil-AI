@@ -1,5 +1,6 @@
 "use client"
 
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import * as React from "react"
 import { FlaskConical, ListX, Play, SearchX } from "lucide-react"
 
@@ -24,6 +25,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 }
 
 export function QueueTab() {
+  const { enabled: demo } = useDemoMode()
   const { queue, loadGmpSuite, loadingGmp, scanning, clearQueue, analyzeAll, batchRunning } = useVigil()
 
   const [viewMode, setViewMode] = useQueueViewMode()
@@ -51,18 +53,20 @@ export function QueueTab() {
           <Stat label="正常安全" value={safe} tone="text-success" />
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            onClick={() => void loadGmpSuite()}
-            disabled={batchRunning || loadingGmp || scanning}
-          >
-            {loadingGmp || scanning ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <FlaskConical data-icon="inline-start" />
-            )}
-            {GMP_SUITE_LABEL}
-          </Button>
+          {demo && (
+            <Button
+              variant="outline"
+              onClick={() => void loadGmpSuite()}
+              disabled={batchRunning || loadingGmp || scanning}
+            >
+              {loadingGmp || scanning ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <FlaskConical data-icon="inline-start" />
+              )}
+              {GMP_SUITE_LABEL}
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={clearQueue}

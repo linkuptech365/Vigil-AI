@@ -9,6 +9,52 @@ import type { AlertEvent, AlertStatus, ChannelId, ReplayState, SeekTarget } from
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 import { defaultIncidentSec, formatClock, isChannelId } from "@/lib/ops/video-scenarios"
 import { CAST_REQUEST_KEY, parseCastRequest } from "@/lib/vigil/video-source"
+import type { StreamAlert } from "@/lib/vigil/streams"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
+import { alertFrameUrl, useStreams } from "@/components/vigil/streams/use-streams"
+
+const NO_BOX: AlertEvent["box"] = { x: 0, y: 0, w: 0, h: 0, tone: "warn" }
+
+function clockOf(iso: string) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return "00:00:00"
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date)
+}
+
+type RealOverride = Pick<AlertEvent, "status" | "note" | "assignee">
+
+function toAlertEvent(alert: StreamAlert, now: number, override?: RealOverride): AlertEvent {
+  const frameCount = Math.max(alert.frames.length, 1)
+  const frameUrls = Array.from({ length: alert.frames.length ? frameCount : 0 }, (_, index) => alertFrameUrl(alert.id, index))
+  const triggered = new Date(alert.triggeredAt).getTime()
+  const steps: AlertEvent["steps"] = [{ offset: 0, title: "AI 研判结论", detail: alert.reasoning || alert.summary }]
+  if (alert.advice) steps.push({ offset: 5, title: "处置建议", detail: alert.advice })
+  return {
+    id: alert.id,
+    cameraId: alert.streamId,
+    cameraLabel: alert.streamName,
+    severity: alert.severity === "CRITICAL" ? "CRITICAL" : "WARNING",
+    type: alert.ruleName,
+    summary: alert.summary,
+    rule: alert.ruleName,
+    confidence: alert.confidence,
+    minutesAgo: Number.isFinite(triggered) ? Math.max(0, Math.floor((now - triggered) / 60_000)) : 0,
+    time: clockOf(alert.triggeredAt),
+    status: override?.status ?? "open",
+    note: override?.note,
+    assignee: override?.assignee,
+    box: NO_BOX,
+    related: [],
+    steps,
+    frameUrls,
+  }
+}
 
 export interface LocateRequest {
   channelId: string
@@ -76,11 +122,20 @@ export function useOps() {
 }
 
 export function OpsProvider({ children }: { children: React.ReactNode }) {
+  const { enabled: demo } = useDemoMode()
+  const real = useStreams()
   const [layout, setLayoutState] = React.useState<GridLayout>("grid")
-  const [focusId, setFocusId] = React.useState("CAM-02")
+  const [focusId, setFocusId] = React.useState(demo ? "CAM-02" : "")
   const [visibleStreamIds, setVisibleStreamIds] = React.useState<string[] | null>(null)
   const [muted, setMuted] = React.useState(false)
-  const [alerts, setAlerts] = React.useState<AlertEvent[]>(INITIAL_ALERTS)
+  const [demoAlerts, setAlerts] = React.useState<AlertEvent[]>(demo ? INITIAL_ALERTS : [])
+  const [realOverrides, setRealOverrides] = React.useState<Record<string, RealOverride>>({})
+  const [now, setNow] = React.useState(() => Date.now())
+  const realAlerts = React.useMemo(
+    () => real.alerts.map((alert) => toAlertEvent(alert, now, realOverrides[alert.id])),
+    [real.alerts, now, realOverrides]
+  )
+  const alerts = demo ? demoAlerts : realAlerts
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const [ruleStudio, setRuleStudio] = React.useState<{ open: boolean; tab: RuleStudioTab }>({
     open: false,
@@ -116,6 +171,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   React.useEffect(() => {
+    if (!demo) return
     const consume = (raw: string | null) => {
       const request = parseCastRequest(raw)
       const camera = request ? CAMERAS.find((c) => c.id === request.channelId) : undefined
@@ -136,7 +192,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
     }
     window.addEventListener("storage", onStorage)
     return () => window.removeEventListener("storage", onStorage)
-  }, [pushLiveFeed])
+  }, [pushLiveFeed, demo])
 
   const mutedRef = React.useRef(muted)
   React.useEffect(() => {
@@ -145,12 +201,35 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     const id = window.setInterval(() => {
-      setAlerts((prev) => prev.map((a) => ({ ...a, minutesAgo: a.minutesAgo + 1 })))
+      if (demo) setAlerts((prev) => prev.map((a) => ({ ...a, minutesAgo: a.minutesAgo + 1 })))
+      else setNow(Date.now())
     }, 60_000)
     return () => window.clearInterval(id)
-  }, [])
+  }, [demo])
+
+  const seenRealAlerts = React.useRef<Set<string> | null>(null)
+  React.useEffect(() => {
+    if (demo) return
+    if (seenRealAlerts.current === null) {
+      seenRealAlerts.current = new Set(realAlerts.map((a) => a.id))
+      return
+    }
+    const seen = seenRealAlerts.current
+    for (const event of realAlerts) {
+      if (seen.has(event.id)) continue
+      seen.add(event.id)
+      const title = `${event.cameraLabel ?? event.cameraId} · ${event.type}`
+      if (event.severity === "CRITICAL") {
+        toast.error(title, { description: event.summary })
+        if (!mutedRef.current) playAlarm()
+      } else {
+        toast.warning(title, { description: event.summary })
+      }
+    }
+  }, [realAlerts, demo])
 
   React.useEffect(() => {
+    if (!demo) return
     let emitted = 0
     const id = window.setInterval(() => {
       if (emitted >= NEW_EVENT_TEMPLATES.length) {
@@ -175,7 +254,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       }
     }, 50_000)
     return () => window.clearInterval(id)
-  }, [])
+  }, [demo])
 
   const setLayout = React.useCallback((next: GridLayout) => setLayoutState(next), [])
 
@@ -193,6 +272,20 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
 
   const setAlertStatus = React.useCallback<OpsContextValue["setAlertStatus"]>(
     (id, status, note, assignee) => {
+      if (!demo) {
+        setRealOverrides((prev) => {
+          const current = prev[id]
+          return {
+            ...prev,
+            [id]: {
+              status,
+              note: note?.trim() ? note.trim() : current?.note,
+              assignee: assignee ?? current?.assignee,
+            },
+          }
+        })
+        return
+      }
       setAlerts((prev) =>
         prev.map((a) =>
           a.id === id
@@ -201,7 +294,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
         )
       )
     },
-    []
+    [demo]
   )
 
   const openRuleStudio = React.useCallback((tab: RuleStudioTab = "list") => {
@@ -220,6 +313,17 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
 
   const locateIncident = React.useCallback(
     (request: LocateRequest) => {
+      if (!demo) {
+        const stream = real.streams.find((s) => s.id === request.channelId)
+        if (!stream) {
+          toast.error(`未找到通道 ${request.channelId}`)
+          return
+        }
+        setFocusId(stream.id)
+        setLayoutState((prev) => (prev === "single" ? "single" : "focus"))
+        toast.success(`已定位 ${stream.name}`, { description: request.title })
+        return
+      }
       if (!isChannelId(request.channelId)) {
         toast.error(`未找到通道 ${request.channelId}`)
         return
@@ -230,11 +334,18 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
         description: request.title,
       })
     },
-    [seekChannel]
+    [seekChannel, demo, real.streams]
   )
 
   const startReplay = React.useCallback(
     (momentId: string) => {
+      if (!demo) {
+        const alert = realAlerts.find((a) => a.id === momentId)
+        if (!alert) return
+        setReplay({ momentId: alert.id, cameraId: alert.cameraId, start: alert.time, end: alert.time, title: alert.type })
+        locateIncident({ channelId: alert.cameraId, incidentId: alert.id, title: alert.type })
+        return
+      }
       const moment = SEARCH_MOMENTS.find((m) => m.id === momentId)
       if (!moment) return
       setReplay({
@@ -253,7 +364,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
         description: `${moment.start} - ${moment.end} · ${moment.title}`,
       })
     },
-    [seekChannel]
+    [seekChannel, demo, realAlerts, locateIncident]
   )
 
   const value = React.useMemo<OpsContextValue>(

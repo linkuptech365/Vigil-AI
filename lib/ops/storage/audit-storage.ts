@@ -87,15 +87,29 @@ function isCapaForm(value: unknown): value is CapaFormState {
   return isObject(value) && typeof value.deviationId === "string" && typeof value.rcaCategory === "string"
 }
 
+const EMPTY_SNAPSHOT: AuditSnapshot = { records: [], capa: {} }
+
+let demoSeedEnabled = false
+
+/** 演示开关同步：关闭时审计中心只展示真实归档记录，不再回填内置示例案卷。 */
+export function setAuditDemoMode(enabled: boolean) {
+  if (demoSeedEnabled === enabled) return
+  demoSeedEnabled = enabled
+  cache = null
+  listeners.forEach((listener) => listener())
+}
+
 function loadSnapshot(): AuditSnapshot {
-  const seed = createSeedSnapshot()
+  const seed = demoSeedEnabled ? createSeedSnapshot() : EMPTY_SNAPSHOT
+  const seedIds = new Set(createSeedSnapshot().records.map((record) => record.id))
   const storedRecords = readJson(STORAGE_KEYS.dossiers)
   const storedCapa = readJson(STORAGE_KEYS.capa)
 
-  const records =
+  const parsed =
     Array.isArray(storedRecords) && storedRecords.length > 0 && storedRecords.every(isDeviationRecord)
       ? storedRecords
       : null
+  const records = parsed && !demoSeedEnabled ? parsed.filter((record) => !seedIds.has(record.id)) : parsed
 
   const capa: Record<string, CapaFormState> = {}
   if (isObject(storedCapa)) {
@@ -105,8 +119,10 @@ function loadSnapshot(): AuditSnapshot {
   }
 
   if (!records) {
-    writeRaw(STORAGE_KEYS.dossiers, JSON.stringify(seed.records))
-    writeRaw(STORAGE_KEYS.capa, JSON.stringify(seed.capa))
+    if (demoSeedEnabled) {
+      writeRaw(STORAGE_KEYS.dossiers, JSON.stringify(seed.records))
+      writeRaw(STORAGE_KEYS.capa, JSON.stringify(seed.capa))
+    }
     return seed
   }
 
@@ -152,7 +168,7 @@ export function getAuditSnapshot(): AuditSnapshot {
 
 /** Stable seed used for server rendering and the first hydration pass. */
 export function getServerAuditSnapshot(): AuditSnapshot {
-  return SERVER_SNAPSHOT
+  return demoSeedEnabled ? SERVER_SNAPSHOT : EMPTY_SNAPSHOT
 }
 
 export function subscribeAudit(listener: () => void) {

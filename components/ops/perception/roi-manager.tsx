@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import type { RoiAction, RoiZone } from "@/lib/ops/perception-types"
 import { cn } from "@/lib/utils"
@@ -46,6 +47,7 @@ function LocalRoiNotice({ name }: { name: string }) {
 function LiveRoiManager() {
   const { cameraId, zones, zoneRuntime, updateZone, removeZone, simulateIntrusion, intrusionActive } =
     usePerception()
+  const { enabled: demo } = useDemoMode()
   const [dialog, setDialog] = React.useState<DialogState>(null)
   const seq = React.useRef(0)
 
@@ -68,10 +70,12 @@ function LiveRoiManager() {
       </CardHeader>
       <CardContent className="flex flex-col gap-3 p-4">
         <div className="flex flex-wrap gap-2">
-          <Button variant="destructive" size="sm" onClick={simulateIntrusion} disabled={intrusionActive}>
-            <Zap data-icon="inline-start" />
-            {intrusionActive ? "入侵模拟进行中…" : "模拟目标越界入侵 (Simulate Intrusion)"}
-          </Button>
+          {demo && (
+            <Button variant="destructive" size="sm" onClick={simulateIntrusion} disabled={intrusionActive}>
+              <Zap data-icon="inline-start" />
+              {intrusionActive ? "入侵模拟进行中…" : "模拟目标越界入侵 (Simulate Intrusion)"}
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => openDialog(null)}>
             <Plus data-icon="inline-start" />
             新建围栏

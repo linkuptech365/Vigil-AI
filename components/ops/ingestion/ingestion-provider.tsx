@@ -1,7 +1,11 @@
 "use client"
 
 import * as React from "react"
+import { toast } from "sonner"
 
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
+import { alertFrameUrl, streamSnapshotUrl, useStreams } from "@/components/vigil/streams/use-streams"
+import type { StreamAlert, StreamView } from "@/lib/vigil/streams"
 import {
   INITIAL_STREAMS,
   estimateMemoryMB,
@@ -85,7 +89,51 @@ const MAX_CLIPS = 8
 const round1 = (n: number) => Math.round(n * 10) / 10
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n))
 
-function initialSim(): SimState {
+const emptyHistory = (): BufferSample[] =>
+  Array.from({ length: BUFFER_SECONDS }, () => ({ fps: 0, motion: 0, trigger: false }))
+
+function protocolOf(view: StreamView): StreamSource["protocol"] {
+  const scheme = view.sourceMasked.split(":")[0]?.toLowerCase() ?? ""
+  if (scheme.startsWith("rtsp")) return "RTSP"
+  if (scheme === "rtmp") return "RTMP"
+  return "FILE"
+}
+
+/** 真实通道：仅映射服务端确实掌握的字段，没有的指标保持为 0，不编造帧率/码率。 */
+function toStreamSource(view: StreamView, override?: Partial<StreamSource>): StreamSource {
+  const online = view.status !== "offline"
+  return {
+    id: view.id,
+    name: view.name,
+    protocol: protocolOf(view),
+    url: view.sourceMasked,
+    status: online ? "connected" : "offline",
+    currentFps: 0,
+    motionLevel: 0,
+    resolution: "—",
+    bitrate: 0,
+    latency: 0,
+    samplingMode: "auto",
+    fixedFps: 5,
+    image: online ? streamSnapshotUrl(view.id) : undefined,
+    ...override,
+  }
+}
+
+function toClip(alert: StreamAlert): BufferedClip {
+  const end = timeToSeconds(shanghaiClock(new Date(alert.triggeredAt)))
+  return {
+    clipId: alert.id,
+    channelId: alert.streamId,
+    startTime: secondsToTime(end - BUFFER_SECONDS),
+    endTime: secondsToTime(end),
+    frameCount: alert.frames.length,
+    keyframeThumbnails: alert.frames.map((frame) => alertFrameUrl(alert.id, frame.index)),
+  }
+}
+
+function initialSim(demo: boolean): SimState {
+  if (!demo) return { streams: [], histories: {}, locked: [] }
   return {
     streams: INITIAL_STREAMS,
     histories: Object.fromEntries(
@@ -158,11 +206,29 @@ function stepStream(
 }
 
 export function IngestionProvider({ children }: { children: React.ReactNode }) {
-  const [sim, setSim] = React.useState<SimState>(initialSim)
-  const [clips, setClips] = React.useState<BufferedClip[]>([])
+  const { enabled: demo } = useDemoMode()
+  const real = useStreams()
+  const [demoSim, setSim] = React.useState<SimState>(() => initialSim(demo))
+  const [demoClips, setClips] = React.useState<BufferedClip[]>([])
   const [extraction, setExtraction] = React.useState<ExtractionState | null>(null)
-  const [selectedId, setSelectedId] = React.useState(INITIAL_STREAMS[0].id)
+  const [selectedId, setSelectedId] = React.useState(demo ? INITIAL_STREAMS[0].id : "")
+  const [overrides, setOverrides] = React.useState<Record<string, Partial<StreamSource>>>({})
   const { queue: localVideos } = useVigil()
+
+  const sim = React.useMemo<SimState>(() => {
+    if (demo) return demoSim
+    const streams = real.streams.map((view) => toStreamSource(view, overrides[view.id]))
+    return {
+      streams,
+      histories: Object.fromEntries(streams.map((stream) => [stream.id, emptyHistory()])),
+      locked: [],
+    }
+  }, [demo, demoSim, real.streams, overrides])
+
+  const clips = React.useMemo(
+    () => (demo ? demoClips : real.alerts.filter((alert) => alert.frames.length > 0).slice(0, MAX_CLIPS).map(toClip)),
+    [demo, demoClips, real.alerts],
+  )
 
   const simRef = React.useRef(sim)
   const auxRef = React.useRef<Record<string, ChannelAux>>({})
@@ -174,6 +240,7 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   React.useEffect(() => {
+    if (!demo) return
     const id = window.setInterval(() => {
       const prev = simRef.current
       const histories = { ...prev.histories }
@@ -197,7 +264,7 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
     }, TICK_MS)
 
     return () => window.clearInterval(id)
-  }, [])
+  }, [demo])
 
   React.useEffect(() => {
     const timers = timersRef.current
@@ -205,16 +272,29 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const patchStream = React.useCallback(
-    (id: string, patch: Partial<StreamSource>) =>
+    (id: string, patch: Partial<StreamSource>) => {
+      if (!demo) {
+        setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+        return
+      }
       commit((prev) => ({
         ...prev,
         streams: prev.streams.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-      })),
-    [commit],
+      }))
+    },
+    [commit, demo],
   )
+
+  const realAddStream = real.addStream
+  const realRemoveStream = real.removeStream
+  const realAnalyzeStream = real.analyzeStream
 
   const addStream = React.useCallback(
     (input: NewStreamInput) => {
+      if (!demo) {
+        void realAddStream({ name: input.name, zone: "公共区域", source: input.url })
+        return
+      }
       const nextNumber =
         simRef.current.streams.reduce((max, s) => {
           const n = Number(s.id.replace(/\D/g, ""))
@@ -245,11 +325,15 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
       }))
       setSelectedId(id)
     },
-    [commit],
+    [commit, demo, realAddStream],
   )
 
   const removeStream = React.useCallback(
     (id: string) => {
+      if (!demo) {
+        void realRemoveStream(id)
+        return
+      }
       commit((prev) => {
         const { [id]: _removed, ...histories } = prev.histories
         return {
@@ -260,18 +344,22 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
       })
       delete auxRef.current[id]
     },
-    [commit],
+    [commit, demo, realRemoveStream],
   )
 
   const toggleOffline = React.useCallback(
     (id: string) => {
+      if (!demo) {
+        toast.info("真实通道的连接状态由流媒体引擎决定", { description: "如需下线请在配置中心删除该通道。" })
+        return
+      }
       const stream = simRef.current.streams.find((s) => s.id === id)
       if (!stream) return
       const aux = auxRef.current[id]
       if (aux) aux.drop = 0
       patchStream(id, stream.status === "offline" ? { status: "connected" } : { status: "offline" })
     },
-    [patchStream],
+    [patchStream, demo],
   )
 
   const setSamplingMode = React.useCallback(
@@ -290,6 +378,13 @@ export function IngestionProvider({ children }: { children: React.ReactNode }) {
 
   const triggerExtraction = React.useCallback(
     (channelId: string) => {
+      if (!demo) {
+        const live = sim.streams.find((s) => s.id === channelId)
+        if (!live || live.status === "offline" || extraction) return
+        setExtraction({ channelId, step: 0 })
+        void realAnalyzeStream(channelId).finally(() => setExtraction(null))
+        return
+      }
       const current = simRef.current
       const stream = current.streams.find((s) => s.id === channelId)
       if (!stream || stream.status === "offline" || current.locked.includes(channelId)) return

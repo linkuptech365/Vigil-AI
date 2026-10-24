@@ -39,6 +39,7 @@ import {
   type Vec2,
 } from "./rule-geometry"
 import { GMP_CLEANROOM_RULES } from "@/lib/ops/gmp-cleanroom-rules"
+import { isDemoEnabled } from "@/lib/storage/demo-store"
 import { loadRules, seedRules, writeRules } from "@/lib/storage/rules-store"
 import { extractTags, matchScenario, tagLabel } from "./rule-semantic"
 
@@ -104,11 +105,30 @@ function ruleTags(rule: InspectionRule) {
   return extractTags(`${rule.name} ${rule.prompt ?? rule.logic ?? ""}`)
 }
 
+const EMPTY_METRICS: DeduplicationMetrics = {
+  rawTriggersCount: 0,
+  suppressedCount: 0,
+  incidentCount: 0,
+  correlatedCount: 0,
+}
+
 function seedState(): EngineState {
+  const demo = isDemoEnabled()
   const now = Date.now()
-  const rules: InspectionRule[] = loadRules()
+  const rules: InspectionRule[] = loadRules(demo ? seedRules() : [])
 
   const windows = new Map<string, WindowState>()
+  if (!demo) {
+    return {
+      rules,
+      windows,
+      metrics: { ...EMPTY_METRICS },
+      events: [],
+      pulseSeq: 100,
+      eventSeq: 0,
+      lastIncidentTs: 0,
+    }
+  }
   const seededStart = now - 41_000
   windows.set(windowKey("CAM-02", "RULE-03"), {
     channelId: "CAM-02",
@@ -170,10 +190,24 @@ function mergeMissingSeeds(state: EngineState) {
 function engine(): EngineState {
   if (!globalStore.__vigilRuleEngine) {
     const state = seedState()
-    mergeMissingSeeds(state)
+    if (isDemoEnabled()) mergeMissingSeeds(state)
     globalStore.__vigilRuleEngine = state
   }
   return globalStore.__vigilRuleEngine
+}
+
+/**
+ * 演示开关切换时同步规则库：开启时补入内置示例规则，关闭时移除未被用户自建的内置规则，
+ * 并丢弃预置的冷却窗口、证据链和指标，下次访问时按新开关状态重建。
+ */
+export function applyDemoMode(enabled: boolean) {
+  const builtinIds = new Set(INITIAL_INSPECTION_RULES.map((rule) => rule.id))
+  const current = loadRules()
+  const next = enabled
+    ? [...current, ...seedRules().filter((seed) => !current.some((rule) => rule.id === seed.id))]
+    : current.filter((rule) => !builtinIds.has(rule.id) || rule.custom)
+  writeRules(next)
+  globalStore.__vigilRuleEngine = undefined
 }
 
 function windowKey(channelId: string, ruleId: string) {
@@ -281,7 +315,7 @@ export function deleteRule(ruleId: string): DeleteRuleResult {
 /** 恢复出厂：规则��重置为内置规则，自定义规则与所有改动一并清除。 */
 export function resetRules(): InspectionRule[] {
   const state = engine()
-  commitRules(state, seedRules())
+  commitRules(state, isDemoEnabled() ? seedRules() : [])
   return listRules()
 }
 

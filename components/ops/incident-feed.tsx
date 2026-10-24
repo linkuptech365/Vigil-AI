@@ -36,15 +36,15 @@ export function KeyframeThumb({
     <div className={cn("relative aspect-video overflow-hidden rounded-md bg-black", className)}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
-        alt={`${alert.cameraId} ${alert.type} 关键帧`}
+        src={alert.frameUrls?.[0] ?? (hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE)}
+        alt={`${alert.cameraLabel ?? alert.cameraId} ${alert.type} 关键帧`}
         onError={handleImageError}
         className="absolute inset-0 size-full object-cover"
       />
       {camera?.maskTimestamp && (
         <div className="absolute left-0 top-0 h-[9%] w-[27%] bg-black/80 backdrop-blur-md" />
       )}
-      <OverlayBoxes boxes={[{ ...alert.box, label: undefined }]} />
+      {alert.box.w > 0 && <OverlayBoxes boxes={[{ ...alert.box, label: undefined }]} />}
     </div>
   )
 }
@@ -94,7 +94,7 @@ function EventCard({ alert }: { alert: AlertEvent }) {
               {alert.summary}
             </p>
             <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
-              <span className="text-signal">{alert.cameraId}</span>
+              <span className="text-signal">{alert.cameraLabel ?? alert.cameraId}</span>
               <span>{alert.time}</span>
               <span>{relativeLabel(alert.minutesAgo)}</span>
               <span>{alert.confidence}%</span>

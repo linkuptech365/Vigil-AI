@@ -14,6 +14,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { provisionGmpSuite, queueGmpAutoscan } from "@/lib/ops/gmp-client"
 import { GMP_SUITE_LABEL } from "@/lib/ops/gmp-suite"
 import { shanghaiClock, shanghaiDate } from "@/lib/ops/utils"
+import { useStreams } from "@/components/vigil/streams/use-streams"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { useOps } from "./ops-provider"
 
 function LiveClock() {
@@ -46,6 +48,8 @@ export function OpsHeader() {
   const router = useRouter()
   const { mutate } = useSWRConfig()
   const [loadingGmp, setLoadingGmp] = React.useState(false)
+  const { enabled: demo } = useDemoMode()
+  const { streams, onlineCount } = useStreams()
 
   const loadGmp = React.useCallback(async () => {
     setLoadingGmp(true)
@@ -87,7 +91,9 @@ export function OpsHeader() {
               <span className="absolute inline-flex size-full animate-ping rounded-full bg-success opacity-75" />
               <span className="relative inline-flex size-1.5 rounded-full bg-success" />
             </span>
-            4 Channels Online | 30 FPS Aggregate | Inference Engine Active
+            {streams.length === 0
+              ? "尚未接入视频通道"
+              : `${onlineCount}/${streams.length} 路通道在线`}
           </p>
         </div>
       </div>
@@ -126,27 +132,31 @@ export function OpsHeader() {
           </TooltipTrigger>
           <TooltipContent>{muted ? "告警声音已静音" : "告警声音已开启"}</TooltipContent>
         </Tooltip>
-        <Button
-          type="button"
-          variant="outline"
-          className="hidden xl:inline-flex"
-          onClick={() => void loadGmp()}
-          disabled={loadingGmp}
-        >
-          {loadingGmp ? <Spinner data-icon="inline-start" /> : <FlaskConical data-icon="inline-start" />}
-          {GMP_SUITE_LABEL}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          aria-label={GMP_SUITE_LABEL}
-          className="xl:hidden"
-          onClick={() => void loadGmp()}
-          disabled={loadingGmp}
-        >
-          {loadingGmp ? <Spinner /> : <FlaskConical />}
-        </Button>
+        {demo && (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              className="hidden xl:inline-flex"
+              onClick={() => void loadGmp()}
+              disabled={loadingGmp}
+            >
+              {loadingGmp ? <Spinner data-icon="inline-start" /> : <FlaskConical data-icon="inline-start" />}
+              {GMP_SUITE_LABEL}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              aria-label={GMP_SUITE_LABEL}
+              className="xl:hidden"
+              onClick={() => void loadGmp()}
+              disabled={loadingGmp}
+            >
+              {loadingGmp ? <Spinner /> : <FlaskConical />}
+            </Button>
+          </>
+        )}
         <Button
           type="button"
           variant="outline"

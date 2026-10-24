@@ -92,11 +92,11 @@ function backupBroken(file: string) {
  * 读取规则库。文件不存在时写入内置规则作为种子；文件存在时只读取，绝不覆盖用户数据。
  * 文件损坏时先备份再重建，保证服务能起来且原始内容仍可人工恢复。
  */
-export function loadRules(): InspectionRule[] {
+export function loadRules(firstRunSeed: InspectionRule[] = []): InspectionRule[] {
   const file = rulesFilePath()
 
   if (!fs.existsSync(file)) {
-    const seed = seedRules()
+    const seed = firstRunSeed.map(cloneRule)
     try {
       writeRules(seed)
     } catch (error) {
@@ -118,7 +118,7 @@ export function loadRules(): InspectionRule[] {
   } catch (error) {
     console.error("[rules-store] 读取规则文件失败：", error)
     backupBroken(file)
-    const seed = seedRules()
+    const seed = firstRunSeed.map(cloneRule)
     try {
       writeRules(seed)
     } catch (writeError) {

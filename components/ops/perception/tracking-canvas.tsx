@@ -6,6 +6,9 @@ import { ArrowRight, ShieldAlert } from "lucide-react"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
+import { LiveFeed, useVisible } from "@/components/vigil/streams/live-wall"
+import { useStreams } from "@/components/vigil/streams/use-streams"
 import { CAMERAS } from "@/lib/ops/data"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
 import { allowedAngle, midpoint } from "@/lib/ops/perception-geometry"
@@ -284,8 +287,65 @@ function BoxLayer({ entities, showLabels }: { entities: TrackedEntity[]; showLab
 
 export function TrackingCanvas() {
   const { selectedLocalVideo } = usePerception()
+  const { enabled: demo } = useDemoMode()
   if (selectedLocalVideo) return <LocalScreeningCanvas video={selectedLocalVideo} />
-  return <LiveTrackingCanvas />
+  return demo ? <LiveTrackingCanvas /> : <RealChannelCanvas />
+}
+
+function RealChannelCanvas() {
+  const { cameraId, zones, zoneRuntime } = usePerception()
+  const { streams } = useStreams()
+  const [ref, visible] = useVisible<HTMLDivElement>()
+  const [toggles, setToggles] = React.useState<Toggles>({ trails: true, labels: true, roi: true })
+  const stream = streams.find((s) => s.id === cameraId)
+  const camZones = zones.filter((z) => z.cameraId === cameraId)
+
+  const onToggle = (key: keyof Toggles, value: boolean) =>
+    setToggles((prev) => ({ ...prev, [key]: value }))
+
+  return (
+    <Card className="gap-0 overflow-hidden py-0">
+      <CardHeader className="gap-1 border-b px-4 py-3">
+        <CardTitle className="text-sm">实时画面与电子围栏 (Live Channel)</CardTitle>
+        <CardDescription className="text-xs">
+          显示所选真实摄像头通道的实时画面；围栏在此通道上叠加绘制。
+        </CardDescription>
+      </CardHeader>
+
+      <CanvasControls
+        idPrefix="inline"
+        toggles={toggles}
+        onToggle={onToggle}
+        className="m-3 border-border bg-secondary text-foreground md:hidden"
+      />
+
+      <div ref={ref} className="relative isolate aspect-[1408/768] w-full overflow-hidden bg-black">
+        {stream ? (
+          <>
+            <LiveFeed stream={stream} live={false} active={visible} />
+            {toggles.roi && <RoiLayer zones={camZones} runtime={zoneRuntime} />}
+            <div className="absolute left-0 top-0 flex flex-col gap-1 p-2.5">
+              <span className="rounded bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">{stream.name}</span>
+              <span className="w-fit rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white/80">
+                {stream.status === "online" ? "在线" : "离线"} · ROI {camZones.filter((z) => z.enabled).length}
+              </span>
+            </div>
+            <CanvasControls
+              idPrefix="overlay"
+              toggles={toggles}
+              onToggle={onToggle}
+              className="absolute right-3 top-3 w-64 max-md:hidden"
+            />
+          </>
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 p-6 text-center text-white">
+            <p className="text-sm font-medium">暂无可用的真实视频通道</p>
+            <p className="text-xs text-white/70">请先在配置页接入摄像头，或在检测队列导入本地视频。</p>
+          </div>
+        )}
+      </div>
+    </Card>
+  )
 }
 
 function LiveTrackingCanvas() {

@@ -61,15 +61,19 @@ function ClipPlayer({ alert }: { alert: AlertEvent }) {
 
   const offset = t - CLIP_SPAN
   const absolute = secondsToTime(timeToSeconds(alert.time) + offset)
-  const boxVisible = offset > -6
+  const boxVisible = offset > -6 && alert.box.w > 0
+  const frames = alert.frameUrls ?? []
+  const frameSrc = frames.length
+    ? frames[Math.min(frames.length - 1, Math.floor((t / (CLIP_SPAN * 2)) * frames.length))]
+    : undefined
 
   return (
     <div className="flex flex-col gap-2">
       <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
-          alt={`${alert.cameraId} 事件回放画面`}
+          src={frameSrc ?? (hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE)}
+          alt={`${alert.cameraLabel ?? alert.cameraId} 事件回放画面`}
           className="absolute inset-0 size-full object-cover"
           onError={handleImageError}
         />
@@ -79,7 +83,7 @@ function ClipPlayer({ alert }: { alert: AlertEvent }) {
         <div className="cctv-scanlines pointer-events-none absolute inset-0" aria-hidden="true" />
         {boxVisible && <OverlayBoxes boxes={[alert.box]} />}
         <div className="absolute left-2 top-2 flex items-center gap-2 font-mono text-xs">
-          <span className="rounded bg-black/70 px-1.5 py-0.5 text-signal">{alert.cameraId}</span>
+          <span className="rounded bg-black/70 px-1.5 py-0.5 text-signal">{alert.cameraLabel ?? alert.cameraId}</span>
           <span className="rounded bg-black/70 px-1.5 py-0.5 text-white">{absolute}</span>
         </div>
         <span className="absolute right-2 top-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
@@ -281,7 +285,7 @@ export function AlertDrawer() {
                   {alert.severity}
                 </Badge>
                 <SheetTitle className="text-base">
-                  {alert.type} · {alert.cameraId}
+                  {alert.type} · {alert.cameraLabel ?? alert.cameraId}
                 </SheetTitle>
               </div>
               <SheetDescription className="text-sm leading-relaxed">{alert.summary}</SheetDescription>

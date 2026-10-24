@@ -1,12 +1,15 @@
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
+import { connection } from "next/server"
 
 import "./globals.css"
 import { GlobalErrorBarrier } from "@/components/ops/global-error-barrier"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/sonner"
+import { DemoModeProvider } from "@/components/vigil/demo-mode-provider"
 import { VigilProvider } from "@/components/vigil/vigil-provider"
+import { isDemoEnabled } from "@/lib/storage/demo-store"
 import { cn } from "@/lib/utils"
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" })
@@ -27,11 +30,14 @@ export const viewport: Viewport = {
   colorScheme: "dark",
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  await connection()
+  const demoEnabled = isDemoEnabled()
+
   return (
     <html
       lang="zh-CN"
@@ -47,7 +53,9 @@ export default function RootLayout({
         <GlobalErrorBarrier />
         <ThemeProvider forcedTheme="dark" defaultTheme="dark">
           <TooltipProvider>
-            <VigilProvider>{children}</VigilProvider>
+            <DemoModeProvider initial={demoEnabled}>
+              <VigilProvider>{children}</VigilProvider>
+            </DemoModeProvider>
           </TooltipProvider>
           <Toaster position="bottom-right" />
         </ThemeProvider>

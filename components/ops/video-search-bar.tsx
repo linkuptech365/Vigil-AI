@@ -14,10 +14,40 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { CAMERAS, SEARCH_MOMENTS, SEARCH_PRESETS, SEARCH_PRESET_QUERY } from "@/lib/ops/data"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
-import type { SearchMoment } from "@/lib/ops/types"
+import type { AlertEvent, SearchMoment } from "@/lib/ops/types"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { cn } from "@/lib/utils"
 import { useOps } from "./ops-provider"
 import { OverlayBoxes } from "./overlay-boxes"
+
+const REAL_BOX: SearchMoment["box"] = { x: 0, y: 0, w: 0, h: 0, tone: "warn" }
+
+function matchRealAlerts(query: string, alerts: AlertEvent[]): SearchMoment[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return []
+  const tokens = q.split(/[\s,，、;；]+/).filter(Boolean)
+  const grams = Array.from(new Set(tokens.flatMap((t) => (t.length <= 2 ? [t] : Array.from({ length: t.length - 1 }, (_, i) => t.slice(i, i + 2))))))
+  return alerts
+    .map((alert) => {
+      const haystack = `${alert.type} ${alert.summary} ${alert.cameraLabel ?? ""} ${alert.steps.map((s) => s.detail).join(" ")}`.toLowerCase()
+      return { alert, hits: grams.filter((g) => haystack.includes(g)).length }
+    })
+    .filter((entry) => entry.hits > 0)
+    .sort((a, b) => b.hits - a.hits || b.alert.confidence - a.alert.confidence)
+    .map(({ alert }) => ({
+      id: alert.id,
+      cameraId: alert.cameraId,
+      cameraLabel: alert.cameraLabel,
+      start: alert.time,
+      end: alert.time,
+      score: alert.confidence,
+      title: alert.type,
+      rationale: alert.summary,
+      keywords: [],
+      box: REAL_BOX,
+      imageUrl: alert.frameUrls?.[0],
+    }))
+}
 
 function matchMoments(query: string): SearchMoment[] {
   const q = query.trim()
@@ -48,18 +78,18 @@ function MatchCard({ moment }: { moment: SearchMoment }) {
       <div className="relative aspect-video overflow-hidden bg-black">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE}
-          alt={`${moment.cameraId} ${moment.title} 匹配画面`}
+          src={moment.imageUrl ?? (hasMediaSrc(camera?.image) ? camera.image : PLACEHOLDER_IMAGE)}
+          alt={`${moment.cameraLabel ?? moment.cameraId} ${moment.title} 匹配画面`}
           className="absolute inset-0 size-full object-cover"
           onError={handleImageError}
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
-        <OverlayBoxes boxes={[moment.box]} labelSize="xs" />
+        {moment.box.w > 0 && <OverlayBoxes boxes={[moment.box]} labelSize="xs" />}
         <Badge className="absolute left-2 top-2 bg-signal font-mono text-black">
           {moment.score}% 语义匹配
         </Badge>
         <span className="absolute bottom-2 left-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
-          {moment.cameraId}
+          {moment.cameraLabel ?? moment.cameraId}
         </span>
         <span className="absolute right-2 top-2 flex size-8 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
           <PlayCircle className="size-5" aria-hidden="true" />
@@ -100,7 +130,12 @@ export function VideoSearchBar() {
     timer.current = window.setTimeout(() => setLoading(false), 650)
   }
 
-  const results = React.useMemo(() => (searched ? matchMoments(draft) : []), [draft, searched])
+  const { enabled: demo } = useDemoMode()
+  const { alerts } = useOps()
+  const results = React.useMemo(
+    () => (searched ? (demo ? matchMoments(draft) : matchRealAlerts(draft, alerts)) : []),
+    [draft, searched, demo, alerts]
+  )
 
   const reset = () => {
     setDraft("")
@@ -159,7 +194,7 @@ export function VideoSearchBar() {
           </InputGroupAddon>
         </InputGroup>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className={cn("flex flex-wrap items-center gap-2", !demo && "hidden")}>
           <span className="text-xs text-muted-foreground">快捷检索：</span>
           {SEARCH_PRESETS.map((preset) => (
             <Button
@@ -204,7 +239,7 @@ export function VideoSearchBar() {
 
           {!loading && results.length === 0 && (
             <p className="rounded-md border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
-              未找到匹配片段，试试 “打架冲突”、“安全帽” 或 “东门车辆违停”。
+              {demo ? "未找到匹配片段，试试 “打架冲突”、“安全帽” 或 “东门车辆违停”。" : "没有匹配的真实告警记录。检索范围为 AI 已研判并留存的告警事件。"}
             </p>
           )}
 

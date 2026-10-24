@@ -59,6 +59,10 @@ export interface AlertEvent {
   steps: ReasoningStep[]
   note?: string
   assignee?: string
+  /** 真实告警：通道名称，用于界面展示（cameraId 为通道 ID，用于定位） */
+  cameraLabel?: string
+  /** 真实告警：取证关键帧 URL，按时间顺序排列 */
+  frameUrls?: string[]
 }
 
 export interface SearchMoment {
@@ -71,6 +75,9 @@ export interface SearchMoment {
   rationale: string
   keywords: string[]
   box: OverlayBox
+  /** 真实检索结果：关键帧 URL 与通道名称 */
+  imageUrl?: string
+  cameraLabel?: string
 }
 
 export interface RuleActions {

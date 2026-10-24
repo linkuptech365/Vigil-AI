@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 
+import { isDemoEnabled } from "@/lib/storage/demo-store"
 import { dataDir } from "@/lib/storage/rules-store"
 import {
   DEMO_STREAM_ID,
@@ -83,23 +84,23 @@ function seedStreams(): StreamMeta[] {
 
 export function loadStreams(): StreamMeta[] {
   const file = streamsFilePath()
+  const demo = isDemoEnabled()
+  let list: StreamMeta[]
   if (!fs.existsSync(file)) {
-    const seed = seedStreams()
-    try {
-      writeStreams(seed)
-    } catch (error) {
-      console.error("[streams-store] 无法写入种子通道：", error)
-    }
-    return seed
+    list = []
+  } else {
+    const parsed = readJson(file) as { streams?: unknown } | null
+    const raw = Array.isArray(parsed?.streams) ? parsed.streams : []
+    list = raw.filter(isStreamMeta).map((item) => ({
+      ...item,
+      zone: item.zone || STREAM_ZONES[5],
+      builtin: item.builtin === true,
+      autoPatrol: item.autoPatrol === true,
+    }))
   }
-  const parsed = readJson(file) as { streams?: unknown } | null
-  const list = Array.isArray(parsed?.streams) ? parsed.streams : []
-  return list.filter(isStreamMeta).map((item) => ({
-    ...item,
-    zone: item.zone || STREAM_ZONES[5],
-    builtin: item.builtin === true,
-    autoPatrol: item.autoPatrol === true,
-  }))
+  if (!demo) return list.filter((item) => !item.builtin)
+  if (!list.some((item) => item.builtin)) return [...seedStreams(), ...list]
+  return list
 }
 
 export function writeStreams(streams: StreamMeta[]) {
