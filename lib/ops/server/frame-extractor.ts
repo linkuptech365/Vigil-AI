@@ -26,7 +26,7 @@ export class FrameExtractionError extends Error {}
 
 let cachedFfmpegPath: string | undefined
 
-function resolveFfmpegPath(): string {
+export function resolveFfmpegPath(): string {
   if (cachedFfmpegPath) return cachedFfmpegPath
   const fromEnv = process.env.FFMPEG_PATH?.trim()
   if (fromEnv) {

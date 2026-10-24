@@ -8,11 +8,18 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { normalizeSeverity } from "@/lib/vigil/rules"
 import { EvidenceFrame, TimestampBadge } from "../evidence-frame"
 import { SeverityBadge } from "../status-badges"
+import { useStreams } from "../streams/use-streams"
 import { useVigil } from "../vigil-provider"
+import { StreamAlertsSection } from "./stream-alerts-section"
 
 export function AlertsTab() {
   const { queue, setSelectedId, setActiveTab } = useVigil()
+  const { alerts: streamAlerts } = useStreams()
   const alerts = queue.filter((v) => v.status === "alert" && v.ruleId)
+
+  if (alerts.length === 0 && streamAlerts.length > 0) {
+    return <StreamAlertsSection alerts={streamAlerts} />
+  }
 
   if (alerts.length === 0) {
     return (
@@ -38,8 +45,9 @@ export function AlertsTab() {
 
   return (
     <div className="flex flex-col gap-4">
+      <StreamAlertsSection alerts={streamAlerts} />
       <p className="text-sm text-muted-foreground">
-        共 <span className="font-mono text-destructive">{alerts.length}</span> 起预警，其中严重{" "}
+        离线录像共 <span className="font-mono text-destructive">{alerts.length}</span> 起预警，其中严重{" "}
         <span className="font-mono text-destructive">{critical}</span> 起。
       </p>
       <ul className="grid gap-4 lg:grid-cols-2">

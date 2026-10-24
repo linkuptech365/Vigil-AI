@@ -62,7 +62,7 @@ import {
   type VideoChunk,
 } from "@/lib/client/frame-capture"
 
-export type TabId = "config" | "queue" | "alerts"
+export type TabId = "config" | "live" | "queue" | "alerts"
 
 const STORAGE_KEY = "vigil-ai:settings"
 const QUEUE_STORAGE_KEY = "vigil_queue_state"

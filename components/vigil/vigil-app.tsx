@@ -1,6 +1,6 @@
 "use client"
 
-import { ListVideo, Settings2, Siren } from "lucide-react"
+import { ListVideo, Settings2, Siren, Video } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -9,12 +9,15 @@ import { AppHeader } from "./app-header"
 import { ConfigTab } from "./config/config-tab"
 import { FrameTestDialog } from "./frame-test-dialog"
 import { QueueTab } from "./queue/queue-tab"
+import { LiveWall } from "./streams/live-wall"
+import { useStreams } from "./streams/use-streams"
 import { VideoDetailDialog } from "./video-detail-dialog"
 import { type TabId, useVigil } from "./vigil-provider"
 
 function Shell() {
   const { activeTab, setActiveTab, queue } = useVigil()
-  const alertCount = queue.filter((v) => v.status === "alert").length
+  const { onlineCount, alerts: streamAlerts } = useStreams()
+  const alertCount = queue.filter((v) => v.status === "alert").length + streamAlerts.length
 
   return (
     <div className="mx-auto flex min-h-svh w-full max-w-7xl flex-col px-4 pb-12 sm:px-6">
@@ -28,6 +31,15 @@ function Shell() {
           <TabsTrigger value="config" className="flex-none px-4">
             <Settings2 />
             配置
+          </TabsTrigger>
+          <TabsTrigger value="live" className="flex-none px-4">
+            <Video />
+            实时监控
+            {onlineCount > 0 && (
+              <Badge variant="secondary" className="font-mono">
+                {onlineCount}
+              </Badge>
+            )}
           </TabsTrigger>
           <TabsTrigger value="queue" className="flex-none px-4">
             <ListVideo />
@@ -48,6 +60,9 @@ function Shell() {
         </TabsList>
         <TabsContent value="config" forceMount className="data-[state=inactive]:hidden">
           <ConfigTab />
+        </TabsContent>
+        <TabsContent value="live" forceMount className="data-[state=inactive]:hidden">
+          <LiveWall />
         </TabsContent>
         <TabsContent value="queue" forceMount className="data-[state=inactive]:hidden">
           <QueueTab />

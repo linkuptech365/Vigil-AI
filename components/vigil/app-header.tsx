@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { shortFolder } from "@/lib/vigil/data"
+import { useStreams } from "./streams/use-streams"
 import { useVigil } from "./vigil-provider"
 
 type DotTone = "ok" | "error" | "idle"
@@ -31,8 +32,11 @@ function StatusDot({ tone }: { tone: DotTone }) {
 
 export function AppHeader() {
   const { ping, settings } = useVigil()
+  const { engine, streams, onlineCount } = useStreams()
   const tone: DotTone =
     ping.state === "ok" ? "ok" : ping.state === "error" ? "error" : "idle"
+  const engineTone: DotTone =
+    engine?.engineStatus === "running" ? "ok" : engine?.engineStatus === "degraded" ? "error" : "idle"
 
   return (
     <header className="flex flex-col gap-4 py-5 lg:flex-row lg:items-center lg:justify-between">
@@ -80,6 +84,24 @@ export function AppHeader() {
           {ping.state === "error" && "API: 连通失败"}
           {ping.state === "testing" && "API: 测通中..."}
           {ping.state === "idle" && "API: 未连接"}
+        </Badge>
+        <Badge
+          variant="outline"
+          className={cn(
+            "h-7 gap-2 px-3 font-mono text-xs",
+            engineTone === "ok" && "border-success/40 bg-success/10 text-success",
+            engineTone === "error" && "border-destructive/40 bg-destructive/10 text-destructive",
+            engineTone === "idle" && "border-border bg-secondary text-muted-foreground"
+          )}
+          role="status"
+          aria-live="polite"
+          title={engine?.message}
+        >
+          <StatusDot tone={engineTone} />
+          {!engine && "流媒体引擎: 检测中"}
+          {engine?.engineStatus === "running" && `流媒体引擎: 运行中 · ${onlineCount}/${streams.length} 路在线`}
+          {engine?.engineStatus === "starting" && "流媒体引擎: 启动中..."}
+          {engine?.engineStatus === "degraded" && "流媒体引擎: 未就绪"}
         </Badge>
         <Badge
           variant="outline"

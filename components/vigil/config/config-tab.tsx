@@ -3,6 +3,7 @@ import { SamplingCard } from "./sampling-card"
 import { RulesCard } from "./rules-card"
 import { SensitivityCard } from "./sensitivity-card"
 import { SourceCard } from "./source-card"
+import { StreamsCard } from "./streams-card"
 
 export function ConfigTab() {
   return (
@@ -13,6 +14,7 @@ export function ConfigTab() {
         <SensitivityCard />
       </div>
       <div className="flex flex-col gap-6 lg:col-span-2">
+        <StreamsCard />
         <SourceCard />
         <RulesCard />
       </div>
