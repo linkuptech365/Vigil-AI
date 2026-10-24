@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils"
 import { LocalScreeningCanvas } from "./local-screening-canvas"
 import { PerceptionSourceSelect } from "./perception-source-select"
 import { usePerception, useTracking } from "./perception-provider"
+import { RoiDrawingLayer } from "./roi-drawing-layer"
 
 type Tone = "success" | "primary" | "warning" | "destructive"
 
@@ -293,12 +294,13 @@ export function TrackingCanvas() {
 }
 
 function RealChannelCanvas() {
-  const { cameraId, zones, zoneRuntime } = usePerception()
+  const { cameraId, zones, zoneRuntime, drawing } = usePerception()
   const { streams } = useStreams()
   const [ref, visible] = useVisible<HTMLDivElement>()
   const [toggles, setToggles] = React.useState<Toggles>({ trails: true, labels: true, roi: true })
   const stream = streams.find((s) => s.id === cameraId)
   const camZones = zones.filter((z) => z.cameraId === cameraId)
+  const shownZones = drawing?.zoneId ? camZones.filter((z) => z.id !== drawing.zoneId) : camZones
 
   const onToggle = (key: keyof Toggles, value: boolean) =>
     setToggles((prev) => ({ ...prev, [key]: value }))
@@ -308,7 +310,7 @@ function RealChannelCanvas() {
       <CardHeader className="gap-1 border-b px-4 py-3">
         <CardTitle className="text-sm">实时画面与电子围栏 (Live Channel)</CardTitle>
         <CardDescription className="text-xs">
-          显示所选真实摄像头通道的实时画面；围栏在此通道上叠加绘制。
+          显示所选真实摄像头通道的实时画面；点击“新建围栏”后可直接在画面上绘制，也可拖动顶点调整位置。
         </CardDescription>
       </CardHeader>
 
@@ -323,8 +325,9 @@ function RealChannelCanvas() {
         {stream ? (
           <>
             <LiveFeed stream={stream} live={false} active={visible} />
-            {toggles.roi && <RoiLayer zones={camZones} runtime={zoneRuntime} />}
-            <div className="absolute left-0 top-0 flex flex-col gap-1 p-2.5">
+            {(toggles.roi || drawing) && <RoiLayer zones={shownZones} runtime={zoneRuntime} />}
+            <RoiDrawingLayer />
+            <div className="pointer-events-none absolute left-0 top-0 flex flex-col gap-1 p-2.5">
               <span className="rounded bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">{stream.name}</span>
               <span className="w-fit rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white/80">
                 {stream.status === "online" ? "在线" : "离线"} · ROI {camZones.filter((z) => z.enabled).length}

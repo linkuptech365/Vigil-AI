@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { toast } from "sonner"
+import useSWR from "swr"
 
 import { CAMERAS } from "@/lib/ops/data"
 import {
@@ -60,6 +61,20 @@ export interface NewZoneInput {
   action: RoiAction
 }
 
+/** 在画面上绘制 / 拖拽围栏几何的进行中状态；zoneId 为空表示新建。 */
+export interface DrawingState {
+  zoneId: string | null
+  input: NewZoneInput | null
+  type: RoiShape
+  points: Point[]
+}
+
+const fetchZones = async (url: string): Promise<{ zones: RoiZone[] }> => {
+  const response = await fetch(url, { cache: "no-store" })
+  if (!response.ok) throw new Error("围栏加载失败")
+  return response.json()
+}
+
 interface TrackingContextValue {
   entities: Record<string, TrackedEntity[]>
 }
@@ -73,8 +88,14 @@ interface PerceptionContextValue {
   zones: RoiZone[]
   zoneRuntime: Record<string, ZoneRuntime>
   updateZone: (id: string, patch: Partial<RoiZone>) => void
-  addZone: (input: NewZoneInput) => void
+  addZone: (input: NewZoneInput, coordinates?: Point[]) => void
   removeZone: (id: string) => void
+  drawing: DrawingState | null
+  startDrawing: (input: NewZoneInput) => void
+  startEditShape: (zoneId: string) => void
+  setDrawingPoints: (points: Point[]) => void
+  commitDrawing: () => void
+  cancelDrawing: () => void
   clips: EscalationClip[]
   metrics: PerceptionMetrics
   series: SeriesPoint[]
@@ -203,9 +224,45 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
   const clipCounterRef = React.useRef(409)
   const zoneCounterRef = React.useRef(0)
 
+  const [drawing, setDrawing] = React.useState<DrawingState | null>(null)
+  const zonesLoadedRef = React.useRef(false)
+  const { data: remoteZones } = useSWR(demo ? null : "/api/v1/roi-zones", fetchZones, {
+    revalidateOnFocus: false,
+  })
+
   React.useEffect(() => {
     zonesRef.current = zones
   }, [zones])
+
+  React.useEffect(() => {
+    if (demo || !remoteZones || zonesLoadedRef.current) return
+    zonesLoadedRef.current = true
+    zonesRef.current = remoteZones.zones
+    setZones(remoteZones.zones)
+  }, [demo, remoteZones])
+
+  const commitZones = React.useCallback(
+    (next: RoiZone[]) => {
+      zonesRef.current = next
+      setZones(next)
+      if (demo) return
+      void fetch("/api/v1/roi-zones", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ zones: next }),
+      })
+        .then(async (response) => {
+          const body = (await response.json().catch(() => null)) as { synced?: boolean; syncMessage?: string; error?: { message?: string } } | null
+          if (!response.ok) {
+            toast.error("围栏保存失败", { description: body?.error?.message ?? "请稍后重试" })
+          } else if (body && body.synced === false) {
+            toast.warning("围栏已保存，视觉服务暂未同步", { description: body.syncMessage })
+          }
+        })
+        .catch(() => toast.error("围栏保存失败", { description: "网络异常，请稍后重试" }))
+    },
+    [demo]
+  )
 
   const pushClip = React.useCallback(
     (clipCameraId: string, reason: ClipReason, confidence: number, forced?: "send" | "block") => {
@@ -440,31 +497,36 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
     return () => window.clearInterval(id)
   }, [pushClip, demo])
 
-  const updateZone = React.useCallback((id: string, patch: Partial<RoiZone>) => {
-    setZones((prev) => prev.map((z) => (z.id === id ? { ...z, ...patch } : z)))
-  }, [])
+  const updateZone = React.useCallback(
+    (id: string, patch: Partial<RoiZone>) => {
+      commitZones(zonesRef.current.map((z) => (z.id === id ? { ...z, ...patch } : z)))
+    },
+    [commitZones]
+  )
 
   const addZone = React.useCallback(
-    (input: NewZoneInput) => {
+    (input: NewZoneInput, customCoordinates?: Point[]) => {
       zoneCounterRef.current += 1
-      const n = zoneCounterRef.current
-      const offset = (n % 3) * 4
+      const n = demo ? zoneCounterRef.current : Date.now()
+      const offset = (zoneCounterRef.current % 3) * 4
       const isPolygon = input.type === "polygon"
       const zone: RoiZone = {
         id: `Z-C${n}`,
         name: input.name,
         type: input.type,
-        coordinates: isPolygon
-          ? [
-              [36 + offset, 36 + offset],
-              [60 + offset, 34 + offset],
-              [62 + offset, 58 + offset],
-              [38 + offset, 60 + offset],
-            ]
-          : [
-              [30 + offset, 52 + offset],
-              [70 + offset, 52 + offset],
-            ],
+        coordinates:
+          customCoordinates ??
+          (isPolygon
+            ? [
+                [36 + offset, 36 + offset],
+                [60 + offset, 34 + offset],
+                [62 + offset, 58 + offset],
+                [38 + offset, 60 + offset],
+              ]
+            : [
+                [30 + offset, 52 + offset],
+                [70 + offset, 52 + offset],
+              ]),
         color: input.severity === "critical" ? "var(--destructive)" : "var(--warning)",
         severity: input.severity,
         enabled: true,
@@ -475,18 +537,52 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
         directional: false,
         custom: true,
       }
-      zonesRef.current = [...zonesRef.current, zone]
-      setZones((prev) => [...prev, zone])
+      commitZones([...zonesRef.current, zone])
       toast.success("电子围栏已创建并启用", { description: `${cameraId} · ${input.name}` })
     },
-    [cameraId]
+    [cameraId, commitZones, demo]
   )
 
-  const removeZone = React.useCallback((id: string) => {
-    zonesRef.current = zonesRef.current.filter((z) => z.id !== id)
-    delete engineRef.current[id]
-    setZones((prev) => prev.filter((z) => z.id !== id))
+  const removeZone = React.useCallback(
+    (id: string) => {
+      delete engineRef.current[id]
+      commitZones(zonesRef.current.filter((z) => z.id !== id))
+    },
+    [commitZones]
+  )
+
+  const startDrawing = React.useCallback((input: NewZoneInput) => {
+    setDrawing({ zoneId: null, input, type: input.type, points: [] })
   }, [])
+
+  const startEditShape = React.useCallback((zoneId: string) => {
+    const zone = zonesRef.current.find((z) => z.id === zoneId)
+    if (!zone) return
+    setDrawing({ zoneId, input: null, type: zone.type, points: zone.coordinates.map((p) => [p[0], p[1]] as Point) })
+  }, [])
+
+  const setDrawingPoints = React.useCallback((points: Point[]) => {
+    setDrawing((prev) => (prev ? { ...prev, points } : prev))
+  }, [])
+
+  const cancelDrawing = React.useCallback(() => setDrawing(null), [])
+
+  const commitDrawing = React.useCallback(() => {
+    if (!drawing) return
+    const need = drawing.type === "tripwire" ? 2 : 3
+    if (drawing.points.length < need) return
+    if (drawing.zoneId) {
+      updateZone(drawing.zoneId, { coordinates: drawing.points })
+      toast.success("围栏位置已更新")
+    } else if (drawing.input) {
+      addZone(drawing.input, drawing.points)
+    }
+    setDrawing(null)
+  }, [addZone, drawing, updateZone])
+
+  React.useEffect(() => {
+    setDrawing(null)
+  }, [cameraId])
 
   const simulateIntrusion = React.useCallback(() => {
     if (!demo) return
@@ -532,6 +628,12 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
       updateZone,
       addZone,
       removeZone,
+      drawing,
+      startDrawing,
+      startEditShape,
+      setDrawingPoints,
+      commitDrawing,
+      cancelDrawing,
       clips,
       metrics,
       series,
@@ -549,6 +651,12 @@ export function PerceptionProvider({ children }: { children: React.ReactNode }) 
       updateZone,
       addZone,
       removeZone,
+      drawing,
+      startDrawing,
+      startEditShape,
+      setDrawingPoints,
+      commitDrawing,
+      cancelDrawing,
       clips,
       metrics,
       series,

@@ -16,6 +16,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import type { RoiAction, RoiSeverity, RoiShape, RoiZone } from "@/lib/ops/perception-types"
 import { usePerception } from "./perception-provider"
 
@@ -26,7 +27,8 @@ interface RoiDialogProps {
 }
 
 export function RoiDialog({ open, onOpenChange, zone }: RoiDialogProps) {
-  const { cameraId, zones, addZone, updateZone } = usePerception()
+  const { cameraId, zones, addZone, updateZone, startDrawing } = usePerception()
+  const { enabled: demo } = useDemoMode()
   const [name, setName] = React.useState(zone?.name ?? "")
   const [type, setType] = React.useState<RoiShape>(zone?.type ?? "polygon")
   const [severity, setSeverity] = React.useState<RoiSeverity>(zone?.severity ?? "critical")
@@ -45,7 +47,9 @@ export function RoiDialog({ open, onOpenChange, zone }: RoiDialogProps) {
         color: severity === "critical" ? "var(--destructive)" : "var(--warning)",
       })
     } else {
-      addZone({ name: finalName, type, severity, sensitivity, action })
+      const input = { name: finalName, type, severity, sensitivity, action }
+      if (demo) addZone(input)
+      else startDrawing(input)
     }
     onOpenChange(false)
   }
@@ -56,7 +60,11 @@ export function RoiDialog({ open, onOpenChange, zone }: RoiDialogProps) {
         <DialogHeader>
           <DialogTitle>{editing ? "编辑电子围栏" : "新建电子围栏"}</DialogTitle>
           <DialogDescription>
-            {editing ? "调整围栏的等级、灵敏度与触发动作。" : `围栏将在 ${cameraId} 画面中央生成，可随后微调参数。`}
+            {editing
+              ? "调整围栏的等级、灵敏度与触发动作；位置请用列表里的“调整位置”在画面上拖动。"
+              : demo
+                ? `围栏将在 ${cameraId} 画面中央生成，可随后微调参数。`
+                : `确认参数后，在 ${cameraId} 的实时画面上点击绘制围栏位置。`}
           </DialogDescription>
         </DialogHeader>
 
@@ -149,7 +157,7 @@ export function RoiDialog({ open, onOpenChange, zone }: RoiDialogProps) {
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={submit}>{editing ? "保存修改" : "创建并启用"}</Button>
+          <Button onClick={submit}>{editing ? "保存修改" : demo ? "创建并启用" : "下一步：画面上绘制"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

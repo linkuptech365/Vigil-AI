@@ -1,5 +1,6 @@
 "use client"
 
+import { VisionCard } from "@/components/vigil/config/vision-card"
 import { EscalationQueue } from "./escalation-queue"
 import { FilterMetrics } from "./filter-metrics"
 import { RoiManager } from "./roi-manager"
@@ -19,6 +20,17 @@ export function PerceptionTab() {
         <TrackingCanvas />
         <RoiManager />
       </div>
+      <section aria-labelledby="tier1-rules-title" className="flex flex-col gap-2">
+        <div className="flex flex-col gap-0.5">
+          <h3 id="tier1-rules-title" className="text-sm font-semibold">
+            一级初筛规则录入
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            用中文描述稽查要求并编译为检测词表，或手动添加词条；保存后立即热更新到视觉服务，对所有实时通道生效。
+          </p>
+        </div>
+        <VisionCard />
+      </section>
       <EscalationQueue />
     </div>
   )

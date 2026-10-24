@@ -4,6 +4,7 @@ import fs from "node:fs"
 import path from "node:path"
 
 import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/python-runtime.mjs"
+import { loadZones } from "@/lib/storage/roi-store"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
 import {
@@ -392,6 +393,20 @@ export function monitoredStreamIds() {
     .map((stream) => stream.id)
 }
 
+/** 只下发启用且会送检的围栏（「仅记录」不触发研判）；目前只对人员目标判定。 */
+function workerZones() {
+  return loadZones()
+    .filter((zone) => zone.enabled && zone.action !== "log" && zone.targets.includes("person"))
+    .map((zone) => ({
+      id: zone.id,
+      name: zone.name,
+      type: zone.type,
+      cameraId: zone.cameraId,
+      coordinates: zone.coordinates,
+      directional: zone.directional === true,
+    }))
+}
+
 function buildPayload(config: VisionConfig) {
   return {
     enabled: config.enabled,
@@ -402,8 +417,9 @@ function buildPayload(config: VisionConfig) {
     minConsecutiveFrames: config.minConsecutiveFrames,
     cooldownSeconds: config.cooldownSeconds,
     staticRecheckSec: config.staticRecheckSeconds,
-    vocabulary: config.vocabulary,
-    streamIds: monitoredStreamIds(),
+  vocabulary: config.vocabulary,
+  zones: workerZones(),
+  streamIds: monitoredStreamIds(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),
   }

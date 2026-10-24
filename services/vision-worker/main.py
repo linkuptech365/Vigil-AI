@@ -67,6 +67,15 @@ class VocabItem(BaseModel):
     enabled: bool = True
 
 
+class ZoneItem(BaseModel):
+    id: str
+    name: str = ""
+    type: str = "polygon"
+    cameraId: str = ""
+    coordinates: list[list[float]] = Field(default_factory=list)
+    directional: bool = False
+
+
 class ReloadRequest(BaseModel):
     enabled: bool = True
     sampleFps: float = 2.0
@@ -77,6 +86,7 @@ class ReloadRequest(BaseModel):
     cooldownSeconds: float = 30.0
     staticRecheckSec: float = 10.0
     vocabulary: list[VocabItem] = Field(default_factory=list)
+    zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
     go2rtcUrl: str = "http://127.0.0.1:1984"
     triggerUrl: str = ""
@@ -95,6 +105,7 @@ class Config:
     stream_ids: list[str] = field(default_factory=list)
     go2rtc: str = "http://127.0.0.1:1984"
     trigger_url: str = ""
+    zones: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -112,6 +123,7 @@ class Suspect:
     track_id: int | None
     conf: float
     reasons: list[str]
+    instant: bool = False  # 绊线越界是瞬时事件，不走连续帧门控
 
 
 @dataclass
@@ -131,6 +143,7 @@ class StreamState:
     ring: deque = field(default_factory=lambda: deque(maxlen=RING_SIZE))
     tracks: dict[str, TrackState] = field(default_factory=dict)
     cooldown: dict[str, float] = field(default_factory=dict)
+    zone_side: dict[str, float] = field(default_factory=dict)
     next_at: float = 0.0
     last_infer_ts: float = 0.0
     last_had_person: bool = False
@@ -531,11 +544,124 @@ def evaluate(dets: list[Det]) -> tuple[list[Suspect], int, int]:
 
 
 # --------------------------------------------------------------------------- #
+# 电子围栏（坐标均为画面百分比 0-100，与前端一致）
+# --------------------------------------------------------------------------- #
+def zones_for(sid: str) -> list[dict[str, Any]]:
+    return [z for z in RT.cfg.zones if z.get("cameraId") == sid]
+
+
+def point_in_polygon(x: float, y: float, polygon: list[list[float]]) -> bool:
+    inside_flag = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside_flag = not inside_flag
+        j = i
+    return inside_flag
+
+
+def line_side(x: float, y: float, a: list[float], b: list[float]) -> float:
+    return (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+
+
+def project_on_segment(x: float, y: float, a: list[float], b: list[float]) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    return 0.0 if length2 == 0 else ((x - a[0]) * dx + (y - a[1]) * dy) / length2
+
+
+def zone_suspects(
+    sid: str, dets: list[Det], shape: tuple[int, int], side_store: dict[str, float] | None
+) -> list[Suspect]:
+    """人员脚点（框底中心）落入多边形，或越过绊线，即视为疑似。side_store 为 None 时只做无状态的多边形判定。"""
+    zones = zones_for(sid)
+    if not zones:
+        return []
+    height, width = shape
+    persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= RT.cfg.low]
+    suspects: list[Suspect] = []
+    for zone in zones:
+        coords = zone.get("coordinates") or []
+        for index, person in enumerate(persons):
+            foot_x = (person.box[0] + person.box[2]) / 2 / max(1, width) * 100.0
+            foot_y = person.box[3] / max(1, height) * 100.0
+            who = f"t{person.track_id}" if person.track_id is not None else f"p{index}"
+            if zone.get("type") == "polygon" and len(coords) >= 3:
+                if point_in_polygon(foot_x, foot_y, coords):
+                    suspects.append(
+                        Suspect(
+                            key=f"zone:{zone['id']}:{who}",
+                            track_id=person.track_id,
+                            conf=round(person.conf, 3),
+                            reasons=[f"人员进入电子围栏：{zone.get('name') or zone['id']}"],
+                        )
+                    )
+            elif zone.get("type") == "tripwire" and len(coords) == 2 and side_store is not None and person.track_id is not None:
+                a, b = coords
+                side = line_side(foot_x, foot_y, a, b)
+                memo_key = f"{zone['id']}:{person.track_id}"
+                prev = side_store.get(memo_key)
+                side_store[memo_key] = side
+                if prev is None or prev * side >= 0:
+                    continue
+                if not 0.0 <= project_on_segment(foot_x, foot_y, a, b) <= 1.0:
+                    continue
+                if zone.get("directional") and side <= 0:
+                    continue
+                suspects.append(
+                    Suspect(
+                        key=f"zone:{zone['id']}:{who}",
+                        track_id=person.track_id,
+                        conf=round(person.conf, 3),
+                        reasons=[f"人员越过电子围栏绊线：{zone.get('name') or zone['id']}"],
+                        instant=True,
+                    )
+                )
+    if side_store is not None and len(side_store) > 400:
+        side_store.clear()
+    return suspects
+
+
+def draw_zones(canvas: np.ndarray, zones: list[dict[str, Any]]) -> None:
+    height, width = canvas.shape[:2]
+    for zone in zones:
+        points = np.array(
+            [[int(p[0] / 100.0 * width), int(p[1] / 100.0 * height)] for p in zone.get("coordinates", [])],
+            dtype=np.int32,
+        )
+        if len(points) < 2:
+            continue
+        color = (60, 60, 230)
+        if zone.get("type") == "polygon" and len(points) >= 3:
+            overlay = canvas.copy()
+            cv2.fillPoly(overlay, [points], color)
+            cv2.addWeighted(overlay, 0.18, canvas, 0.82, 0, dst=canvas)
+            cv2.polylines(canvas, [points], True, color, 2, cv2.LINE_AA)
+        else:
+            cv2.line(canvas, tuple(points[0]), tuple(points[1]), color, 3, cv2.LINE_AA)
+        cv2.putText(
+            canvas, str(zone.get("name") or zone.get("id")), (int(points[0][0]) + 4, int(points[0][1]) + 16),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # 标注图
 # --------------------------------------------------------------------------- #
-def draw(image: np.ndarray, dets: list[Det], header: str, mask: np.ndarray | None = None, warn: bool = False) -> np.ndarray:
+def draw(
+    image: np.ndarray,
+    dets: list[Det],
+    header: str,
+    mask: np.ndarray | None = None,
+    warn: bool = False,
+    zones: list[dict[str, Any]] | None = None,
+) -> np.ndarray:
     canvas = image.copy()
     height, width = canvas.shape[:2]
+    if zones:
+        draw_zones(canvas, zones)
     if mask is not None:
         scaled = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
         contours, _ = cv2.findContours(scaled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -655,6 +781,7 @@ def scan_stream(sid: str) -> None:
     st.last_infer_ts = now
     RT.stats.tier1_inferred += 1
     suspects, passed, persons = evaluate(dets)
+    suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
     st.last_had_person = persons > 0
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
@@ -665,13 +792,19 @@ def scan_stream(sid: str) -> None:
         st.has_pending = False
         return
 
-    keys = {s.key for s in suspects}
+    keys = {s.key for s in suspects if not s.instant}
     for key in list(st.tracks):
         if key not in keys:
             del st.tracks[key]
     triggered: list[Suspect] = []
     pending = False
     for suspect in suspects:
+        if suspect.instant:
+            if st.cooldown.get(suspect.key, 0.0) > now:
+                RT.stats.cooldown_suppressed += 1
+            else:
+                triggered.append(suspect)
+            continue
         prev = st.tracks.get(suspect.key)
         hits = (prev.hits + 1) if prev else 1
         st.tracks[suspect.key] = TrackState(hits=hits, last_conf=suspect.conf, reasons=suspect.reasons)
@@ -688,7 +821,7 @@ def scan_stream(sid: str) -> None:
         RT.stats.tier1_pending += 1
         return
 
-    annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets)))
+    annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets), zones=zones_for(sid)))
     frames = [base64.b64encode(raw).decode("ascii") for raw in list(st.ring)[-4:]]
     frames.append(base64.b64encode(annotated).decode("ascii"))
     for suspect in triggered:
@@ -820,6 +953,18 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
         stream_ids=[s for s in dict.fromkeys(req.streamIds) if s],
         go2rtc=req.go2rtcUrl.rstrip("/") or "http://127.0.0.1:1984",
         trigger_url=req.triggerUrl.strip(),
+        zones=[
+            {
+                "id": z.id,
+                "name": z.name,
+                "type": z.type,
+                "cameraId": z.cameraId,
+                "coordinates": [[float(p[0]), float(p[1])] for p in z.coordinates if len(p) == 2],
+                "directional": z.directional,
+            }
+            for z in req.zones
+            if z.type in ("polygon", "tripwire") and z.cameraId
+        ],
     )
     prompts: list[str] = []
     role_map: dict[str, str] = {}
@@ -877,7 +1022,10 @@ def fresh_view(sid: str, force: bool = False) -> dict[str, Any]:
 def annotated(stream_id: str) -> Response:
     view = fresh_view(stream_id)
     degraded = RT.model_state != "ready"
-    canvas = draw(view["image"], view["dets"], header_text(view["motion"], view["dets"]), view.get("mask") if degraded else None, degraded)
+    canvas = draw(
+        view["image"], view["dets"], header_text(view["motion"], view["dets"]),
+        view.get("mask") if degraded else None, degraded, zones_for(stream_id),
+    )
     return Response(content=encode_jpeg(canvas), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -888,6 +1036,8 @@ def inspect_once(stream_id: str) -> dict[str, Any]:
     dets: list[Det] = view["dets"]
     degraded = RT.model_state != "ready"
     suspects, passed, persons = evaluate(dets) if not degraded else ([], 0, 0)
+    if not degraded:
+        suspects.extend(zone_suspects(stream_id, dets, view["image"].shape[:2], None))
     if degraded:
         decision = "degraded"
     elif suspects:
@@ -896,7 +1046,10 @@ def inspect_once(stream_id: str) -> dict[str, Any]:
         decision = "passed"
     else:
         decision = "no-target"
-    canvas = draw(view["image"], dets, header_text(view["motion"], dets), view.get("mask") if degraded else None, degraded)
+    canvas = draw(
+        view["image"], dets, header_text(view["motion"], dets),
+        view.get("mask") if degraded else None, degraded, zones_for(stream_id),
+    )
     st = stream_state(stream_id)
     return {
         "ok": True,

@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { FileText, Pencil, Pentagon, Plus, Radar, Send, ShieldAlert, Siren, Spline, Trash2, Zap } from "lucide-react"
+import { FileText, Move, Pencil, Pentagon, Plus, Radar, Send, ShieldAlert, Siren, Spline, Trash2, Zap } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -45,7 +45,7 @@ function LocalRoiNotice({ name }: { name: string }) {
 }
 
 function LiveRoiManager() {
-  const { cameraId, zones, zoneRuntime, updateZone, removeZone, simulateIntrusion, intrusionActive } =
+  const { cameraId, zones, zoneRuntime, updateZone, removeZone, simulateIntrusion, intrusionActive, startEditShape } =
     usePerception()
   const { enabled: demo } = useDemoMode()
   const [dialog, setDialog] = React.useState<DialogState>(null)
@@ -165,10 +165,21 @@ function LiveRoiManager() {
                     </ToggleGroupItem>
                   </ToggleGroup>
                   <div className="flex items-center gap-1">
+                    {!demo && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => startEditShape(zone.id)}
+                        aria-label={`在画面上调整 ${zone.name} 的位置`}
+                      >
+                        <Move data-icon="inline-start" />
+                        调整位置
+                      </Button>
+                    )}
                     <Button variant="ghost" size="icon-sm" onClick={() => openDialog(zone)} aria-label={`编辑 ${zone.name}`}>
                       <Pencil />
                     </Button>
-                    {zone.custom && (
+                    {(zone.custom || !demo) && (
                       <Button
                         variant="ghost"
                         size="icon-sm"
