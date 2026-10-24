@@ -10,6 +10,7 @@ import type {
   EngineInfo,
   StreamAlert,
   StreamAlertsResponse,
+  StreamAnalysisRecord,
   StreamsResponse,
   StreamTestResult,
 } from "@/lib/vigil/streams"
@@ -25,6 +26,7 @@ export function streamSnapshotUrl(id: string) {
   return `${STREAMS_ENDPOINT}/${encodeURIComponent(id)}/snapshot`
 }
 
+/** index 为 1 起始，与封存时的 1.jpg、2.jpg 命名一致 */
 export function alertFrameUrl(alertId: string, index: number) {
   return `${STREAM_ALERTS_ENDPOINT}/${encodeURIComponent(alertId)}/frames/${index}`
 }
@@ -141,10 +143,34 @@ export function useStreams() {
     [mutate]
   )
 
+  const alertAction = React.useCallback(
+    async (alertId: string, body: Record<string, unknown>): Promise<StreamAlert | null> => {
+      try {
+        const response = await fetch(`${STREAM_ALERTS_ENDPOINT}/${encodeURIComponent(alertId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+        const payload = (await response.json()) as { alert?: StreamAlert; message?: string }
+        if (!response.ok || !payload.alert) throw new Error(payload.message ?? `HTTP ${response.status}`)
+        await mutateAlerts()
+        return payload.alert
+      } catch (caught) {
+        toast.error("案卷操作失败", { description: errorMessage(caught) })
+        return null
+      }
+    },
+    [mutateAlerts]
+  )
+
   const streams = data?.streams ?? []
   const alerts: StreamAlert[] = alertData?.alerts ?? []
+  const records: StreamAnalysisRecord[] = alertData?.records ?? []
 
   return {
+    records,
+    alertAction,
+    refreshAlerts: mutateAlerts,
     engine: data?.engine,
     streams,
     onlineCount: data?.onlineCount ?? 0,

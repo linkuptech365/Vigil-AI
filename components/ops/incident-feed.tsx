@@ -23,6 +23,7 @@ import {
 import { LibraryAlerts } from "./library/library-alerts"
 import { useOps } from "./ops-provider"
 import { OverlayBoxes } from "./overlay-boxes"
+import { StreamRecords } from "./stream-records"
 
 export function KeyframeThumb({
   alert,
@@ -200,6 +201,7 @@ export function IncidentFeed({ className }: { className?: string }) {
 
       <div className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-3 max-lg:max-h-[640px]">
         <LibraryAlerts />
+        <StreamRecords />
         {groups.length === 0 ? (
           <Empty className="py-12">
             <EmptyHeader>

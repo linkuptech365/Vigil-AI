@@ -86,6 +86,99 @@ export interface StreamAlertFrame {
   capturedAt: string
 }
 
+export type CaseStatus = "PENDING" | "ACKED" | "DISPATCHED" | "IN_PROGRESS" | "RESOLVED" | "FALSE_POSITIVE"
+
+export const CASE_STATUS_LABEL: Record<CaseStatus, string> = {
+  PENDING: "待处置",
+  ACKED: "已确认",
+  DISPATCHED: "已派工",
+  IN_PROGRESS: "处置中",
+  RESOLVED: "已结案",
+  FALSE_POSITIVE: "误报",
+}
+
+export interface CaseAction {
+  id: string
+  at: string
+  operator: string
+  actionType: string
+  notes: string
+}
+
+export type LinkageChannel = "SIREN" | "WEBHOOK" | "IM_BOT" | "IOT_HARDWARE"
+
+export const LINKAGE_CHANNELS: { channel: LinkageChannel; name: string; env: string; criticalOnly: boolean }[] = [
+  { channel: "WEBHOOK", name: "业务系统 Webhook", env: "VIGIL_LINKAGE_WEBHOOK_URL", criticalOnly: false },
+  { channel: "IM_BOT", name: "IM 机器人（飞书 / 钉钉 / 企微）", env: "VIGIL_LINKAGE_IM_URL", criticalOnly: false },
+  { channel: "SIREN", name: "现场声光警号", env: "VIGIL_LINKAGE_SIREN_URL", criticalOnly: true },
+  { channel: "IOT_HARDWARE", name: "IoT 闸机 / 门禁联锁", env: "VIGIL_LINKAGE_IOT_URL", criticalOnly: true },
+]
+
+export interface LinkageResult {
+  channel: LinkageChannel
+  name: string
+  status: "SUCCESS" | "FAILED" | "NOT_CONFIGURED" | "SKIPPED"
+  firedAt?: string
+  detail?: string
+}
+
+export type FalsePositiveReasonCode = "LIGHT_CHANGE" | "OCCLUSION" | "OBJECT_MISJUDGED" | "OTHER"
+
+export interface AlertCase {
+  caseId: string
+  status: CaseStatus
+  responder?: string
+  actions: CaseAction[]
+  linkage: LinkageResult[]
+  falsePositive?: { reason: FalsePositiveReasonCode; explanation: string; submittedAt: string }
+  closedAt?: string
+}
+
+export interface EvidenceFileSeal {
+  name: string
+  sha256: string
+  bytes: number
+}
+
+export interface EvidenceSeal {
+  algorithm: "SHA-256"
+  sealedAt: string
+  /** 对告警研判记录（不含处置过程）规范化 JSON 的哈希 */
+  recordHash: string
+  files: EvidenceFileSeal[]
+}
+
+export interface EvidenceIntegrity {
+  ok: boolean
+  checkedAt: string
+  missing: string[]
+  tampered: string[]
+  recordMatches: boolean
+}
+
+export type AnalysisOutcome = "alert" | "safe" | "folded" | "error"
+
+/** 每一次研判都会落一条记录：命中、否决、被冷却折叠、失败都有迹可循。 */
+export interface StreamAnalysisRecord {
+  id: string
+  at: string
+  streamId: string
+  streamName: string
+  source: StreamAlertSource
+  outcome: AnalysisOutcome
+  ruleName?: string
+  confidence?: number
+  summary: string
+  /** 否决 / 折叠 / 失败的具体原因 */
+  reason?: string
+  alertId?: string
+  edge?: { trackId: string; edgeConfidence: number; label?: string }
+  /** 边缘高置信但被大模型否决，值得回流为困难样本 */
+  hardSample?: boolean
+  /** 同一失败原因在短时间内重复出现的次数 */
+  count?: number
+}
+
 export interface StreamAlert {
   id: string
   source: StreamAlertSource
@@ -105,11 +198,14 @@ export interface StreamAlert {
   model: string
   engineSource: "remote" | "fallback"
   edge?: { trackId: string; edgeConfidence: number; label?: string }
+  case?: AlertCase
+  seal?: EvidenceSeal
 }
 
 export interface StreamAlertsResponse {
   status: "success"
   alerts: StreamAlert[]
+  records: StreamAnalysisRecord[]
 }
 
 export interface AnalyzeStreamResponse {

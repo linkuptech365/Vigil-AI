@@ -7,7 +7,8 @@ import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { runAnalysis } from "@/lib/ops/server/vlm-engine"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadProfiles } from "@/lib/storage/model-store"
-import { getStream, recordAnalysis, saveAlert } from "@/lib/storage/streams-store"
+import { fireAutoLinkage } from "@/lib/ops/server/alert-linkage"
+import { appendRecord, getStream, recordAnalysis, saveAlert } from "@/lib/storage/streams-store"
 import { ensureEngine, grabFrame } from "@/lib/stream-engine"
 import { profileReadiness } from "@/lib/vigil/model-registry"
 import type { AnalyzeStreamResponse, StreamAlert, StreamAlertSource } from "@/lib/vigil/streams"
@@ -99,7 +100,29 @@ function resolveProfile(modelProfileId?: string) {
   return profile
 }
 
+/** 任何一次研判（含失败）都会落一条记录，右侧告警流可以据此解释“为什么没有告警”。 */
 export async function analyzeStream(options: AnalyzeStreamOptions): Promise<AnalyzeStreamOutcome> {
+  try {
+    return await runAnalysis_(options)
+  } catch (error) {
+    const meta = getStream(options.streamId)
+    if (meta && !(error instanceof StreamAnalysisError && error.code === "ABORTED")) {
+      appendRecord({
+        at: new Date().toISOString(),
+        streamId: meta.id,
+        streamName: meta.name,
+        source: options.source,
+        outcome: "error",
+        summary: error instanceof Error ? error.message : "研判失败",
+        reason: error instanceof StreamAnalysisError ? error.code : "INTERNAL",
+        edge: options.edge,
+      })
+    }
+    throw error
+  }
+}
+
+async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStreamOutcome> {
   const meta = getStream(options.streamId)
   if (!meta) throw new StreamAnalysisError(`通道 ${options.streamId} 不存在`, 404, "STREAM_NOT_FOUND")
 
@@ -197,6 +220,7 @@ export async function analyzeStream(options: AnalyzeStreamOptions): Promise<Anal
     }
     saveAlert(created, frames)
     alert = created
+    void fireAutoLinkage(created.id).catch((error) => console.error("[linkage] 自动联动失败：", error))
   }
 
   recordAnalysis(meta.id, {
@@ -206,6 +230,28 @@ export async function analyzeStream(options: AnalyzeStreamOptions): Promise<Anal
     confidence: result.confidence,
     summary: result.summary,
     alertId: alert?.id,
+  })
+
+  const edgeRejected = Boolean(options.edge) && !hit
+  appendRecord({
+    at: capturedAt.toISOString(),
+    streamId: meta.id,
+    streamName: meta.name,
+    source: options.source,
+    outcome: alert ? "alert" : hit ? "folded" : "safe",
+    ruleName: hit ? result.ruleTriggered : undefined,
+    confidence: result.confidence,
+    summary: result.summary,
+    reason: alert
+      ? undefined
+      : hit
+        ? `防抖冷却窗口（${verdict.suppression?.windowSeconds ?? "-"} 秒）内重复触发，已折叠进既有事件证据链，不重复发告警`
+        : verdict.belowThreshold
+          ? "命中规则但置信度低于规则灵敏度阈值，未触发告警"
+          : "大模型复核后判定画面无违规",
+    alertId: alert?.id,
+    edge: options.edge,
+    hardSample: edgeRejected && (options.edge?.edgeConfidence ?? 0) >= 0.8 ? true : undefined,
   })
 
   return {

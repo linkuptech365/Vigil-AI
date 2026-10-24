@@ -3,7 +3,8 @@
 import { ClipboardCheck } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { DemoEmptyState, DemoOnly } from "../demo-empty-state"
+import { DemoOnly } from "../demo-empty-state"
+import { RealDispatch } from "./real-dispatch"
 import { useOps } from "../ops-provider"
 import { DispatchProvider } from "./dispatch-provider"
 import { EvidenceDossierView } from "./evidence-dossier-view"
@@ -33,14 +34,7 @@ export function DispatchTab({ onLocate }: DispatchTabProps) {
             审计与 CAPA 追踪 (Audit Trail &amp; CAPA)
           </Button>
         </div>
-        <DemoOnly
-          fallback={
-            <DemoEmptyState
-              title="暂无处置案卷"
-              description="真实告警被归档为证据案卷后会出现在这里。如需预览界面效果，可在「配置 - 演示数据」中开启演示数据。"
-            />
-          }
-        >
+        <DemoOnly fallback={<RealDispatch onLocate={onLocate} />}>
           <EvidenceDossierView onLocate={onLocate} />
           <IncidentWorkflow />
           <MultiChannelBroadcast />

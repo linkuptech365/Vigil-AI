@@ -9,7 +9,7 @@ import type { AlertEvent, AlertStatus, ChannelId, ReplayState, SeekTarget } from
 import { playAlarm, shanghaiClock } from "@/lib/ops/utils"
 import { defaultIncidentSec, formatClock, isChannelId } from "@/lib/ops/video-scenarios"
 import { CAST_REQUEST_KEY, parseCastRequest } from "@/lib/vigil/video-source"
-import type { StreamAlert } from "@/lib/vigil/streams"
+import type { CaseStatus, StreamAlert } from "@/lib/vigil/streams"
 import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { alertFrameUrl, useStreams } from "@/components/vigil/streams/use-streams"
 
@@ -27,11 +27,18 @@ function clockOf(iso: string) {
   }).format(date)
 }
 
-type RealOverride = Pick<AlertEvent, "status" | "note" | "assignee">
+const CASE_TO_ALERT_STATUS: Record<CaseStatus, AlertStatus> = {
+  PENDING: "open",
+  ACKED: "acked",
+  DISPATCHED: "assigned",
+  IN_PROGRESS: "assigned",
+  RESOLVED: "archived",
+  FALSE_POSITIVE: "false_positive",
+}
 
-function toAlertEvent(alert: StreamAlert, now: number, override?: RealOverride): AlertEvent {
+function toAlertEvent(alert: StreamAlert, now: number): AlertEvent {
   const frameCount = Math.max(alert.frames.length, 1)
-  const frameUrls = Array.from({ length: alert.frames.length ? frameCount : 0 }, (_, index) => alertFrameUrl(alert.id, index))
+  const frameUrls = Array.from({ length: alert.frames.length ? frameCount : 0 }, (_, index) => alertFrameUrl(alert.id, index + 1))
   const triggered = new Date(alert.triggeredAt).getTime()
   const steps: AlertEvent["steps"] = [{ offset: 0, title: "AI 研判结论", detail: alert.reasoning || alert.summary }]
   if (alert.advice) steps.push({ offset: 5, title: "处置建议", detail: alert.advice })
@@ -46,9 +53,9 @@ function toAlertEvent(alert: StreamAlert, now: number, override?: RealOverride):
     confidence: alert.confidence,
     minutesAgo: Number.isFinite(triggered) ? Math.max(0, Math.floor((now - triggered) / 60_000)) : 0,
     time: clockOf(alert.triggeredAt),
-    status: override?.status ?? "open",
-    note: override?.note,
-    assignee: override?.assignee,
+    status: alert.case ? CASE_TO_ALERT_STATUS[alert.case.status] : "open",
+    note: alert.case?.actions[0]?.notes,
+    assignee: alert.case?.responder,
     box: NO_BOX,
     related: [],
     steps,
@@ -129,11 +136,10 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [visibleStreamIds, setVisibleStreamIds] = React.useState<string[] | null>(null)
   const [muted, setMuted] = React.useState(false)
   const [demoAlerts, setAlerts] = React.useState<AlertEvent[]>(demo ? INITIAL_ALERTS : [])
-  const [realOverrides, setRealOverrides] = React.useState<Record<string, RealOverride>>({})
   const [now, setNow] = React.useState(() => Date.now())
   const realAlerts = React.useMemo(
-    () => real.alerts.map((alert) => toAlertEvent(alert, now, realOverrides[alert.id])),
-    [real.alerts, now, realOverrides]
+    () => real.alerts.map((alert) => toAlertEvent(alert, now)),
+    [real.alerts, now]
   )
   const alerts = demo ? demoAlerts : realAlerts
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
@@ -273,17 +279,9 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
   const setAlertStatus = React.useCallback<OpsContextValue["setAlertStatus"]>(
     (id, status, note, assignee) => {
       if (!demo) {
-        setRealOverrides((prev) => {
-          const current = prev[id]
-          return {
-            ...prev,
-            [id]: {
-              status,
-              note: note?.trim() ? note.trim() : current?.note,
-              assignee: assignee ?? current?.assignee,
-            },
-          }
-        })
+        if (status === "acked") void real.alertAction(id, { op: "ack" })
+        else if (status === "assigned" && assignee) void real.alertAction(id, { op: "dispatch", responder: assignee })
+        else if (status === "false_positive") void real.alertAction(id, { op: "false_positive", reason: "OTHER", explanation: note ?? "" })
         return
       }
       setAlerts((prev) =>
@@ -294,7 +292,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
         )
       )
     },
-    [demo]
+    [demo, real.alertAction]
   )
 
   const openRuleStudio = React.useCallback((tab: RuleStudioTab = "list") => {
