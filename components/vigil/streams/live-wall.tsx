@@ -10,7 +10,10 @@ import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
 import type { StreamView } from "@/lib/vigil/streams"
 import { useVigil } from "../vigil-provider"
+import { AnnotatedFeed } from "./annotated-feed"
 import { EngineBanner } from "./engine-banner"
+import { useVision } from "./use-vision"
+import { VisionFunnel } from "./vision-funnel"
 import { streamMjpegUrl, streamSnapshotUrl, useStreams, type StreamAnalysisOutcome } from "./use-streams"
 
 /** 浏览器对同一主机的 HTTP/1.1 并发连接有限，同屏最多保持 4 路 MJPEG 长连接，其余路用快照轮询。 */
@@ -81,14 +84,18 @@ function LiveTile({
   analyzing,
   result,
   onAnalyze,
+  visionAvailable,
 }: {
   stream: StreamView
   live: boolean
   analyzing: boolean
   result?: StreamAnalysisOutcome
   onAnalyze: (id: string) => void
+  visionAvailable: boolean
 }) {
   const [ref, visible] = useVisible<HTMLDivElement>()
+  const [annotated, setAnnotated] = React.useState(false)
+  const showAnnotated = annotated && visionAvailable
   const online = stream.status === "online"
   const last = stream.lastAnalysis
   const alerting = result?.verdict === "alert" || (!result && last?.status === "alert")
@@ -106,8 +113,10 @@ function LiveTile({
             <CameraOff className="size-6" aria-hidden="true" />
             <span className="text-xs">通道离线</span>
           </div>
+        ) : showAnnotated && visible ? (
+          <AnnotatedFeed streamId={stream.id} name={stream.name} />
         ) : (
-          <LiveFeed stream={stream} live={live} active={visible} />
+          <LiveFeed stream={stream} live={live && !showAnnotated} active={visible} />
         )}
         <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-background/80 to-transparent p-2">
           <Badge variant="outline" className="gap-1.5 border-border bg-background/80 font-mono text-xs">
@@ -119,11 +128,26 @@ function LiveTile({
             />
             {online ? (live ? "实时" : "快照") : stream.status === "idle" ? "待命" : "离线"}
           </Badge>
-          {stream.builtin ? (
-            <Badge variant="outline" className="border-warning/40 bg-background/80 text-xs text-warning">
-              模拟流
-            </Badge>
-          ) : null}
+          <div className="flex items-center gap-1.5">
+            {stream.builtin ? (
+              <Badge variant="outline" className="border-warning/40 bg-background/80 text-xs text-warning">
+                模拟流
+              </Badge>
+            ) : null}
+            {visionAvailable && stream.status !== "offline" ? (
+              <Button
+                size="xs"
+                variant={showAnnotated ? "default" : "outline"}
+                className="bg-background/80 data-[active=true]:bg-primary"
+                data-active={showAnnotated}
+                aria-pressed={showAnnotated}
+                onClick={() => setAnnotated((prev) => !prev)}
+              >
+                <ScanEye data-icon="inline-start" />
+                {showAnnotated ? "标注视图" : "原画"}
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -165,7 +189,9 @@ function LiveTile({
 export function LiveWall() {
   const { setActiveTab } = useVigil()
   const { engine, streams, onlineCount, loading, loadError, analyzingIds, analyzeStream, engineAction } = useStreams()
+  const { engine: vision, engineAction: visionAction } = useVision()
   const [results, setResults] = React.useState<Record<string, StreamAnalysisOutcome>>({})
+  const visionAvailable = vision?.status === "ready" || vision?.status === "degraded"
 
   const handleAnalyze = React.useCallback(
     async (id: string) => {
@@ -188,6 +214,7 @@ export function LiveWall() {
   return (
     <div className="flex flex-col gap-4">
       {engine ? <EngineBanner engine={engine} onAction={engineAction} /> : null}
+      {vision ? <VisionFunnel vision={vision} onReset={() => void visionAction("reset-stats")} /> : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -235,6 +262,7 @@ export function LiveWall() {
               analyzing={analyzingIds.has(stream.id)}
               result={results[stream.id]}
               onAnalyze={handleAnalyze}
+              visionAvailable={visionAvailable}
             />
           ))}
         </ul>

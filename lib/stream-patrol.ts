@@ -1,5 +1,6 @@
 import { analyzeStream } from "@/lib/ops/server/stream-analysis"
 import { loadStreams } from "@/lib/storage/streams-store"
+import { visionHandlesPatrol } from "@/lib/vision-engine"
 
 const PATROL_TICK_MS = 15_000
 const PATROL_INTERVAL_MS = 60_000
@@ -24,7 +25,11 @@ async function patrolOnce() {
   patrol.running = true
   try {
     const now = Date.now()
-    const due = loadStreams().filter((stream) => stream.autoPatrol && now - (patrol.lastRun.get(stream.id) ?? 0) >= PATROL_INTERVAL_MS)
+    // 视觉漏斗就绪时由它接管自动巡检（仅在 Tier-0/1 判定疑似时才触发大模型）；未就绪才回落到定时整段研判
+    const handledByVision = await visionHandlesPatrol().catch(() => new Set<string>())
+    const due = loadStreams().filter(
+      (stream) => stream.autoPatrol && !handledByVision.has(stream.id) && now - (patrol.lastRun.get(stream.id) ?? 0) >= PATROL_INTERVAL_MS
+    )
     for (const stream of due) {
       patrol.lastRun.set(stream.id, Date.now())
       try {

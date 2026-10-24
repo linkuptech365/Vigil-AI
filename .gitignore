@@ -41,3 +41,8 @@ pnpm-debug.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# vision worker
+/models/
+services/vision-worker/.venv/
+__pycache__/
