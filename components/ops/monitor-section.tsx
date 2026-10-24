@@ -3,8 +3,8 @@
 import { FolderSearch, Radio } from "lucide-react"
 
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { useStreams } from "@/components/vigil/streams/use-streams"
 import { useVigil } from "@/components/vigil/vigil-provider"
-import { CAMERAS } from "@/lib/ops/data"
 import { LibraryMatrix } from "./library/library-matrix"
 import { MonitorGrid } from "./monitor-grid"
 import { type MonitorMode, useOps } from "./ops-provider"
@@ -12,6 +12,7 @@ import { type MonitorMode, useOps } from "./ops-provider"
 export function MonitorSection() {
   const { mode, setMode } = useOps()
   const { queue } = useVigil()
+  const { streams } = useStreams()
 
   return (
     <div className="flex flex-col gap-4">
@@ -25,7 +26,7 @@ export function MonitorSection() {
       >
         <ToggleGroupItem value="live" className="gap-2 px-3 data-[state=on]:text-destructive">
           <Radio aria-hidden="true" />
-          实时机位监控 ({CAMERAS.length} 路)
+          实时机位监控 ({streams.length} 路)
         </ToggleGroupItem>
         <ToggleGroupItem value="library" className="gap-2 px-3 data-[state=on]:text-signal">
           <FolderSearch aria-hidden="true" />

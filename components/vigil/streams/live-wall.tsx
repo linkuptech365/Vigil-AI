@@ -21,7 +21,7 @@ const MAX_LIVE_TILES = 4
 const SNAPSHOT_REFRESH_MS = 3000
 const RETRY_MS = 6000
 
-function useVisible<T extends Element>() {
+export function useVisible<T extends Element>() {
   const ref = React.useRef<T>(null)
   const [visible, setVisible] = React.useState(false)
   React.useEffect(() => {
@@ -34,7 +34,7 @@ function useVisible<T extends Element>() {
   return [ref, visible] as const
 }
 
-function LiveFeed({ stream, live, active }: { stream: StreamView; live: boolean; active: boolean }) {
+export function LiveFeed({ stream, live, active }: { stream: StreamView; live: boolean; active: boolean }) {
   const [failed, setFailed] = React.useState(false)
   const [nonce, setNonce] = React.useState(() => Date.now())
 

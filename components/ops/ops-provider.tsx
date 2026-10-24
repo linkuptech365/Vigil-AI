@@ -39,6 +39,9 @@ interface OpsContextValue {
   setLayout: (layout: GridLayout) => void
   focusId: string
   focusCamera: (cameraId: string, opts?: { single?: boolean }) => void
+  /** 大屏上显示的视频流 ID；null 表示显示全部已接入的通道 */
+  visibleStreamIds: string[] | null
+  setVisibleStreamIds: (ids: string[] | null) => void
   seekTarget: SeekTarget | null
   locateIncident: (request: LocateRequest) => void
   showOverlays: boolean
@@ -75,6 +78,7 @@ export function useOps() {
 export function OpsProvider({ children }: { children: React.ReactNode }) {
   const [layout, setLayoutState] = React.useState<GridLayout>("grid")
   const [focusId, setFocusId] = React.useState("CAM-02")
+  const [visibleStreamIds, setVisibleStreamIds] = React.useState<string[] | null>(null)
   const [muted, setMuted] = React.useState(false)
   const [alerts, setAlerts] = React.useState<AlertEvent[]>(INITIAL_ALERTS)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
@@ -264,6 +268,8 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       setLayout,
       focusId,
       focusCamera,
+      visibleStreamIds,
+      setVisibleStreamIds,
       seekTarget,
       locateIncident,
       showOverlays,
@@ -297,6 +303,7 @@ export function OpsProvider({ children }: { children: React.ReactNode }) {
       setLayout,
       focusId,
       focusCamera,
+      visibleStreamIds,
       seekTarget,
       locateIncident,
       showOverlays,
