@@ -3,8 +3,16 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
+import { validPythons } from "../scripts/lib/python-runtime.mjs"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
+import {
+  motionFallbackActive,
+  motionFallbackSnapshot,
+  motionSince,
+  resetMotionFallbackStats,
+  setMotionFallbackActive,
+} from "@/lib/vision-motion-fallback"
 import {
   EMPTY_VISION_STATS,
   type VisionConfig,
@@ -59,7 +67,14 @@ interface VisionState {
   lastPushHash: string
   installing: boolean
   installOutput: string
-  depsCache: { at: number; ok: boolean; python: string | null } | null
+  depsCache: { at: number; ok: boolean; python: PythonPick | null } | null
+}
+
+interface PythonPick {
+  command: string
+  args: string[]
+  version: string
+  source: string
 }
 
 const globalStore = globalThis as typeof globalThis & { __vigilVision?: VisionState }
@@ -92,32 +107,44 @@ function state(): VisionState {
 
 const workerDir = () => path.join(process.cwd(), "services", "vision-worker")
 const workerScript = () => path.join(workerDir(), "main.py")
-const venvPython = () =>
-  path.join(workerDir(), ".venv", process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python")
 export const modelsDir = () => path.resolve(process.env.VIGIL_MODELS_DIR?.trim() || path.join(process.cwd(), "models"))
 
 const disabled = () => process.env.VIGIL_DISABLE_VISION_ENGINE === "1"
 
-/** 选择解释器：优先项目虚拟环境，其次系统 Python（须已装好核心依赖）。 */
-function pickPython(): { python: string | null; ok: boolean } {
+const DEPS_PROBE = "import fastapi, uvicorn, cv2, numpy, httpx, pydantic"
+
+/**
+ * 选择解释器：按 项目内置环境 ➔ python3 ➔ python ➔ py -3 ➔ 常见系统路径 的顺序，
+ * 取第一个"版本 >= 3.9 且已装好核心依赖"的；都没装好依赖时返回第一个有效解释器（ok=false，提示去安装）。
+ * 候选必须真正执行并通过版本校验，因此 Windows 应用商店的 python3.exe 空壳不会被误认。
+ */
+function pickPython(): { python: PythonPick | null; ok: boolean } {
   const s = state()
-  if (s.depsCache && Date.now() - s.depsCache.at < 60_000) return { python: s.depsCache.python, ok: s.depsCache.ok }
-  let result: { python: string | null; ok: boolean } = { python: null, ok: false }
-  if (fs.existsSync(venvPython())) {
-    result = { python: venvPython(), ok: true }
-  } else {
-    const candidates = [process.env.VIGIL_PYTHON?.trim(), "python3", "python"].filter((item): item is string => Boolean(item))
-    for (const command of candidates) {
-      const probe = spawnSync(command, ["-c", "import fastapi, uvicorn, cv2, numpy, httpx, pydantic"], { windowsHide: true, timeout: 15_000 })
-      if (probe.status === 0) {
-        result = { python: command, ok: true }
-        break
-      }
-      if (!probe.error) result = { python: command, ok: false }
+  const ttl = s.depsCache?.ok ? 60_000 : 30_000
+  if (s.depsCache && Date.now() - s.depsCache.at < ttl) return { python: s.depsCache.python, ok: s.depsCache.ok }
+
+  let result: { python: PythonPick | null; ok: boolean } = { python: null, ok: false }
+  for (const candidate of validPythons(process.cwd())) {
+    const probe = spawnSync(candidate.command, [...candidate.args, "-c", DEPS_PROBE], { windowsHide: true, timeout: 15_000 })
+    if (probe.status === 0) {
+      result = { python: candidate, ok: true }
+      break
     }
+    if (!result.python) result = { python: candidate, ok: false }
   }
   s.depsCache = { at: Date.now(), ...result }
   return result
+}
+
+/** 视觉环境未就绪时由 Node 端接管 Tier-0 帧差预筛；就绪后自动退出，交给 Python 漏斗 */
+function syncFallback() {
+  const s = state()
+  setMotionFallbackActive(!disabled() && !s.healthy && loadVisionConfig().enabled)
+}
+
+/** 定时巡检用：自 sinceMs 起该通道是否出现画面变化（预筛不在运行时恒为 true） */
+export function tier0AllowsPatrol(streamId: string, sinceMs: number) {
+  return motionSince(streamId, sinceMs)
 }
 
 /* --------------------------------- HTTP --------------------------------- */
@@ -207,7 +234,7 @@ async function launch() {
   s.startedAt = Date.now()
   let child: ChildProcess
   try {
-    child = spawn(python, [workerScript()], {
+    child = spawn(python.command, [...python.args, workerScript()], {
       cwd: workerDir(),
       env: {
         ...process.env,
@@ -239,7 +266,7 @@ async function launch() {
   child.once("error", (error: NodeJS.ErrnoException) => {
     s.child = null
     s.healthy = false
-    s.lastError = error.code === "ENOENT" ? `找不到 Python 解释器：${python}` : `vision-worker 启动失败：${error.message}`
+    s.lastError = error.code === "ENOENT" ? `找不到 Python 解释器：${python.command}` : `vision-worker 启动失败：${error.message}`
     scheduleRestart()
   })
   child.once("exit", (code, signal) => {
@@ -259,6 +286,7 @@ async function healthTick() {
   const health = await probeHealth()
   const wasHealthy = s.healthy
   s.healthy = health !== null
+  syncFallback()
   if (health) {
     s.health = health
     if (Date.now() - s.startedAt > STABLE_UPTIME_MS) s.failures = 0
@@ -280,6 +308,7 @@ export async function ensureVisionEngine(options: { waitMs?: number } = {}) {
     s.healthTimer.unref?.()
   }
   if (!s.child && !s.healthy) await launch()
+  syncFallback()
   const deadline = Date.now() + (options.waitMs ?? 0)
   while (!s.healthy && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300))
@@ -287,6 +316,7 @@ export async function ensureVisionEngine(options: { waitMs?: number } = {}) {
     if (health) {
       s.healthy = true
       s.health = health
+      syncFallback()
     }
   }
 }
@@ -309,7 +339,7 @@ export async function restartVisionEngine() {
 }
 
 /** 后台执行 scripts/setup-vision.mjs；立即返回，进度通过引擎状态里的 installOutput 展示。 */
-export function installVisionEnv(options: { light?: boolean; cpu?: boolean } = {}): { started: boolean; message: string } {
+export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?: boolean } = {}): { started: boolean; message: string } {
   const s = state()
   if (s.installing) return { started: false, message: "安装已在进行中" }
   const script = path.join(process.cwd(), "scripts", "setup-vision.mjs")
@@ -322,6 +352,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean } = {
   const args = [script]
   if (options.light) args.push("--light")
   else if (options.cpu) args.push("--cpu")
+  else if (options.gpu) args.push("--gpu")
 
   const child = spawn(process.execPath, args, { cwd: process.cwd(), env: { ...process.env, VIGIL_MODELS_DIR: modelsDir() }, windowsHide: true })
   const append = (chunk: Buffer) => {
@@ -428,8 +459,14 @@ function describe(): { status: VisionStatus; issue?: VisionIssue; message: strin
     return { status: s.health.status, message: s.health.reason || (s.health.status === "ready" ? "YOLO-World + ByteTrack 运行正常" : "视觉服务模型加载中") }
   }
   const { python, ok } = pickPython()
-  if (!python) return { status: "offline", issue: "no-python", message: "未检测到 Python 3.9+，请先安装 Python，再点击「一键安装」或执行 npm run setup:vision" }
-  if (!ok) return { status: "offline", issue: "not-installed", message: "视觉运行环境尚未安装，请点击「一键安装」或执行 npm run setup:vision" }
+  if (!python) {
+    return {
+      status: "offline",
+      issue: "no-python",
+      message: "未检测到可用的 Python 3.9+（已跳过 Windows 应用商店占位程序）。点击「一键自动部署视觉环境」将自动下载内置 Python，无需手动安装",
+    }
+  }
+  if (!ok) return { status: "offline", issue: "not-installed", message: `已找到 Python ${python.version}，但视觉依赖尚未安装。点击「一键自动部署视觉环境」即可` }
   if (s.child && Date.now() - s.startedAt < STARTUP_GRACE_MS) return { status: "starting", message: "视觉服务正在启动…" }
   if (s.restartTimer || (!s.child && s.lastError)) {
     return { status: "offline", issue: "crashed", message: `${s.lastError || "视觉服务进程已退出"}，正在自动重启（第 ${s.restarts + 1} 次）` }
@@ -448,21 +485,27 @@ export async function getVisionInfo(): Promise<VisionInfo> {
       s.health = health
     }
   }
+  syncFallback()
   const info = describe()
   const health = s.healthy ? s.health : null
+  const fallback = !health && motionFallbackActive() ? motionFallbackSnapshot() : null
+  if (fallback && info.status === "offline") {
+    info.status = "degraded"
+    info.message = `${info.message}。Node 端已接管 Tier-0 帧差预筛：静止画面不再送审大模型，环境部署完成后自动升级为 YOLO-World + ByteTrack`
+  }
   return {
     status: info.status,
     issue: info.issue,
     message: info.message,
-    mode: health?.mode ?? "offline",
-    device: health?.device ?? "",
+    mode: health?.mode ?? (fallback ? "node-motion" : "offline"),
+    device: health?.device ?? (fallback ? "node" : ""),
     enabled: loadVisionConfig().enabled,
     modelLoaded: health?.modelLoaded ?? false,
     weightsPresent: health?.weightsPresent ?? fs.existsSync(path.join(modelsDir(), "yolov8s-worldv2.pt")),
     trackerKind: health?.trackerKind ?? "",
     classes: health?.classes ?? [],
-    stats: health?.stats ?? { ...EMPTY_VISION_STATS },
-    streams: health?.streams ?? {},
+    stats: health?.stats ?? fallback?.stats ?? { ...EMPTY_VISION_STATS },
+    streams: health?.streams ?? fallback?.streams ?? {},
     recentEvents: health?.recentEvents ?? [],
     versions: health?.versions ?? {},
     lastReloadMs: health?.lastReloadMs ?? 0,

@@ -2,20 +2,27 @@
 /**
  * 初始化本地视觉初筛环境（Tier-1：YOLO-World + ByteTrack）。
  *
- *   node scripts/setup-vision.mjs            完整安装（PyTorch + ultralytics + 权重）
- *   node scripts/setup-vision.mjs --cpu      使用体积小得多的 CPU 版 PyTorch（无 GPU 的服务器/容器推荐）
+ *   node scripts/setup-vision.mjs            完整安装（自动识别 GPU：有 NVIDIA 显卡装 CUDA 版 PyTorch，否则装 CPU 版）
+ *   node scripts/setup-vision.mjs --cpu      强制 CPU 版 PyTorch
+ *   node scripts/setup-vision.mjs --gpu      强制默认（CUDA）版 PyTorch
  *   node scripts/setup-vision.mjs --light    只装帧差所需依赖，不装 PyTorch，视觉服务以 motion-only 模式运行
+ *   node scripts/setup-vision.mjs --uv       即使系统有 Python 也使用 uv 内置的独立 Python 3.11
  *   node scripts/setup-vision.mjs --skip-weights   不下载模型权重
  *
- * 等价环境变量：VIGIL_VISION_CPU=1 / VIGIL_VISION_LIGHT=1 / VIGIL_VISION_SKIP_WEIGHTS=1
- * 可用 VIGIL_PYTHON 指定系统 Python，VIGIL_MODELS_DIR 指定权重目录。
+ * 系统没有可用的 Python 3.9+（或 python3-venv 缺失）时，脚本会自动下载 uv 到 bin/uv，
+ * 再用它把独立的 Python 3.11 装进项目内的 .python 目录并创建 .venv，全程无需系统级安装。
+ *
+ * 等价环境变量：VIGIL_VISION_CPU=1 / VIGIL_VISION_GPU=1 / VIGIL_VISION_LIGHT=1 / VIGIL_VISION_SKIP_WEIGHTS=1 / VIGIL_USE_UV=1
+ * 可用 VIGIL_PYTHON 指定系统 Python，VIGIL_MODELS_DIR 指定权重目录，VIGIL_UV_DOWNLOAD_BASE 指定 uv 下载镜像。
  */
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { fileURLToPath } from "node:url"
+
+import { EMBEDDED_PYTHON_VERSION, ensureUv, findPython, hasNvidiaGpu, probePython, uvEnv } from "./lib/python-runtime.mjs"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const workerDir = path.join(root, "services", "vision-worker")
@@ -26,11 +33,16 @@ const WEIGHTS_URLS = [
   "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt",
   "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8s-worldv2.pt",
 ]
-const CLIP_PACKAGE = "git+https://github.com/ultralytics/CLIP.git"
+// zip 直装，不依赖 git（内置 Python 场景下用户机器上通常也没有 git）
+const CLIP_PACKAGE = "https://github.com/ultralytics/CLIP/archive/refs/heads/main.zip"
 
 const args = new Set(process.argv.slice(2))
 const light = args.has("--light") || process.env.VIGIL_VISION_LIGHT === "1"
-const cpuOnly = args.has("--cpu") || process.env.VIGIL_VISION_CPU === "1"
+const forceGpu = args.has("--gpu") || process.env.VIGIL_VISION_GPU === "1"
+const forceCpu = args.has("--cpu") || process.env.VIGIL_VISION_CPU === "1"
+const forceUv = args.has("--uv") || process.env.VIGIL_USE_UV === "1"
+const gpuDetected = !light && !forceCpu && !forceGpu && hasNvidiaGpu()
+const cpuOnly = !forceGpu && !gpuDetected
 const skipWeights = args.has("--skip-weights") || process.env.VIGIL_VISION_SKIP_WEIGHTS === "1"
 
 const isWin = process.platform === "win32"
@@ -58,15 +70,59 @@ function run(command, commandArgs, options = {}) {
   })
 }
 
-function findPython() {
-  const candidates = [process.env.VIGIL_PYTHON?.trim(), "python3", "python", isWin ? "py" : null].filter(Boolean)
-  for (const command of candidates) {
-    const probe = spawnSync(command, ["-c", "import sys;print('%d.%d' % sys.version_info[:2])"], { encoding: "utf8", windowsHide: true })
-    if (probe.status !== 0) continue
-    const [major, minor] = probe.stdout.trim().split(".").map(Number)
-    if (major === 3 && minor >= 9) return command
+const venvHealthy = () => fs.existsSync(venvPython) && probePython({ command: venvPython, args: [], source: "venv" }) !== null
+
+function pipWorks() {
+  return probePython({ command: venvPython, args: [], source: "venv" }) !== null && spawnPip()
+}
+
+function spawnPip() {
+  return new Promise((resolve) => {
+    const child = spawn(venvPython, ["-m", "pip", "--version"], { stdio: "ignore", windowsHide: true })
+    child.once("error", () => resolve(false))
+    child.once("exit", (code) => resolve(code === 0))
+  })
+}
+
+/** 用 uv 在项目内安装独立 Python 并创建带 pip 的 .venv */
+async function createVenvWithUv() {
+  let uv
+  try {
+    uv = await ensureUv(root, say)
+  } catch (error) {
+    fail(`${error instanceof Error ? error.message : error}。可手动安装 Python 3.9+，或设置 VIGIL_UV_DOWNLOAD_BASE 使用镜像后重试`)
   }
-  return null
+  const env = uvEnv(root)
+  say(`使用 uv 安装内置 Python ${EMBEDDED_PYTHON_VERSION}（目录：${path.join(root, ".python")}）…`)
+  const installCode = await run(uv, ["python", "install", EMBEDDED_PYTHON_VERSION], { env, timeoutMs: 900_000 })
+  if (installCode !== 0) fail("uv 安装 Python 失败，请检查网络能否访问 github.com（python-build-standalone），或设置 UV_PYTHON_INSTALL_MIRROR")
+  fs.rmSync(venvDir, { recursive: true, force: true })
+  const venvCode = await run(uv, ["venv", venvDir, "--python", EMBEDDED_PYTHON_VERSION, "--seed"], { env })
+  if (venvCode !== 0 || !fs.existsSync(venvPython)) fail("uv 创建虚拟环境失败")
+}
+
+async function prepareVenv() {
+  if (venvHealthy() && (await spawnPip())) {
+    say(`复用已有虚拟环境：${venvDir}`)
+    return
+  }
+  if (fs.existsSync(venvDir)) {
+    say("已有虚拟环境无法使用（解释器失效或缺少 pip），重新创建")
+    fs.rmSync(venvDir, { recursive: true, force: true })
+  }
+
+  const system = forceUv ? null : findPython(root, { skipProject: true })
+  if (system) {
+    say(`使用系统 Python ${system.version}（${[system.command, ...system.args].join(" ")}）创建虚拟环境：${venvDir}`)
+    const code = await run(system.command, [...system.args, "-m", "venv", venvDir])
+    if (code === 0 && fs.existsSync(venvPython) && (await pipWorks())) return
+    say("系统 Python 无法创建可用的虚拟环境（常见原因：缺少 python3-venv / ensurepip），改用内置 Python")
+    fs.rmSync(venvDir, { recursive: true, force: true })
+  } else if (!forceUv) {
+    say("未检测到可用的系统 Python 3.9+（已跳过 Windows 应用商店占位程序），改用内置 Python")
+  }
+  await createVenvWithUv()
+  if (!(await spawnPip())) fail("内置 Python 虚拟环境中 pip 不可用")
 }
 
 async function downloadWeights() {
@@ -95,17 +151,17 @@ async function downloadWeights() {
 }
 
 async function main() {
-  say(`模式：${light ? "light（仅帧差 motion-only，不安装 PyTorch）" : cpuOnly ? "完整安装（CPU 版 PyTorch）" : "完整安装（默认 PyTorch，Linux 下可能含 CUDA 组件，体积较大）"}`)
+  say(
+    `模式：${
+      light
+        ? "light（仅帧差 motion-only，不安装 PyTorch）"
+        : cpuOnly
+          ? `完整安装（CPU 版 PyTorch${forceCpu ? "，已强制" : "，未检测到 NVIDIA GPU"}）`
+          : `完整安装（${gpuDetected ? "检测到 NVIDIA GPU，" : ""}默认 PyTorch，含 CUDA 组件，体积较大）`
+    }`
+  )
 
-  if (!fs.existsSync(venvPython)) {
-    const python = findPython()
-    if (!python) fail("未找到 Python 3.9+，请先安装 Python 3（或用 VIGIL_PYTHON 指定路径），并确认 python3-venv 可用")
-    say(`使用 ${python} 创建虚拟环境：${venvDir}`)
-    const code = await run(python, ["-m", "venv", venvDir])
-    if (code !== 0 || !fs.existsSync(venvPython)) fail("创建虚拟环境失败；Debian/Ubuntu 请先执行 apt-get install python3-venv")
-  } else {
-    say(`复用已有虚拟环境：${venvDir}`)
-  }
+  await prepareVenv()
 
   const pip = (extra, options) => run(venvPython, ["-m", "pip", "install", "--disable-pip-version-check", ...extra], options)
   await pip(["--upgrade", "pip"])
@@ -130,10 +186,10 @@ async function main() {
   let weightsOk = true
   let clipOk = true
   if (!light) {
-    say("安装 CLIP 文本编码器（YOLO-World 开放词汇所需，依赖 git）…")
+    say("安装 CLIP 文本编码器（YOLO-World 开放词汇所需）…")
     const clipCode = await pip(["ftfy", "regex", CLIP_PACKAGE], { timeoutMs: 600_000 })
     clipOk = clipCode === 0
-    if (!clipOk) console.warn("[setup-vision] CLIP 安装失败：请确认已安装 git 且能访问 github.com，随后重新运行本脚本")
+    if (!clipOk) console.warn("[setup-vision] CLIP 安装失败：请确认能访问 github.com，随后重新运行本脚本")
 
     if (!skipWeights) weightsOk = await downloadWeights()
 

@@ -49,16 +49,16 @@ function EngineStatus({
   onAction,
 }: {
   engine: VisionInfo
-  onAction: (action: "install" | "restart", options?: { light?: boolean; cpu?: boolean }) => Promise<unknown>
+  onAction: (action: "install" | "restart", options?: { light?: boolean; cpu?: boolean; gpu?: boolean }) => Promise<unknown>
 }) {
   const [busy, setBusy] = React.useState<string | null>(null)
   const badge = STATUS_BADGE[engine.status]
-  const run = async (key: string, action: "install" | "restart", options?: { light?: boolean; cpu?: boolean }) => {
+  const run = async (key: string, action: "install" | "restart", options?: { light?: boolean; cpu?: boolean; gpu?: boolean }) => {
     setBusy(key)
     await onAction(action, options)
     setBusy(null)
   }
-  const needInstall = engine.issue === "not-installed"
+  const needInstall = engine.issue === "not-installed" || engine.issue === "no-python"
   const showFix = engine.status !== "ready" && engine.status !== "installing" && engine.issue !== "disabled"
 
   return (
@@ -95,12 +95,16 @@ function EngineStatus({
                   <>
                     <Button size="sm" disabled={busy !== null} onClick={() => void run("full", "install", { cpu: true })}>
                       {busy === "full" ? <Spinner data-icon="inline-start" /> : <Download data-icon="inline-start" />}
-                      完整安装（YOLO-World + 跟踪）
+                      一键自动部署视觉环境
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void run("gpu", "install", { gpu: true })}>
+                      {busy === "gpu" ? <Spinner data-icon="inline-start" /> : <Download data-icon="inline-start" />}
+                      NVIDIA GPU 版
                     </Button>
                     {needInstall ? (
                       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void run("light", "install", { light: true })}>
                         {busy === "light" ? <Spinner data-icon="inline-start" /> : <Download data-icon="inline-start" />}
-                        仅安装轻量帧差
+                        仅轻量帧差
                       </Button>
                     ) : null}
                   </>

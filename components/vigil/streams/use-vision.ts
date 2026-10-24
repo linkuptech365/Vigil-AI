@@ -56,7 +56,7 @@ export function useVision() {
   )
 
   const engineAction = React.useCallback(
-    async (action: "install" | "restart" | "reset-stats", options?: { light?: boolean; cpu?: boolean }) => {
+    async (action: "install" | "restart" | "reset-stats", options?: { light?: boolean; cpu?: boolean; gpu?: boolean }) => {
       try {
         const response = await sendJson<{ started: boolean; message: string; engine: VisionInfo }>(VISION_ENDPOINTS.engine, "POST", { action, ...options })
         await mutate()
