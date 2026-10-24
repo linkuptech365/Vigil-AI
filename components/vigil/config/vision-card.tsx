@@ -19,7 +19,6 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import {
-  MAX_VOCABULARY,
   VISION_ROLES,
   sanitizeVisionConfig,
   type VisionConfig,
@@ -175,6 +174,7 @@ export function VisionCard() {
   const [draft, setDraft] = React.useState<VisionConfig | null>(null)
   const [saving, setSaving] = React.useState(false)
   const [compiling, setCompiling] = React.useState(false)
+  const [replaceMode, setReplaceMode] = React.useState(false)
   const [compileNote, setCompileNote] = React.useState<{ source: "llm" | "fallback"; text: string } | null>(null)
 
   React.useEffect(() => {
@@ -212,7 +212,7 @@ export function VisionCard() {
     setDraft((prev) => (prev ? { ...prev, vocabulary: prev.vocabulary.filter((item) => item.id !== id) } : prev))
   const addItem = () =>
     setDraft((prev) =>
-      prev && prev.vocabulary.length < MAX_VOCABULARY
+      prev
         ? {
             ...prev,
             vocabulary: [
@@ -239,13 +239,22 @@ export function VisionCard() {
   const handleCompile = async () => {
     setCompiling(true)
     setCompileNote(null)
-    const response = await compile(draft.naturalLanguageInstruction, true)
+    const mode = replaceMode ? "replace" : "append"
+    const response = await compile(draft.naturalLanguageInstruction, true, { mode, baseVocabulary: draft.vocabulary })
     setCompiling(false)
     if (!response) return
-    setDraft(response.config)
+    setDraft((prev) =>
+      prev
+        ? { ...prev, naturalLanguageInstruction: response.config.naturalLanguageInstruction, vocabulary: response.config.vocabulary }
+        : response.config
+    )
     setCompileNote({ source: response.source, text: response.note })
-    toast.success(`已生成 ${response.vocabulary.length} 个检测词`, {
-      description: response.reload ? `已热更新到视觉服务（${response.reload.reloadMs} ms）` : "视觉服务启动后自动生效",
+    const summary =
+      response.mode === "replace"
+        ? `已替换为 ${response.added} 个检测词`
+        : `新增 ${response.added} 个检测词${response.reenabled ? `，重新启用 ${response.reenabled} 个` : ""}${response.skipped ? `，${response.skipped} 个已存在已跳过` : ""}`
+    toast.success(summary, {
+      description: response.reload ? `已热更新到视觉服务（${response.reload.reloadMs} ms），当前共 ${response.config.vocabulary.length} 条` : "视觉服务启动后自动生效",
     })
   }
 
@@ -280,13 +289,21 @@ export function VisionCard() {
               onChange={(event) => patch({ naturalLanguageInstruction: event.target.value })}
               placeholder="例如：洁净区人员必须戴口罩和手套，不允许露出头发，地面不能遗留工具"
             />
-            <FieldDescription>点击编译后，系统自动翻译为英文检测词表并立即热更新，无需重启。</FieldDescription>
+            <FieldDescription>
+              点击编译后，系统自动翻译为英文检测词并追加到现有词表（按英文词去重，保留已有词条及手动修改），立即热更新，无需重启。词表条数不设上限，可逐步完善。
+            </FieldDescription>
           </Field>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <Button onClick={() => void handleCompile()} disabled={compiling || draft.naturalLanguageInstruction.trim().length < 2}>
               {compiling ? <Spinner data-icon="inline-start" /> : <Sparkles data-icon="inline-start" />}
-              {compiling ? "编译中…" : "编译并热更新"}
+              {compiling ? "编译中…" : replaceMode ? "编译并替换词表" : "编译并追加词表"}
             </Button>
+            <Field orientation="horizontal" className="w-auto">
+              <Switch id="vision-replace" checked={replaceMode} onCheckedChange={setReplaceMode} />
+              <FieldLabel htmlFor="vision-replace" className="text-xs font-normal text-muted-foreground">
+                清空并替换现有词表
+              </FieldLabel>
+            </Field>
             {compileNote ? (
               <p className={cn("flex items-center gap-1.5 text-xs", compileNote.source === "llm" ? "text-success" : "text-warning")}>
                 {compileNote.source === "llm" ? <CircleCheck className="size-3.5" aria-hidden="true" /> : <CircleAlert className="size-3.5" aria-hidden="true" />}
@@ -301,9 +318,9 @@ export function VisionCard() {
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-medium">
-              检测词表 <span className="font-mono text-xs text-muted-foreground">{draft.vocabulary.length}/{MAX_VOCABULARY}</span>
+              检测词表 <span className="font-mono text-xs text-muted-foreground">{draft.vocabulary.length} 条</span>
             </h3>
-            <Button size="sm" variant="outline" onClick={addItem} disabled={draft.vocabulary.length >= MAX_VOCABULARY}>
+            <Button size="sm" variant="outline" onClick={addItem}>
               <Plus data-icon="inline-start" />
               添加词条
             </Button>

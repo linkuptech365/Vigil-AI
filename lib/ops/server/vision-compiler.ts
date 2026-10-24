@@ -2,7 +2,7 @@ import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { describeRemoteError, detectProtocol, normalizeEndpoint, RemoteError } from "@/lib/ops/server/vlm-remote"
 import { loadProfiles } from "@/lib/storage/model-store"
 import { profileReadiness, type ModelProfile } from "@/lib/vigil/model-registry"
-import { MAX_VOCABULARY, sanitizeVocabulary, type VisionRole, type VocabularyItem } from "@/lib/vigil/vision"
+import { sanitizeVocabulary, type VisionRole, type VocabularyItem } from "@/lib/vigil/vision"
 
 export interface CompileOutcome {
   source: "llm" | "fallback"
@@ -13,6 +13,9 @@ export interface CompileOutcome {
 
 export class CompileError extends Error {}
 
+/** 单次编译最多产出的词条数，词表总量不受此限制。 */
+const MAX_PER_COMPILE = 30
+
 const SYSTEM_PROMPT = `你是工业视觉检测系统的「检测词表编译器」。用户会用中文描述需要稽查的违规行为，你要把它翻译成开放词汇目标检测模型（YOLO-World）能识别的英文检测提示词。
 
 只输出一个 JSON 对象，不要任何解释，格式：
@@ -21,7 +24,7 @@ const SYSTEM_PROMPT = `你是工业视觉检测系统的「检测词表编译器
 规则：
 1. promptEn 必须是 2~6 个单词的英文名词短语，描述画面中肉眼可见的物体或状态，例如 "face mask on face"、"gloved hands"、"safety goggles"、"person using mobile phone"、"tool left on floor"。不要写句子、否定词（without/no/not）或动词短句。
 2. role 含义：anchor_person=画面中的被检查人员（必须有 1 条）；required_ppe=人员必须穿戴的装备，缺失就违规（用户说「没戴/未戴/是否戴好」的装备都归这一类，写成装备本身，如 "safety goggles"）；hazard_target=只要出现就违规的物体或行为（手机、遗留工具、抹布、裸露皮肤、倚靠设备等）。
-3. 总数不超过 ${MAX_VOCABULARY} 条，不要重复。labelZh 不超过 10 个汉字。`
+3. 本次最多输出 ${MAX_PER_COMPILE} 条，不要重复，只输出本次描述涉及的词条。labelZh 不超过 10 个汉字。`
 
 function pickProfile(modelProfileId?: string): ModelProfile | null {
   const profile = modelProfileId ? getProfile(modelProfileId) : (loadProfiles().find((item) => item.isDefault && item.enabled) ?? null)
@@ -106,7 +109,7 @@ function normalize(items: VocabularyItem[]): VocabularyItem[] {
   }
   return list
     .sort((a, b) => order[a.role] - order[b.role])
-    .slice(0, MAX_VOCABULARY)
+    .slice(0, MAX_PER_COMPILE)
     .map((item, index) => ({ ...item, id: `v${index + 1}`, enabled: true }))
 }
 
@@ -136,7 +139,7 @@ const DICTIONARY: DictEntry[] = [
   { pattern: /抹布|擦拭布/, labelZh: "遗留抹布", promptEn: "rag cloth on floor", role: "hazard_target" },
   { pattern: /工具|扳手|螺丝刀|遗落|遗留/, labelZh: "遗留工具", promptEn: "tool left on floor", role: "hazard_target" },
   { pattern: /倚靠|靠墙|靠在|依靠/, labelZh: "倚靠设备", promptEn: "person leaning on equipment", role: "hazard_target" },
-  { pattern: /敞口|试剂瓶|开盖|容器未/, labelZh: "敞口容器", promptEn: "open bottle or unsealed container", role: "hazard_target" },
+  { pattern: /敞口|试剂���|开盖|容器未/, labelZh: "敞口容器", promptEn: "open bottle or unsealed container", role: "hazard_target" },
   { pattern: /饮料|食物|吃东西|喝水|水杯/, labelZh: "饮食", promptEn: "food or drink bottle", role: "hazard_target" },
   { pattern: /首饰|戒指|手表|饰品|耳环/, labelZh: "首饰手表", promptEn: "jewelry or wristwatch", role: "hazard_target" },
   { pattern: /明火|烟雾|冒烟/, labelZh: "明火烟雾", promptEn: "open flame or smoke", role: "hazard_target" },

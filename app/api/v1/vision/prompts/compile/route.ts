@@ -2,7 +2,7 @@ import { CompileError, compileInstruction } from "@/lib/ops/server/vision-compil
 import { jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
 import { loadVisionConfig, saveVisionConfig } from "@/lib/storage/vision-store"
 import { getVisionInfo, pushConfig } from "@/lib/vision-engine"
-import type { CompileResponse } from "@/lib/vigil/vision"
+import { mergeVocabulary, sanitizeVocabulary, type CompileResponse } from "@/lib/vigil/vision"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -18,10 +18,17 @@ export async function POST(request: Request) {
   if (instruction.length > 1000) return jsonError(400, "INVALID_REQUEST", "描述过长，请控制在 1000 字以内")
   const modelProfileId = typeof body.value.modelProfileId === "string" ? body.value.modelProfileId : undefined
   const apply = body.value.apply !== false
+  const mode: CompileResponse["mode"] = body.value.mode === "replace" ? "replace" : "append"
 
   try {
     const outcome = await compileInstruction(instruction, modelProfileId, request.signal)
-    const config = { ...loadVisionConfig(), naturalLanguageInstruction: instruction, vocabulary: outcome.vocabulary }
+    const saved = loadVisionConfig()
+    const base = sanitizeVocabulary(body.value.baseVocabulary) ?? saved.vocabulary
+    const merge =
+      mode === "replace"
+        ? { vocabulary: outcome.vocabulary, added: outcome.vocabulary.length, skipped: 0, reenabled: 0 }
+        : mergeVocabulary(base, outcome.vocabulary)
+    const config = { ...saved, naturalLanguageInstruction: instruction, vocabulary: merge.vocabulary }
     let reload: CompileResponse["reload"]
     if (apply) {
       saveVisionConfig(config)
@@ -35,6 +42,10 @@ export async function POST(request: Request) {
       note: outcome.note,
       vocabulary: outcome.vocabulary,
       config,
+      mode,
+      added: merge.added,
+      skipped: merge.skipped,
+      reenabled: merge.reenabled,
       reload,
     }
     return jsonOk(response)

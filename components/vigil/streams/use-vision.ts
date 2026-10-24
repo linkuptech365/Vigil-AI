@@ -13,6 +13,7 @@ import {
   type VisionConfig,
   type VisionConfigResponse,
   type VisionInfo,
+  type VocabularyItem,
 } from "@/lib/vigil/vision"
 
 /** 视觉漏斗的配置与引擎状态：多处共享同一个 SWR key，安装/加载期间加快轮询。 */
@@ -42,9 +43,14 @@ export function useVision() {
   )
 
   const compile = React.useCallback(
-    async (instruction: string, apply: boolean) => {
+    async (instruction: string, apply: boolean, options?: { mode?: "append" | "replace"; baseVocabulary?: VocabularyItem[] }) => {
       try {
-        const response = await sendJson<CompileResponse>(VISION_ENDPOINTS.compile, "POST", { instruction, apply })
+        const response = await sendJson<CompileResponse>(VISION_ENDPOINTS.compile, "POST", {
+          instruction,
+          apply,
+          mode: options?.mode ?? "append",
+          baseVocabulary: options?.baseVocabulary,
+        })
         if (apply) await mutate()
         return response
       } catch (caught) {

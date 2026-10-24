@@ -49,7 +49,8 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
   vocabulary: DEFAULT_VOCABULARY,
 }
 
-export const MAX_VOCABULARY = 24
+/** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
+export const MAX_VOCABULARY = 300
 const PROMPT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ,'\-/]{1,63}$/
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
@@ -89,6 +90,51 @@ export function sanitizeVocabulary(input: unknown): VocabularyItem[] | null {
     ids.add(id)
     return { ...item, id }
   })
+}
+
+export interface VocabularyMergeResult {
+  vocabulary: VocabularyItem[]
+  added: number
+  /** 英文词已存在而被忽略的条数（含因已有主体锚点而跳过的锚点）。 */
+  skipped: number
+  /** 英文词已存在但处于停用状态，被重新启用的条数。 */
+  reenabled: number
+}
+
+/** 把新词条追加到现有词表：保留已有词条的全部手动编辑，按英文词去重，已有启用的主体锚点时不再重复添加锚点。 */
+export function mergeVocabulary(existing: VocabularyItem[], incoming: VocabularyItem[]): VocabularyMergeResult {
+  const merged = existing.map((item) => ({ ...item }))
+  const indexByKey = new Map(merged.map((item, index) => [item.promptEn.trim().toLowerCase(), index]))
+  const usedIds = new Set(merged.map((item) => item.id))
+  let added = 0
+  let skipped = 0
+  let reenabled = 0
+  const stamp = Date.now().toString(36)
+
+  for (const item of incoming) {
+    const key = item.promptEn.trim().toLowerCase()
+    const at = indexByKey.get(key)
+    if (at !== undefined) {
+      if (merged[at].enabled) skipped += 1
+      else {
+        merged[at] = { ...merged[at], enabled: true }
+        reenabled += 1
+      }
+      continue
+    }
+    if (item.role === "anchor_person" && merged.some((entry) => entry.role === "anchor_person" && entry.enabled)) {
+      skipped += 1
+      continue
+    }
+    if (merged.length >= MAX_VOCABULARY) break
+    let id = `v${stamp}${added}`
+    while (usedIds.has(id)) id += "x"
+    usedIds.add(id)
+    indexByKey.set(key, merged.length)
+    merged.push({ ...item, id, enabled: true })
+    added += 1
+  }
+  return { vocabulary: merged, added, skipped, reenabled }
 }
 
 /** 合并并校验部分配置；非法字段回退到 base 的取值。服务端与前端共用。 */
@@ -233,8 +279,13 @@ export interface CompileResponse {
   source: "llm" | "fallback"
   model?: string
   note: string
+  /** 本次编译模型给出的词条（不含已有词条）。 */
   vocabulary: VocabularyItem[]
   config: VisionConfig
+  mode: "append" | "replace"
+  added: number
+  skipped: number
+  reenabled: number
   reload?: { ok: boolean; reloadMs: number; message: string }
 }
 
