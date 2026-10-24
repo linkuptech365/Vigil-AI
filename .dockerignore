@@ -11,5 +11,11 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 videos
+services/vision-worker/.venv
+services/vision-worker/__pycache__
+.python
+.venv
+models
+data
 user_read_only_context
 v0_memories

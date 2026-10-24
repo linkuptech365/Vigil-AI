@@ -10,7 +10,10 @@
  *   node scripts/setup-vision.mjs --skip-weights   不下载模型权重
  *
  * 系统没有可用的 Python 3.9+（或 python3-venv 缺失）时，脚本会自动下载 uv 到 bin/uv，
- * 再用它把独立的 Python 3.11 装进项目内的 .python 目录并创建 .venv，全程无需系统级安装。
+ * 再用它把独立的 Python 3.11 装进视觉主目录并创建虚拟环境，全程无需系统级安装。
+ *
+ * 视觉主目录：VIGIL_PYTHON_HOME，未设置时取 <VIGIL_DATA_DIR>/vision（Docker 里是持久化的 /app/data/vision），
+ * 两者都没有时回退到项目内的 .python / services/vision-worker/.venv / models / bin（本地开发）。
  *
  * 等价环境变量：VIGIL_VISION_CPU=1 / VIGIL_VISION_GPU=1 / VIGIL_VISION_LIGHT=1 / VIGIL_VISION_SKIP_WEIGHTS=1 / VIGIL_USE_UV=1
  * 可用 VIGIL_PYTHON 指定系统 Python，VIGIL_MODELS_DIR 指定权重目录，VIGIL_UV_DOWNLOAD_BASE 指定 uv 下载镜像。
@@ -22,12 +25,23 @@ import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { fileURLToPath } from "node:url"
 
-import { EMBEDDED_PYTHON_VERSION, ensureUv, findPython, hasNvidiaGpu, probePython, uvEnv } from "./lib/python-runtime.mjs"
+import {
+  EMBEDDED_PYTHON_VERSION,
+  checkWritableDir,
+  ensureUv,
+  findPython,
+  hasNvidiaGpu,
+  isMusl,
+  probePython,
+  uvEnv,
+  visionPaths,
+  visionRuntimeEnv,
+} from "./lib/python-runtime.mjs"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const workerDir = path.join(root, "services", "vision-worker")
-const venvDir = path.join(workerDir, ".venv")
-const modelsDir = path.resolve(process.env.VIGIL_MODELS_DIR?.trim() || path.join(root, "models"))
+const paths = visionPaths(root)
+const { venvDir, modelsDir, pythonDir } = paths
 const weightsPath = path.join(modelsDir, "yolov8s-worldv2.pt")
 const WEIGHTS_URLS = [
   "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt",
@@ -56,7 +70,13 @@ const fail = (message) => {
 
 function run(command, commandArgs, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(command, commandArgs, { cwd: root, stdio: "inherit", windowsHide: true, ...options })
+    const child = spawn(command, commandArgs, {
+      cwd: root,
+      stdio: "inherit",
+      windowsHide: true,
+      env: { ...process.env, ...visionRuntimeEnv(root) },
+      ...options,
+    })
     const timer = options.timeoutMs ? setTimeout(() => child.kill(), options.timeoutMs) : null
     child.once("error", (error) => {
       if (timer) clearTimeout(timer)
@@ -93,7 +113,7 @@ async function createVenvWithUv() {
     fail(`${error instanceof Error ? error.message : error}。可手动安装 Python 3.9+，或设置 VIGIL_UV_DOWNLOAD_BASE 使用镜像后重试`)
   }
   const env = uvEnv(root)
-  say(`使用 uv 安装内置 Python ${EMBEDDED_PYTHON_VERSION}（目录：${path.join(root, ".python")}）…`)
+  say(`使用 uv 安装内置 Python ${EMBEDDED_PYTHON_VERSION}（目录：${pythonDir}）…`)
   const installCode = await run(uv, ["python", "install", EMBEDDED_PYTHON_VERSION], { env, timeoutMs: 900_000 })
   if (installCode !== 0) fail("uv 安装 Python 失败，请检查网络能否访问 github.com（python-build-standalone），或设置 UV_PYTHON_INSTALL_MIRROR")
   fs.rmSync(venvDir, { recursive: true, force: true })
@@ -160,6 +180,23 @@ async function main() {
           : `完整安装（${gpuDetected ? "检测到 NVIDIA GPU，" : ""}默认 PyTorch，含 CUDA 组件，体积较大）`
     }`
   )
+
+  if (!light && isMusl()) {
+    fail(
+      "当前系统使用 musl libc（如 Alpine 镜像），PyTorch / ultralytics 没有对应的预编译包，无法安装完整视觉环境。" +
+        "请改用基于 glibc 的镜像（如 node:20-bookworm-slim），或使用 --light 仅启用帧差预筛"
+    )
+  }
+
+  const unwritable = [paths.home ?? pythonDir, paths.binDir, modelsDir, path.dirname(venvDir)]
+    .map((dir) => checkWritableDir(dir))
+    .filter(Boolean)
+  if (unwritable.length > 0) {
+    fail(
+      `${unwritable.join("；")}。请给运行用户授予该目录的写权限，或设置 VIGIL_PYTHON_HOME 指向一个可写目录（Docker 下建议放在持久化卷内，如 /app/data/vision）`
+    )
+  }
+  say(`视觉主目录：${paths.home ?? "(项目内置布局)"}；Python：${pythonDir}；虚拟环境：${venvDir}；权重：${modelsDir}`)
 
   await prepareVenv()
 

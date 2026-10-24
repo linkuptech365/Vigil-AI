@@ -3,7 +3,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 
-import { validPythons } from "../scripts/lib/python-runtime.mjs"
+import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/python-runtime.mjs"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
 import {
@@ -107,7 +107,7 @@ function state(): VisionState {
 
 const workerDir = () => path.join(process.cwd(), "services", "vision-worker")
 const workerScript = () => path.join(workerDir(), "main.py")
-export const modelsDir = () => path.resolve(process.env.VIGIL_MODELS_DIR?.trim() || path.join(process.cwd(), "models"))
+export const modelsDir = () => visionPaths(process.cwd()).modelsDir
 
 const disabled = () => process.env.VIGIL_DISABLE_VISION_ENGINE === "1"
 
@@ -238,6 +238,7 @@ async function launch() {
       cwd: workerDir(),
       env: {
         ...process.env,
+        ...visionRuntimeEnv(process.cwd()),
         VIGIL_VISION_PORT: String(WORKER_PORT),
         VIGIL_MODELS_DIR: modelsDir(),
         PYTHONUNBUFFERED: "1",
@@ -354,7 +355,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?
   else if (options.cpu) args.push("--cpu")
   else if (options.gpu) args.push("--gpu")
 
-  const child = spawn(process.execPath, args, { cwd: process.cwd(), env: { ...process.env, VIGIL_MODELS_DIR: modelsDir() }, windowsHide: true })
+  const child = spawn(process.execPath, args, { cwd: process.cwd(), env: { ...process.env, ...visionRuntimeEnv(process.cwd()), VIGIL_MODELS_DIR: modelsDir() }, windowsHide: true })
   const append = (chunk: Buffer) => {
     s.installOutput = `${s.installOutput}${chunk.toString("utf8")}`.slice(-3000)
   }

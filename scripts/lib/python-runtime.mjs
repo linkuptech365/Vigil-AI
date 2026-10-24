@@ -1,9 +1,14 @@
 /**
  * Python 探测与内置 Python 引导（setup-vision 脚本与 Next 服务端共用）。
  *
- * 探测顺序：VIGIL_PYTHON ➔ 项目内置环境（.venv / .python）➔ python3 ➔ python ➔ py -3 ➔ 常见系统路径。
+ * 探测顺序：VIGIL_PYTHON ➔ 项目内置环境（视觉主目录 / .venv / .python）➔ python3 ➔ python ➔ py -3 ➔ 常见系统路径。
  * 每个候选都必须真正执行 `-c "import sys; print(...)"`，退出码为 0 且版本 >= 3.9 才算有效，
  * 这样 Windows 应用商店的 WindowsApps\python3.exe 空壳（退出码非 0 或只打印提示）会被直接跳过。
+ *
+ * 视觉主目录（visionPaths）：uv、内置 Python、虚拟环境、模型权重、各类缓存统一放在一个可写目录下。
+ *   VIGIL_PYTHON_HOME            显式指定
+ *   <VIGIL_DATA_DIR>/vision      未指定时取数据目录下的 vision（Docker 里即 /app/data/vision，命名卷持久化且已授权）
+ *   都未设置                      回退到项目根下的 .python / services/vision-worker/.venv / models / bin（本地开发）
  */
 import { spawnSync } from "node:child_process"
 import fs from "node:fs"
@@ -19,6 +24,69 @@ const VERSION_SNIPPET = "import sys; print(f'{sys.version_info.major}.{sys.versi
 const exeIn = (dir, ...names) => names.map((name) => path.join(dir, name))
 const venvBin = (venvDir) => path.join(venvDir, isWin ? "Scripts" : "bin", isWin ? "python.exe" : "python")
 
+/**
+ * 视觉环境涉及的全部目录。
+ * home 为 null 表示走项目根下的传统布局；否则全部收敛到 home 下，运行用户只需对 home 有写权限。
+ */
+export function visionPaths(root) {
+  const explicit = process.env.VIGIL_PYTHON_HOME?.trim()
+  const dataDir = process.env.VIGIL_DATA_DIR?.trim()
+  const home = explicit ? path.resolve(explicit) : dataDir ? path.resolve(dataDir, "vision") : null
+  const envBin = process.env.VIGIL_BIN_DIR?.trim()
+  const envModels = process.env.VIGIL_MODELS_DIR?.trim()
+  if (!home) {
+    const pythonDir = path.join(root, ".python")
+    return {
+      home: null,
+      pythonDir,
+      venvDir: path.join(root, "services", "vision-worker", ".venv"),
+      uvCacheDir: path.join(pythonDir, ".uv-cache"),
+      binDir: path.resolve(envBin || path.join(root, "bin")),
+      modelsDir: path.resolve(envModels || path.join(root, "models")),
+      cacheDir: null,
+    }
+  }
+  return {
+    home,
+    pythonDir: path.join(home, "python"),
+    venvDir: path.join(home, "venv"),
+    uvCacheDir: path.join(home, "uv-cache"),
+    binDir: path.resolve(envBin || path.join(home, "bin")),
+    modelsDir: path.resolve(envModels || path.join(home, "models")),
+    cacheDir: path.join(home, "cache"),
+  }
+}
+
+/**
+ * 子进程（pip / uv / vision-worker）使用的缓存目录环境变量。
+ * 容器内运行用户的 HOME 往往不可写，PyTorch / HuggingFace / Ultralytics 默认写 ~/.cache 会失败，
+ * 因此在使用视觉主目录时把它们全部重定向到 <home>/cache。
+ */
+export function visionRuntimeEnv(root) {
+  const { cacheDir } = visionPaths(root)
+  if (!cacheDir) return {}
+  return {
+    XDG_CACHE_HOME: cacheDir,
+    PIP_CACHE_DIR: path.join(cacheDir, "pip"),
+    TORCH_HOME: path.join(cacheDir, "torch"),
+    HF_HOME: path.join(cacheDir, "huggingface"),
+    YOLO_CONFIG_DIR: path.join(cacheDir, "ultralytics"),
+    MPLCONFIGDIR: path.join(cacheDir, "matplotlib"),
+  }
+}
+
+/** 创建目录并确认当前用户可写；不可写时返回人类可读的原因，可写返回 null */
+export function checkWritableDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.accessSync(dir, fs.constants.W_OK)
+    return null
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : ""
+    return `${dir} 不可写（${code || (error instanceof Error ? error.message : "未知错误")}）`
+  }
+}
+
 function listDirs(parent, pattern) {
   try {
     return fs
@@ -32,20 +100,20 @@ function listDirs(parent, pattern) {
   }
 }
 
-/** 项目内置环境：服务专用 .venv、项目根 .venv、uv 下载的 .python */
+/** 项目内置环境：视觉主目录的 venv / python，以及传统位置（服务专用 .venv、项目根 .venv、.python）作为兼容 */
 export function projectPythons(root) {
+  const paths = visionPaths(root)
   const list = [
+    venvBin(paths.venvDir),
     venvBin(path.join(root, "services", "vision-worker", ".venv")),
     venvBin(path.join(root, ".venv")),
-    path.join(root, ".venv", "bin", "python"),
-    path.join(root, ".venv", "Scripts", "python.exe"),
-    path.join(root, ".python", "bin", "python3"),
-    path.join(root, ".python", "bin", "python"),
-    path.join(root, ".python", "python.exe"),
   ]
-  const installRoot = path.join(root, ".python")
-  for (const dir of listDirs(installRoot, /^cpython-/)) {
-    list.push(...exeIn(path.join(dir, "bin"), "python3", "python"), path.join(dir, "python.exe"))
+  const installRoots = [...new Set([paths.pythonDir, path.join(root, ".python")])]
+  for (const installRoot of installRoots) {
+    list.push(...exeIn(path.join(installRoot, "bin"), "python3", "python"), path.join(installRoot, "python.exe"))
+    for (const dir of listDirs(installRoot, /^cpython-/)) {
+      list.push(...exeIn(path.join(dir, "bin"), "python3", "python"), path.join(dir, "python.exe"))
+    }
   }
   return [...new Set(list)].filter((file) => fs.existsSync(file)).map((command) => ({ command, args: [], source: "project" }))
 }
@@ -132,7 +200,7 @@ export function* validPythons(root, options = {}) {
 /* ------------------------------------ uv ------------------------------------ */
 
 const uvName = isWin ? "uv.exe" : "uv"
-export const localUvPath = (root) => path.join(process.env.VIGIL_BIN_DIR?.trim() || path.join(root, "bin"), uvName)
+export const localUvPath = (root) => path.join(visionPaths(root).binDir, uvName)
 
 function uvWorks(command) {
   const result = spawnSync(command, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 10_000 })
@@ -141,11 +209,18 @@ function uvWorks(command) {
 
 /** 已有的 uv：项目 bin/uv ➔ PATH ➔ 常见安装位置 */
 export function findUv(root) {
-  const candidates = [localUvPath(root), "uv", path.join(os.homedir(), ".local", "bin", uvName), path.join(os.homedir(), ".cargo", "bin", uvName)]
+  const candidates = [
+    localUvPath(root),
+    path.join(root, "bin", uvName),
+    "uv",
+    path.join(os.homedir(), ".local", "bin", uvName),
+    path.join(os.homedir(), ".cargo", "bin", uvName),
+  ]
   return candidates.find((command) => (path.isAbsolute(command) ? fs.existsSync(command) : true) && uvWorks(command)) ?? null
 }
 
-function isMusl() {
+/** Alpine 等 musl 发行版：PyTorch / ultralytics 没有 musllinux 预编译包，无法安装完整视觉环境 */
+export function isMusl() {
   if (process.platform !== "linux") return false
   try {
     const header = process.report?.getReport?.().header
@@ -229,13 +304,15 @@ export async function ensureUv(root, say = () => {}) {
   }
 }
 
-/** uv 管理的独立 Python 统一放在项目内 .python 目录，不污染系统 */
+/** uv 管理的独立 Python 与缓存统一放在视觉主目录（或项目内 .python），不污染系统，也不依赖 /app 本身可写 */
 export function uvEnv(root) {
+  const paths = visionPaths(root)
   return {
     ...process.env,
-    UV_PYTHON_INSTALL_DIR: path.join(root, ".python"),
-    UV_PYTHON_BIN_DIR: path.join(root, ".python", "bin"),
-    UV_CACHE_DIR: process.env.UV_CACHE_DIR || path.join(root, ".python", ".uv-cache"),
+    ...visionRuntimeEnv(root),
+    UV_PYTHON_INSTALL_DIR: paths.pythonDir,
+    UV_PYTHON_BIN_DIR: path.join(paths.pythonDir, "bin"),
+    UV_CACHE_DIR: process.env.UV_CACHE_DIR || paths.uvCacheDir,
   }
 }
 
