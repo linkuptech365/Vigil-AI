@@ -13,6 +13,7 @@ degraded (motion-only) 模式：只做 Tier-0 帧差并如实回报原因，绝�
 from __future__ import annotations
 
 import base64
+import math
 import os
 import sys
 import threading
@@ -45,6 +46,10 @@ ROLE_PPE = "required_ppe"
 ROLE_HAZARD = "hazard_target"
 ROLE_SUBJECT = "subject_target"
 ROLE_CONTEXT = "context_object"
+POLICY_DUAL = "DUAL_INTERACTION"
+POLICY_ANCHOR = "ANCHOR_PROXIMITY"
+ANCHOR_MIN_FRAMES = 3  # 主体停留在记忆锚点内的最少连续帧
+MAX_LEARNED_TAGS = 6
 ROLES = (ROLE_ANCHOR, ROLE_PPE, ROLE_HAZARD, ROLE_SUBJECT, ROLE_CONTEXT)
 
 ROLE_COLORS = {  # BGR
@@ -82,6 +87,26 @@ class ZoneItem(BaseModel):
     directional: bool = False
 
 
+class LearnTagItem(BaseModel):
+    promptEn: str
+    labelZh: str = ""
+    role: str = ROLE_SUBJECT
+    confidence: float = 0.3
+
+
+class LearnAnchorItem(BaseModel):
+    center: list[float] = Field(default_factory=lambda: [500.0, 500.0])
+    radius: float = 150.0
+    description: str = ""
+
+
+class LearningItem(BaseModel):
+    version: int = 0
+    policy: str = POLICY_DUAL
+    tags: list[LearnTagItem] = Field(default_factory=list)
+    anchor: LearnAnchorItem | None = None
+
+
 class ReloadRequest(BaseModel):
     enabled: bool = True
     sampleFps: float = 2.0
@@ -94,6 +119,7 @@ class ReloadRequest(BaseModel):
     vocabulary: list[VocabItem] = Field(default_factory=list)
     zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
+    learning: dict[str, LearningItem] = Field(default_factory=dict)
     go2rtcUrl: str = "http://127.0.0.1:1984"
     triggerUrl: str = ""
 
@@ -112,6 +138,7 @@ class Config:
     go2rtc: str = "http://127.0.0.1:1984"
     trigger_url: str = ""
     zones: list[dict[str, Any]] = field(default_factory=list)
+    learning: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -121,6 +148,7 @@ class Det:
     conf: float
     box: tuple[float, float, float, float]
     track_id: int | None = None
+    floor: float | None = None  # VLM 反哺词条自带的置信度门槛，优先于全局 confidenceLow
 
 
 @dataclass
@@ -130,6 +158,8 @@ class Suspect:
     conf: float
     reasons: list[str]
     instant: bool = False  # 绊线越界是瞬时事件，不走连续帧门控
+    min_frames: int | None = None  # 覆盖全局连续帧门槛（记忆锚点停留判定使用）
+    anchor: bool = False  # 由记忆锚点靠近触发
 
 
 @dataclass
@@ -212,6 +242,8 @@ class Runtime:
         self.pending_prompts: list[str] = []
         self.role_map: dict[str, str] = {}
         self.label_map: dict[str, str] = {}
+        self.learned_owner: dict[str, set[str]] = {}
+        self.learned_conf: dict[tuple[str, str], float] = {}
         self.vocab: list[VocabItem] = []
         self.streams: dict[str, StreamState] = {}
         self.events: deque = deque(maxlen=MAX_EVENTS)
@@ -467,7 +499,17 @@ def motion_ratio(prev: np.ndarray | None, image: np.ndarray) -> tuple[float | No
 # --------------------------------------------------------------------------- #
 # Tier-1：检测、门控
 # --------------------------------------------------------------------------- #
-def detect(image: np.ndarray, tracker: Any) -> list[Det]:
+def allowed(sid: str, prompt: str) -> bool:
+    """VLM 反哺的词条只对沉淀它的通道生效，避免污染其他通道。"""
+    owners = RT.learned_owner.get(prompt)
+    return owners is None or not sid or sid in owners
+
+
+def passes(det: Det, low: float) -> bool:
+    return det.conf >= (det.floor if det.floor is not None else low)
+
+
+def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     low = RT.cfg.low
     conf_floor = max(0.05, min(0.25, low))
     with RT.model_lock:
@@ -482,10 +524,13 @@ def detect(image: np.ndarray, tracker: Any) -> list[Det]:
         for k in range(len(boxes)):
             prompt = str(names.get(int(classes[k]), ""))
             role = RT.role_map.get(prompt)
-            if role is None:
+            if role is None or not allowed(sid, prompt):
+                continue
+            floor = RT.learned_conf.get((sid, prompt))
+            if floor is not None and float(confs[k]) < floor:
                 continue
             x1, y1, x2, y2 = (float(v) for v in xyxy[k])
-            dets.append(Det(prompt=prompt, role=role, conf=float(confs[k]), box=(x1, y1, x2, y2)))
+            dets.append(Det(prompt=prompt, role=role, conf=float(confs[k]), box=(x1, y1, x2, y2), floor=floor))
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
     ids = tracker.update([d.box for d in persons], [d.conf for d in persons])
     for d, track_id in zip(persons, ids):
@@ -505,7 +550,7 @@ def label_of(prompt: str) -> str:
     return RT.label_map.get(prompt) or prompt
 
 
-def evaluate(dets: list[Det]) -> tuple[list[Suspect], int, int]:
+def evaluate(dets: list[Det], sid: str = "") -> tuple[list[Suspect], int, int]:
     """三阶门控：返回（疑似目标列表, 合规放行人数, 画面中人数）。"""
     low, high = RT.cfg.low, RT.cfg.high
     required = [p for p, r in RT.role_map.items() if r == ROLE_PPE and p in RT.classes_applied]
@@ -550,7 +595,7 @@ def evaluate(dets: list[Det]) -> tuple[list[Suspect], int, int]:
                 reasons=[f"画面中检出违规目标：{label_of(hazard.prompt)}（{hazard.conf:.2f}）"],
             )
         )
-    suspects.extend(relation_suspects(dets))
+    suspects.extend(relation_suspects(dets, sid))
     return suspects, passed, len(persons)
 
 
@@ -565,17 +610,19 @@ def proximity(subject: Det, other: Det) -> float | None:
     return 0.0 if iou(grown, other.box) > 0 else None
 
 
-def relation_suspects(dets: list[Det]) -> list[Suspect]:
+def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
     """行为主体（如猫）与关联物体（如喂食器/食盆）空间靠近或重叠才判为疑似。
 
     词表里没有任何启用的关联物体时，行为主体一出现即判为疑似（等价于违规目标）。
     """
     low = RT.cfg.low
-    subjects = [d for d in dets if d.role == ROLE_SUBJECT and d.conf >= low]
+    subjects = [d for d in dets if d.role == ROLE_SUBJECT and passes(d, low)]
     if not subjects:
         return []
-    contexts = [d for d in dets if d.role == ROLE_CONTEXT and d.conf >= low]
-    context_configured = any(r == ROLE_CONTEXT and p in RT.classes_applied for p, r in RT.role_map.items())
+    contexts = [d for d in dets if d.role == ROLE_CONTEXT and passes(d, low)]
+    context_configured = any(
+        r == ROLE_CONTEXT and p in RT.classes_applied and allowed(sid, p) for p, r in RT.role_map.items()
+    )
     best: dict[str, Suspect] = {}
     for subject in subjects:
         key = f"rel:{subject.prompt}"
@@ -603,6 +650,41 @@ def relation_suspects(dets: list[Det]) -> list[Suspect]:
         current = best.get(key)
         if current is None or candidate.conf > current.conf:
             best[key] = candidate
+    return list(best.values())
+
+
+def anchor_of(sid: str) -> dict[str, Any] | None:
+    learn = RT.cfg.learning.get(sid)
+    return learn.get("anchor") if learn else None
+
+
+def anchor_suspects(sid: str, dets: list[Det], shape: tuple[int, int]) -> list[Suspect]:
+    """记忆锚点：策略为 ANCHOR_PROXIMITY 时，行为主体中心落入锚点半径即判疑似，不再依赖伴生物体被检出。"""
+    learn = RT.cfg.learning.get(sid)
+    anchor = learn.get("anchor") if learn else None
+    if not learn or learn.get("policy") != POLICY_ANCHOR or not anchor:
+        return []
+    height, width = shape
+    ax, ay = anchor["center"]
+    radius = max(1.0, float(anchor["radius"]))
+    desc = anchor.get("description") or "记忆锚点"
+    best: dict[str, Suspect] = {}
+    for det in dets:
+        if det.role != ROLE_SUBJECT or not passes(det, RT.cfg.low):
+            continue
+        cx = (det.box[0] + det.box[2]) / 2 / max(1, width) * 1000.0
+        cy = (det.box[1] + det.box[3]) / 2 / max(1, height) * 1000.0
+        dist = math.hypot(cx - ax, cy - ay)
+        if dist > radius:
+            continue
+        key = f"anchor:{det.prompt}"
+        current = best.get(key)
+        if current is None or det.conf > current.conf:
+            best[key] = Suspect(
+                key=key, track_id=None, conf=round(det.conf, 3),
+                reasons=[f"{label_of(det.prompt)} 靠近记忆锚点「{desc}」（距离 {dist:.0f}/{radius:.0f}）"],
+                min_frames=ANCHOR_MIN_FRAMES, anchor=True,
+            )
     return list(best.values())
 
 
@@ -720,11 +802,18 @@ def draw(
     mask: np.ndarray | None = None,
     warn: bool = False,
     zones: list[dict[str, Any]] | None = None,
+    anchor: dict[str, Any] | None = None,
 ) -> np.ndarray:
     canvas = image.copy()
     height, width = canvas.shape[:2]
     if zones:
         draw_zones(canvas, zones)
+    if anchor:
+        center = (int(anchor["center"][0] / 1000 * width), int(anchor["center"][1] / 1000 * height))
+        axes = (max(4, int(anchor["radius"] / 1000 * width)), max(4, int(anchor["radius"] / 1000 * height)))
+        cv2.ellipse(canvas, center, axes, 0, 0, 360, (255, 200, 0), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "anchor", (center[0] - axes[0], max(36, center[1] - axes[1] - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1, cv2.LINE_AA)
     if mask is not None:
         scaled = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
         contours, _ = cv2.findContours(scaled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -812,7 +901,7 @@ def hit_tags(dets: list[Det]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     tags: list[dict[str, Any]] = []
     for d in sorted(dets, key=lambda item: -item.conf):
-        if d.conf < low or d.prompt in seen:
+        if not passes(d, low) or d.prompt in seen:
             continue
         seen.add(d.prompt)
         tags.append({"label": label_of(d.prompt), "prompt": d.prompt, "role": d.role, "confidence": round(d.conf, 3)})
@@ -826,11 +915,12 @@ def log_hit(
     gate: str,
     progress: dict[str, int] | None = None,
     event_id: str | None = None,
+    anchor: bool = False,
 ) -> None:
     if not tags and not reasons:
         return
     now = time.time()
-    sig = f"{gate}|{event_id or ''}|" + ",".join(t["prompt"] for t in tags)
+    sig = f"{gate}|{event_id or ''}|{int(anchor)}|" + ",".join(t["prompt"] for t in tags)
     last = st.last_entry
     if last is not None and event_id is None and st.last_entry_sig == sig and now - st.last_entry_ts < HIT_DEDUPE_SECONDS:
         last["repeat"] += 1
@@ -850,6 +940,8 @@ def log_hit(
     }
     if progress:
         entry["progress"] = progress
+    if anchor:
+        entry["anchor"] = True
     if event_id:
         entry["eventId"] = event_id
     RT.hitlog.appendleft(entry)
@@ -893,10 +985,14 @@ def scan_stream(sid: str) -> None:
 
     if st.tracker is None:
         st.tracker = make_tracker()
-    dets = detect(image, st.tracker)
+    dets = detect(image, st.tracker, sid)
     st.last_infer_ts = now
     RT.stats.tier1_inferred += 1
-    suspects, passed, persons = evaluate(dets)
+    suspects, passed, persons = evaluate(dets, sid)
+    relation_keys = {s.key for s in suspects}
+    for hit in anchor_suspects(sid, dets, image.shape[:2]):
+        if f"rel:{hit.key[len('anchor:'):]}" not in relation_keys:
+            suspects.append(hit)
     suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
     st.last_had_person = persons > 0
     st.last_persons = persons
@@ -929,7 +1025,7 @@ def scan_stream(sid: str) -> None:
         prev = st.tracks.get(suspect.key)
         hits = (prev.hits + 1) if prev else 1
         st.tracks[suspect.key] = TrackState(hits=hits, last_conf=suspect.conf, reasons=suspect.reasons)
-        if hits < cfg.min_frames:
+        if hits < (suspect.min_frames or cfg.min_frames):
             pending_list.append((suspect, hits))
             continue
         if st.cooldown.get(suspect.key, 0.0) > now:
@@ -943,12 +1039,12 @@ def scan_stream(sid: str) -> None:
         RT.stats.tier1_pending += 1
         if pending_list:
             best, hits = max(pending_list, key=lambda item: item[1])
-            log_hit(st, tags, best.reasons, "pending", {"hits": hits, "need": cfg.min_frames})
+            log_hit(st, tags, best.reasons, "pending", {"hits": hits, "need": best.min_frames or cfg.min_frames}, anchor=best.anchor)
         elif cooled_list:
-            log_hit(st, tags, cooled_list[0].reasons, "cooldown")
+            log_hit(st, tags, cooled_list[0].reasons, "cooldown", anchor=cooled_list[0].anchor)
         return
 
-    annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets), zones=zones_for(sid)))
+    annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets), zones=zones_for(sid), anchor=anchor_of(sid)))
     frames = [base64.b64encode(raw).decode("ascii") for raw in list(st.ring)[-4:]]
     frames.append(base64.b64encode(annotated).decode("ascii"))
     for suspect in triggered:
@@ -967,7 +1063,7 @@ def scan_stream(sid: str) -> None:
             "alertId": None,
         }
         RT.events.appendleft(event)
-        log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"])
+        log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"], anchor=suspect.anchor)
         PUSH_POOL.submit(push_event, event, frames)
     for key in [k for k, until in st.cooldown.items() if until < now - 60]:
         del st.cooldown[key]
@@ -1056,6 +1152,15 @@ def health() -> dict[str, Any]:
         "streams": streams,
         "recentEvents": list(RT.events)[:12],
         "hitLog": list(RT.hitlog)[:40],
+        "learning": {
+            sid: {
+                "version": item.get("version", 0),
+                "policy": item.get("policy", POLICY_DUAL),
+                "tags": item.get("tagCount", 0),
+                "anchor": bool(item.get("anchor")),
+            }
+            for sid, item in RT.cfg.learning.items()
+        },
         "versions": RT.versions,
         "lastReloadMs": RT.last_reload_ms,
         "uptimeSec": int(time.time() - RT.started_at),
@@ -1110,8 +1215,36 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
         prompts.append(prompt)
         role_map[prompt] = item.role
         label_map[prompt] = item.labelZh
+    learned_owner: dict[str, set[str]] = {}
+    learned_conf: dict[tuple[str, str], float] = {}
+    for sid, item in req.learning.items():
+        tag_count = 0
+        for tag in item.tags[:MAX_LEARNED_TAGS]:
+            prompt = " ".join(tag.promptEn.split())
+            if not prompt or tag.role not in (ROLE_SUBJECT, ROLE_CONTEXT):
+                continue
+            if prompt in role_map and prompt not in learned_owner:
+                continue  # 与基础词表重复，沿用基础词条，不做通道隔离
+            if prompt not in role_map:
+                prompts.append(prompt)
+                role_map[prompt] = tag.role
+                label_map[prompt] = tag.labelZh or prompt
+            learned_owner.setdefault(prompt, set()).add(sid)
+            learned_conf[(sid, prompt)] = min(0.95, max(0.1, tag.confidence))
+            tag_count += 1
+        anchor = None
+        if item.anchor and len(item.anchor.center) == 2:
+            anchor = {
+                "center": [min(1000.0, max(0.0, item.anchor.center[0])), min(1000.0, max(0.0, item.anchor.center[1]))],
+                "radius": min(1000.0, max(10.0, item.anchor.radius)),
+                "description": item.anchor.description,
+            }
+        policy = POLICY_ANCHOR if item.policy == POLICY_ANCHOR and anchor else POLICY_DUAL
+        cfg.learning[sid] = {"version": item.version, "policy": policy, "anchor": anchor, "tagCount": tag_count}
     with RT.cfg_lock:
         RT.cfg = cfg
+        RT.learned_owner = learned_owner
+        RT.learned_conf = learned_conf
         RT.role_map = role_map
         RT.label_map = label_map
         RT.vocab = list(req.vocabulary)
@@ -1148,7 +1281,7 @@ def fresh_view(sid: str, force: bool = False) -> dict[str, Any]:
     if RT.model_state == "ready" and RT.model is not None and RT.classes_applied:
         if st.preview_tracker is None:
             st.preview_tracker = make_tracker()
-        dets = detect(image, st.preview_tracker)
+        dets = detect(image, st.preview_tracker, sid)
     return {"ts": time.time(), "image": image, "dets": dets, "motion": ratio, "mask": mask, "reused": False}
 
 
@@ -1158,7 +1291,7 @@ def annotated(stream_id: str) -> Response:
     degraded = RT.model_state != "ready"
     canvas = draw(
         view["image"], view["dets"], header_text(view["motion"], view["dets"]),
-        view.get("mask") if degraded else None, degraded, zones_for(stream_id),
+        view.get("mask") if degraded else None, degraded, zones_for(stream_id), anchor_of(stream_id),
     )
     return Response(content=encode_jpeg(canvas), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -1169,7 +1302,7 @@ def inspect_once(stream_id: str) -> dict[str, Any]:
     view = fresh_view(stream_id, force=True)
     dets: list[Det] = view["dets"]
     degraded = RT.model_state != "ready"
-    suspects, passed, persons = evaluate(dets) if not degraded else ([], 0, 0)
+    suspects, passed, persons = evaluate(dets, stream_id) if not degraded else ([], 0, 0)
     if not degraded:
         suspects.extend(zone_suspects(stream_id, dets, view["image"].shape[:2], None))
     if degraded:
@@ -1182,7 +1315,7 @@ def inspect_once(stream_id: str) -> dict[str, Any]:
         decision = "no-target"
     canvas = draw(
         view["image"], dets, header_text(view["motion"], dets),
-        view.get("mask") if degraded else None, degraded, zones_for(stream_id),
+        view.get("mask") if degraded else None, degraded, zones_for(stream_id), anchor_of(stream_id),
     )
     st = stream_state(stream_id)
     return {

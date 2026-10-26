@@ -59,7 +59,7 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
 
 /** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
 export const MAX_VOCABULARY = 300
-const PROMPT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ,'\-/]{1,63}$/
+export const PROMPT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ,'\-/]{1,63}$/
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
   const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN
@@ -236,6 +236,8 @@ export interface VisionHitEntry {
   eventId?: string
   /** 相同内容在去重窗口内重复出现的次数 */
   repeat: number
+  /** 该条由「记忆锚点靠近」触发（自优化闭环带来的触发路径），而非双目标重叠 */
+  anchor?: boolean
 }
 
 export interface VisionHitsResponse {
@@ -384,6 +386,7 @@ export const VISION_ENDPOINTS = {
   engine: "/api/v1/vision/engine",
   compile: "/api/v1/vision/prompts/compile",
   hits: "/api/v1/vision/hits",
+  learning: "/api/v1/vision/learning",
 } as const
 
 export function streamAnnotatedUrl(streamId: string) {

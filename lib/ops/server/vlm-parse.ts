@@ -1,5 +1,6 @@
 import type { VlmBbox, VlmFinalResult, VlmPromptRule } from "../vlm-api-types"
 import type { VlmSeverity } from "../vlm-types"
+import { sanitizeTier1Feedback } from "@/lib/vigil/tier1-learning"
 
 const SEVERITIES: ReadonlySet<string> = new Set(["CRITICAL", "WARNING", "INFO", "SAFE"])
 const NO_RULE_VALUES: ReadonlySet<string> = new Set(["", "NONE", "NULL", "N/A", "无"])
@@ -128,7 +129,13 @@ function coerceResult(
     advice: text(record.advice ?? record.actionAdvice),
     summary: leadingSentence(reasoning) || (triggered ? matched.name : "未触发任何生效规则"),
     evidenceKeyframes: evidenceFrame === null ? [] : [evidenceFrame],
+    ...(triggered ? tier1FeedbackField(record.tier1_feedback ?? record.tier1Feedback) : {}),
   }
+}
+
+function tier1FeedbackField(raw: unknown) {
+  const tier1Feedback = sanitizeTier1Feedback(raw)
+  return tier1Feedback ? { tier1Feedback } : {}
 }
 
 export function parseFinalResult(

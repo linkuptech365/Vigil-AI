@@ -4,6 +4,7 @@ import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops
 import type { VlmFinalResult, VlmKeyframeInput, VlmMetrics, VlmPromptRule, VlmVerdict } from "@/lib/ops/vlm-api-types"
 import { MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
+import { feedbackFromAnalysis, tier1ExistingForSource } from "@/lib/ops/server/tier1-feedback"
 import { runAnalysis } from "@/lib/ops/server/vlm-engine"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadProfiles } from "@/lib/storage/model-store"
@@ -171,6 +172,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       rules: promptRules,
       stream: false,
       remoteStream: false,
+      tier1Existing: tier1ExistingForSource("channel", meta.id),
     },
     { signal: options.signal, pace: false, requestHost: options.requestHost }
   )
@@ -179,6 +181,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       result = chunk.result
       metrics = chunk.metrics
       verdict = chunk.verdict
+      feedbackFromAnalysis("channel", meta.id, chunk.result, chunk.verdict)
     } else if (chunk.type === "error") {
       errorMessage = chunk.message
     }

@@ -119,3 +119,28 @@ export interface LocateOptions {
   timestampSec?: number
   label?: string
 }
+
+/** 二级 VLM 反哺一级初筛的触发策略：DUAL_INTERACTION 仍需双目标重叠；ANCHOR_PROXIMITY 主体进入记忆锚点即触发。 */
+export type Tier1TriggerPolicy = "DUAL_INTERACTION" | "ANCHOR_PROXIMITY"
+
+/** 二级 VLM 判定成立后，回写给一级初筛的补充词、静态锚点与触发策略建议。 */
+export interface Tier1Feedback {
+  recommended_tags?: Array<{
+    /** 补充的高辨识度英文词（如 "white plastic pet dispenser"） */
+    tag: string
+    /** 中文名称 */
+    zh_name: string
+    role: "subject_target" | "context_object"
+    /** 建议置信度阈值 0.2 ~ 0.6 */
+    confidence_threshold: number
+  }>
+  spatial_hotspot?: {
+    /** 归一化坐标 [0~1000, 0~1000] */
+    center: [number, number]
+    /** 影响半径 0 ~ 1000 */
+    radius: number
+    /** 例如「喂食器进食点」 */
+    description: string
+  }
+  trigger_policy?: Tier1TriggerPolicy
+}

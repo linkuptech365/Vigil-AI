@@ -7,6 +7,8 @@ import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/pyth
 import { loadZones } from "@/lib/storage/roi-store"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
+import { loadAllLearning } from "@/lib/storage/tier1-learning-store"
+import { toWorkerLearning, type WorkerLearning } from "@/lib/vigil/tier1-learning"
 import {
   motionFallbackActive,
   motionFallbackSnapshot,
@@ -410,6 +412,15 @@ function workerZones() {
     }))
 }
 
+/** 每路通道沉淀出的补充词 / 记忆锚点 / 触发策略；没有学习内容的通道不下发。 */
+function workerLearning(): Record<string, WorkerLearning> {
+  const out: Record<string, WorkerLearning> = {}
+  for (const [streamId, learning] of Object.entries(loadAllLearning())) {
+    if (learning.tags.length > 0 || learning.anchor) out[streamId] = toWorkerLearning(learning)
+  }
+  return out
+}
+
 function buildPayload(config: VisionConfig) {
   return {
     enabled: config.enabled,
@@ -423,6 +434,7 @@ function buildPayload(config: VisionConfig) {
   vocabulary: config.vocabulary,
   zones: workerZones(),
   streamIds: monitoredStreamIds(),
+  learning: workerLearning(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),
   }

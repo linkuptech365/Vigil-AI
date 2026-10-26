@@ -16,6 +16,8 @@ export interface NormalizedInput {
   /** 向远端模型发起流式（SSE）请求；默认 false，即 `stream: false` */
   remoteStream: boolean
   simulation?: VlmSimulationHint
+  /** 该通道一级初筛当前已使用的检测词（英文），供模型避免重复推荐 */
+  tier1Existing?: string[]
 }
 
 export interface EngineContext {

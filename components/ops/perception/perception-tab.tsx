@@ -4,6 +4,7 @@ import { VisionCard } from "@/components/vigil/config/vision-card"
 import { EscalationQueue } from "./escalation-queue"
 import { FilterMetrics } from "./filter-metrics"
 import { HitLog } from "./hit-log"
+import { LearningPanel } from "./learning-panel"
 import { RoiManager } from "./roi-manager"
 import { TrackingCanvas } from "./tracking-canvas"
 
@@ -21,6 +22,7 @@ export function PerceptionTab() {
         <div className="flex min-w-0 flex-col gap-4">
           <TrackingCanvas />
           <HitLog />
+          <LearningPanel />
         </div>
         <RoiManager />
       </div>

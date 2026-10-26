@@ -1,4 +1,5 @@
 import type { RuleSeverity } from "./rules-types"
+import type { Tier1Feedback } from "./types"
 import type { VlmSeverity } from "./vlm-types"
 
 export type VlmProtocol = "openai" | "ollama" | "dashscope"
@@ -78,6 +79,8 @@ export interface VlmFinalResult {
   summary: string
   /** 引用的关键帧，取值为请求中 keyframes[].index */
   evidenceKeyframes: number[]
+  /** 判定成立时，模型回写给一级初筛的补充词 / 记忆锚点 / 触发策略建议（仅实时通道会被采纳） */
+  tier1Feedback?: Tier1Feedback
 }
 
 /** 模型原始判定经阈值校验、防抖聚合后的最终裁决 */

@@ -41,6 +41,11 @@ function HitRow({ entry }: { entry: VisionHitEntry }) {
           {gate.label}
           {entry.gate === "pending" && entry.progress ? ` ${entry.progress.hits}/${entry.progress.need}` : ""}
         </Badge>
+        {entry.anchor ? (
+          <Badge variant="outline" className="border-primary/40 bg-primary/10 text-[10px] text-primary">
+            记忆锚点
+          </Badge>
+        ) : null}
         {entry.repeat > 1 ? <span className="font-mono text-[10px] text-muted-foreground">×{entry.repeat}</span> : null}
         {entry.eventId ? <span className="font-mono text-[10px] text-muted-foreground">{entry.eventId}</span> : null}
       </div>

@@ -67,7 +67,7 @@ async function* runRemote(
   ctx: EngineContext
 ): AsyncGenerator<PreVerdictChunk, RemoteOutcome> {
   const images = collectImages(input.keyframes, plan.protocol)
-  const systemPrompt = buildSystemInstruction(input.rules)
+  const systemPrompt = buildSystemInstruction(input.rules, input.tier1Existing)
   const userPrompt = buildUserPrompt(input, images.length)
 
   yield {

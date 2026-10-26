@@ -17,6 +17,7 @@ import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { PathGuardError } from "@/lib/ops/server/path-guard"
 import { profileReadiness } from "@/lib/vigil/model-registry"
 import { locateVideo } from "@/lib/ops/server/video-locator"
+import { feedbackFromAnalysis, tier1ExistingForSource } from "@/lib/ops/server/tier1-feedback"
 import { runAnalysis, willCallRemote } from "@/lib/ops/server/vlm-engine"
 import type { EngineContext, NormalizedInput } from "@/lib/ops/server/vlm-shared"
 
@@ -211,6 +212,7 @@ function normalizeRequest(body: unknown): { input: NormalizedInput } | { error: 
       stream: record.stream !== false,
       remoteStream: record.remoteStream === true,
       simulation: parseSimulation(record.simulation),
+      tier1Existing: tier1ExistingForSource(sourceType, sourceKey),
     },
   }
 }
@@ -224,7 +226,10 @@ function streamResponse(input: NormalizedInput, ctx: EngineContext, abort: Abort
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
       }
       try {
-        for await (const chunk of runAnalysis(input, ctx)) send(chunk)
+        for await (const chunk of runAnalysis(input, ctx)) {
+          if (chunk.type === "done") feedbackFromAnalysis(input.sourceType, input.sourceKey, chunk.result, chunk.verdict)
+          send(chunk)
+        }
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : "推理引擎内部错误" })
       } finally {
@@ -259,6 +264,7 @@ async function collectResponse(input: NormalizedInput, ctx: EngineContext) {
       result = chunk.result
       metrics = chunk.metrics
       verdict = chunk.verdict
+      feedbackFromAnalysis(input.sourceType, input.sourceKey, chunk.result, chunk.verdict)
     } else if (chunk.type === "error") return fail(chunk.message, 500)
   }
 
