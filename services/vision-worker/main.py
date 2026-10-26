@@ -308,12 +308,28 @@ class Runtime:
         self.last_reload_ms = 0.0
         self.model_lock = threading.RLock()
         self.cfg_lock = threading.RLock()
+        # 词表后台更新：updating 由 pending 计数推导，/health 只读这些字段，绝不取锁
+        self.vocab_version = 0
+        self.update_pending = 0
+        self.update_started = 0.0
+        self.update_state_lock = threading.Lock()
+        # 词表 -> 已编码的 CLIP 文本嵌入快照；通道间切换词表时直接还原，不再重复跑 CLIP 文本编码
+        self.vocab_cache: dict[tuple[str, ...], dict[str, Any] | None] = {}
+
+    @property
+    def updating(self) -> bool:
+        return self.update_pending > 0
 
 
 RT = Runtime()
 STOP = threading.Event()
 HTTP = httpx.Client(timeout=httpx.Timeout(10.0, connect=3.0))
 PUSH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tier2-push")
+# 单线程：词表更新严格串行，且永远不占用 uvicorn 事件循环与 anyio 线程池
+VOCAB_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vocab-update")
+# CPU 推理总帧率预算（所有通道合计）；GPU/MPS 不受限
+CPU_TOTAL_FPS = max(0.5, float(os.environ.get("VIGIL_CPU_MAX_FPS", "3") or 3))
+VOCAB_CACHE_MAX = 16
 
 
 def now_iso() -> str:
@@ -459,6 +475,87 @@ def degrade(reason: str) -> None:
     log(f"进入 degraded (motion-only) 模式：{reason}")
 
 
+def remember_classes(prompts: list[str]) -> None:
+    """set_classes 成功后抓取文本嵌入快照；内部结构与预期不符时记 None，之后每次都退回完整 set_classes。"""
+    key = tuple(prompts)
+    snapshot: dict[str, Any] | None = None
+    try:
+        inner = RT.model.model
+        txt_feats = getattr(inner, "txt_feats", None)
+        head = inner.model[-1]
+        if txt_feats is not None and hasattr(head, "nc"):
+            snapshot = {"txt_feats": txt_feats, "nc": head.nc, "names": [p for p in prompts if p != " "]}
+    except Exception:  # noqa: BLE001
+        snapshot = None
+    if len(RT.vocab_cache) >= VOCAB_CACHE_MAX:
+        RT.vocab_cache.pop(next(iter(RT.vocab_cache)))
+    RT.vocab_cache[key] = snapshot
+
+
+def restore_classes(prompts: list[str]) -> bool:
+    """命中缓存时直接还原文本嵌入（毫秒级），不触发 CLIP 文本编码与任何磁盘/网络读取。调用方需持有 model_lock。"""
+    snapshot = RT.vocab_cache.get(tuple(prompts))
+    if not snapshot:
+        return False
+    try:
+        inner = RT.model.model
+        inner.txt_feats = snapshot["txt_feats"]
+        inner.model[-1].nc = snapshot["nc"]
+        inner.names = list(snapshot["names"])
+        predictor = getattr(RT.model, "predictor", None)
+        if predictor is not None:
+            predictor.model.names = list(snapshot["names"])
+        return True
+    except Exception as error:  # noqa: BLE001
+        log(f"词表缓存还原失败，改走完整编码：{str(error)[:120]}")
+        RT.vocab_cache.pop(tuple(prompts), None)
+        return False
+
+
+def run_vocab_update(version: int) -> None:
+    """后台线程：预热所有通道词表的文本嵌入并写入首个词表。被更新的配置取代时立即放弃。"""
+    started = time.perf_counter()
+    try:
+        if RT.model is None:
+            return
+        contexts = distinct_contexts()
+        for prompts in contexts:
+            if version != RT.vocab_version:
+                log(f"词表更新 v{version} 已被 v{RT.vocab_version} 取代，放弃")
+                return
+            apply_classes(list(prompts))
+        first = contexts[0] if contexts else []
+        ok, message = apply_classes(list(first))
+        log(f"词表后台应用完成（{(time.perf_counter() - started) * 1000:.0f}ms，{len(contexts)} 套上下文）：{message}")
+    except Exception as error:  # noqa: BLE001
+        log(f"词表后台更新异常：{str(error)[:200]}")
+    finally:
+        with RT.update_state_lock:
+            RT.update_pending = max(0, RT.update_pending - 1)
+
+
+def schedule_vocab_update() -> None:
+    """把词表更新丢到后台线程并立即返回；绝不在请求线程/事件循环里调用 set_classes。"""
+    with RT.update_state_lock:
+        RT.update_pending += 1
+        if RT.update_pending == 1:
+            RT.update_started = time.time()
+    version = RT.vocab_version
+    try:
+        VOCAB_POOL.submit(run_vocab_update, version)
+    except RuntimeError:
+        with RT.update_state_lock:
+            RT.update_pending = max(0, RT.update_pending - 1)
+
+
+def effective_fps(cfg: Config) -> float:
+    """CPU 推理按总预算限帧（默认 3 FPS 合计、均分到各通道），避免占满 CPU 拖死接口；GPU/MPS 不受限。"""
+    fps = max(0.2, cfg.sample_fps)
+    if RT.device == "cpu" and RT.model_state == "ready" and RT.model is not None:
+        fps = min(fps, max(0.5, CPU_TOTAL_FPS / max(1, len(cfg.stream_ids))))
+    return fps
+
+
 def apply_classes(prompts: list[str]) -> tuple[bool, str]:
     """把词表写入 YOLO-World（内存热切换，不重启进程，也不重置 ByteTrack 轨迹）。"""
     if RT.model is None:
@@ -470,7 +567,14 @@ def apply_classes(prompts: list[str]) -> tuple[bool, str]:
         return True, "词表未变化"
     try:
         with RT.model_lock:
-            RT.model.set_classes(prompts)
+            if not restore_classes(prompts):
+                started = time.perf_counter()
+                # set_classes 会原地修改传入列表，必须传副本
+                RT.model.set_classes(list(prompts))
+                elapsed = time.perf_counter() - started
+                if elapsed > 2.0:
+                    log(f"词表编码耗时 {elapsed:.1f}s（{len(prompts)} 条）")
+                remember_classes(prompts)
         RT.classes_applied = list(prompts)
         RT.model_state = "ready"
         RT.reason = ""
@@ -496,6 +600,11 @@ def load_model() -> None:
         import torch
 
         RT.versions["torch"] = torch.__version__
+        if RT.device == "cpu":
+            # 留出至少 1 个核心给事件循环与 /health，避免 torch 吃满全部核心
+            threads = int(os.environ.get("VIGIL_TORCH_THREADS", "0") or 0) or max(1, (os.cpu_count() or 2) - 1)
+            torch.set_num_threads(threads)
+            RT.versions["torchThreads"] = str(threads)
     except Exception:  # noqa: BLE001
         pass
     if not WEIGHTS_PATH.exists():
@@ -516,9 +625,8 @@ def load_model() -> None:
         return
     RT.model_state = "ready"
     RT.reason = ""
-    first = first_context()
-    if first:
-        apply_classes(first)
+    if first_context():
+        schedule_vocab_update()
 
 
 # --------------------------------------------------------------------------- #
@@ -642,7 +750,7 @@ def label_of(prompt: str, sid: str = "") -> str:
 
 
 def evaluate(dets: list[Det], sid: str = "") -> tuple[list[Suspect], int, int]:
-    """三阶门控：返回（疑似目标列表, 合规放行人数, 画面中人数）。"""
+    """三阶门控：返回（疑似目标列表, 合规放行人数, 画面中人数）���"""
     low, high = RT.cfg.low, RT.cfg.high
     required = [p for p, r in roles_of(sid).items() if r == ROLE_PPE and p in prompts_of(sid)]
     persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= low]
@@ -1446,7 +1554,11 @@ def scan_loop() -> None:
         if not cfg.enabled or not cfg.stream_ids:
             STOP.wait(0.5)
             continue
-        interval = 1.0 / max(0.2, cfg.sample_fps)
+        if RT.updating:
+            # 词表正在后台更新：暂停推理，避免与 set_classes 争抢 model_lock / CPU
+            STOP.wait(0.2)
+            continue
+        interval = 1.0 / effective_fps(cfg)
         for sid in list(cfg.stream_ids):
             st = stream_state(sid)
             now = time.time()
@@ -1498,8 +1610,10 @@ def channel_contexts_view() -> dict[str, Any]:
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
+    """async + 纯内存读取：不进线程池、不取任何锁，即使推理/词表更新占满 CPU 也能即时响应。"""
     ready = RT.model_state == "ready"
+    updating = RT.updating
     streams: dict[str, Any] = {}
     now = time.time()
     for sid in RT.cfg.stream_ids:
@@ -1523,7 +1637,10 @@ def health() -> dict[str, Any]:
         }
     return {
         "ok": True,
-        "status": RT.model_state,
+        "status": "busy_updating" if updating else RT.model_state,
+        "modelState": RT.model_state,
+        "updating": updating,
+        "updatingForSec": round(time.time() - RT.update_started, 1) if updating else 0,
         "mode": "yolo-world+" + RT.tracker_kind if ready else "motion-only",
         "reason": RT.reason,
         "device": RT.device,
@@ -1553,6 +1670,8 @@ def health() -> dict[str, Any]:
         "uptimeSec": int(time.time() - RT.started_at),
         "enabled": RT.cfg.enabled,
         "sampleFps": RT.cfg.sample_fps,
+        "effectiveFps": round(effective_fps(RT.cfg), 2),
+        "cpuThrottled": effective_fps(RT.cfg) < max(0.2, RT.cfg.sample_fps) - 1e-6,
     }
 
 
@@ -1563,7 +1682,8 @@ def reset_stats() -> dict[str, Any]:
 
 
 @app.post("/config/reload")
-def config_reload(req: ReloadRequest) -> dict[str, Any]:
+async def config_reload(req: ReloadRequest) -> dict[str, Any]:
+    """只做毫秒级的配置解析与状态切换；词表（CLIP 文本编码）交给后台线程，请求立即返回。"""
     started = time.perf_counter()
     low = min(0.95, max(0.05, req.confidenceLow))
     high = min(0.99, max(low + 0.05, req.confidenceHigh))
@@ -1697,23 +1817,23 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
         for sid in list(RT.streams):
             if sid not in cfg.stream_ids:
                 del RT.streams[sid]
-    first = first_context()
-    if first:
-        with RT.model_lock:
-            ok, message = apply_classes(first)
+    RT.vocab_version += 1
+    if RT.model is not None:
+        schedule_vocab_update()
+        ok, message = True, f"配置已受理，{len(distinct_contexts())} 套词表正在后台应用"
     else:
-        with RT.model_lock:
-            ok, message = apply_classes([])
+        ok, message = False, RT.reason
     RT.last_reload_ms = round((time.perf_counter() - started) * 1000, 1)
     log(
-        f"配置已热更新（{RT.last_reload_ms}ms）：默认词表 {len(default_prompts)} 条 · "
+        f"配置已受理（{RT.last_reload_ms}ms）：默认词表 {len(default_prompts)} 条 · "
         f"{len(channel_contexts)} 路独立词表上下文 · {len(cfg.stream_ids)} 路通道 · {message}"
     )
     return {
         "ok": ok,
         "reloadMs": RT.last_reload_ms,
         "message": message,
-        "status": RT.model_state,
+        "status": "busy_updating" if RT.updating else RT.model_state,
+        "updating": RT.updating,
         "reason": RT.reason,
         "classes": classes_view(),
     }

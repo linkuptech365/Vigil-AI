@@ -42,9 +42,19 @@ const STARTUP_GRACE_MS = 20_000
 const MAX_BACKOFF_MS = 30_000
 const STABLE_UPTIME_MS = 60_000
 const INSTALL_TIMEOUT_MS = 40 * 60_000
+/** 配置热更新下发后的宽限期：期间探活失败不计入连续心跳失败，也不触发降级 */
+const RELOAD_GRACE_MS = 30_000
+/** 宽限期之外，连续丢失这么多次心跳才判定 Worker 掉线（5s 一次 ≈ 15s） */
+const MISS_TOLERANCE = 3
+/** 进程存活却连续这么多次心跳无响应（≈ 90s）视为假死，强制重启 */
+const HUNG_BEATS = 18
 
 interface WorkerHealth {
   status: "ready" | "degraded" | "loading"
+  /** Worker 后台正在应用词表（/health 原始 status 为 busy_updating 时置位） */
+  updating?: boolean
+  effectiveFps?: number
+  cpuThrottled?: boolean
   mode: string
   reason: string
   device: string
@@ -77,6 +87,13 @@ interface VisionState {
   installing: boolean
   installOutput: string
   depsCache: { at: number; ok: boolean; python: PythonPick | null } | null
+  /** 热更新宽限期截止时间戳（ms） */
+  graceUntil: number
+  /** 宽限期之外连续丢失的心跳数 */
+  missedBeats: number
+  /** 进入降级（node-motion）的时间戳，0 表示未降级 */
+  degradedSince: number
+  ticking: boolean
 }
 
 interface PythonPick {
@@ -107,6 +124,10 @@ function state(): VisionState {
       installing: false,
       installOutput: "",
       depsCache: null,
+      graceUntil: 0,
+      missedBeats: 0,
+      degradedSince: 0,
+      ticking: false,
     }
   }
   return globalStore.__vigilVision
@@ -171,7 +192,13 @@ async function probeHealth(): Promise<WorkerHealth | null> {
   try {
     const response = await visionFetch("/health", { timeoutMs: 2_500 })
     if (!response.ok) return null
-    return (await response.json()) as WorkerHealth
+    const body = (await response.json()) as Omit<WorkerHealth, "status"> & {
+      status: WorkerHealth["status"] | "busy_updating"
+      modelState?: WorkerHealth["status"]
+    }
+    // busy_updating 只代表后台正在应用词表，进程是活的：按底层模型状态对待，并标记 updating
+    if (body.status === "busy_updating") return { ...body, status: body.modelState ?? "ready", updating: true }
+    return { ...body, status: body.status, updating: false }
   } catch {
     return null
   }
@@ -290,21 +317,56 @@ async function launch() {
   })
 }
 
+const inReloadGrace = () => Date.now() < state().graceUntil
+
+/**
+ * 5 秒一次的静默心跳，同时承担"降级后自动恢复探测"：
+ * - 热更新宽限期内探活失败不计数、不降级；
+ * - 宽限期外连续 MISS_TOLERANCE 次失败才降级到 node-motion 帧差；
+ * - 降级期间继续探测，Worker 一响应就无缝升级回 YOLO-World + ByteTrack，无需人工重启；
+ * - 进程存活却长期无响应（假死）则强制重启。
+ */
 async function healthTick() {
   const s = state()
-  if (s.stopping || s.installing) return
-  const health = await probeHealth()
-  const wasHealthy = s.healthy
-  s.healthy = health !== null
-  syncFallback()
-  if (health) {
-    s.health = health
-    if (Date.now() - s.startedAt > STABLE_UPTIME_MS) s.failures = 0
-    if (!wasHealthy) s.lastPushHash = ""
-    await pushConfig()
-    return
+  if (s.stopping || s.installing || s.ticking) return
+  s.ticking = true
+  try {
+    const health = await probeHealth()
+    if (health) {
+      const wasHealthy = s.healthy
+      const recovered = !wasHealthy && s.degradedSince > 0
+      s.healthy = true
+      s.health = health
+      s.missedBeats = 0
+      if (recovered) {
+        console.log(`[vision-engine] 视觉 Worker 已恢复响应（降级 ${Math.round((Date.now() - s.degradedSince) / 1000)}s），自动升级回 YOLO-World + ByteTrack`)
+        s.degradedSince = 0
+      }
+      syncFallback()
+      if (Date.now() - s.startedAt > STABLE_UPTIME_MS) s.failures = 0
+      if (!wasHealthy) s.lastPushHash = ""
+      await pushConfig()
+      return
+    }
+
+    if (inReloadGrace()) return
+
+    s.missedBeats += 1
+    if (s.healthy && s.missedBeats < MISS_TOLERANCE) return
+    s.healthy = false
+    if (!s.degradedSince) s.degradedSince = Date.now()
+    syncFallback()
+
+    if (s.child && s.missedBeats >= HUNG_BEATS && Date.now() - s.startedAt > STARTUP_GRACE_MS) {
+      s.lastError = `vision-worker 进程假死（连续 ${s.missedBeats} 次心跳无响应），已强制重启`
+      s.missedBeats = 0
+      killChild()
+      return
+    }
+    if (!s.child && !s.restartTimer) await launch()
+  } finally {
+    s.ticking = false
   }
-  if (!s.child && !s.restartTimer) await launch()
 }
 
 /** 幂等：启动健康检查并按需拉起 vision-worker。 */
@@ -478,12 +540,14 @@ export async function pushConfig(force = false, config: VisionConfig = loadVisio
   const payload = buildPayload(config)
   const hash = crypto.createHash("sha1").update(JSON.stringify(payload)).digest("hex")
   if (!force && hash === s.lastPushHash) return null
+  // 下发即进入宽限期：Worker 在后台应用词表期间，探活失败不计入连续心跳失败
+  s.graceUntil = Date.now() + RELOAD_GRACE_MS
   try {
     const response = await visionFetch("/config/reload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      timeoutMs: 60_000,
+      timeoutMs: 20_000,
     })
     const body = (await response.json().catch(() => ({}))) as { ok?: boolean; reloadMs?: number; message?: string }
     if (!response.ok) return { ok: false, reloadMs: 0, message: `vision-worker 拒绝了配置（HTTP ${response.status}）` }
@@ -513,7 +577,12 @@ function describe(): { status: VisionStatus; issue?: VisionIssue; message: strin
   if (disabled()) return { status: "disabled", issue: "disabled", message: "已通过 VIGIL_DISABLE_VISION_ENGINE=1 关闭视觉初筛服务" }
   if (s.installing) return { status: "installing", message: "正在安装视觉运行环境…" }
   if (s.healthy && s.health) {
-    return { status: s.health.status, message: s.health.reason || (s.health.status === "ready" ? "YOLO-World + ByteTrack 运行正常" : "视觉服务模型加载中") }
+    if (s.health.updating) return { status: s.health.status, message: "视觉服务正在后台热更新词表，期间保持在线，稍后自动恢复推理" }
+    const throttle = s.health.cpuThrottled ? `（CPU 环境已限帧至 ${s.health.effectiveFps} FPS/路）` : ""
+    return {
+      status: s.health.status,
+      message: s.health.reason || (s.health.status === "ready" ? `YOLO-World + ByteTrack 运行正常${throttle}` : "视觉服务模型加载中"),
+    }
   }
   const { python, ok } = pickPython()
   if (!python) {
@@ -529,6 +598,7 @@ function describe(): { status: VisionStatus; issue?: VisionIssue; message: strin
     return { status: "offline", issue: "crashed", message: `${s.lastError || "视觉服务进程已退出"}，正在自动重启（第 ${s.restarts + 1} 次）` }
   }
   if (!s.child) return { status: "starting", message: "视觉服务正在启动…" }
+  if (inReloadGrace()) return { status: "loading", message: "配置热更新宽限期内，等待视觉服务响应…" }
   return { status: "offline", issue: "unreachable", message: `视觉服务进程已启动但 ${WORKER_HOST}:${WORKER_PORT} 无响应${s.stderrTail.length ? `：${s.stderrTail[s.stderrTail.length - 1]}` : ""}` }
 }
 
