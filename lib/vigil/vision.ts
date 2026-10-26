@@ -31,17 +31,14 @@ export interface VisionConfig {
   minConsecutiveFrames: number
   cooldownSeconds: number
   staticRecheckSeconds: number
-  naturalLanguageInstruction: string
-  vocabulary: VocabularyItem[]
 }
 
-export const DEFAULT_VOCABULARY: VocabularyItem[] = [
-  { id: "v1", labelZh: "洁净服操作员", promptEn: "person in white cleanroom suit", role: "anchor_person", enabled: true },
-  { id: "v2", labelZh: "口罩", promptEn: "face mask on face", role: "required_ppe", enabled: true },
-  { id: "v3", labelZh: "手套", promptEn: "gloved hands", role: "required_ppe", enabled: true },
-  { id: "v4", labelZh: "裸露头发", promptEn: "bare head with exposed hair", role: "hazard_target", enabled: true },
-  { id: "v5", labelZh: "裸露皮肤", promptEn: "exposed skin", role: "hazard_target", enabled: true },
-  { id: "v6", labelZh: "地面遗留工具", promptEn: "tool left on floor", role: "hazard_target", enabled: true },
+/**
+ * 未配置专属词表的通道使用的最小基线：只保留一个人员锚点用于分配 Track ID，
+ * 不携带任何业务含义的检测词。检测词表全部归属通道，系统不再维护全局词表。
+ */
+export const BASELINE_VOCABULARY: VocabularyItem[] = [
+  { id: "baseline-person", labelZh: "人员", promptEn: "person", role: "anchor_person", enabled: true },
 ]
 
 export const DEFAULT_VISION_CONFIG: VisionConfig = {
@@ -53,8 +50,6 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
   minConsecutiveFrames: 3,
   cooldownSeconds: 30,
   staticRecheckSeconds: 10,
-  naturalLanguageInstruction: "",
-  vocabulary: DEFAULT_VOCABULARY,
 }
 
 /** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
@@ -150,7 +145,6 @@ export function sanitizeVisionConfig(input: unknown, base: VisionConfig = DEFAUL
   const raw = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {}
   const low = clampNumber(raw.confidenceLow, 0.05, 0.95, base.confidenceLow)
   const high = Math.min(0.99, Math.max(low + 0.05, clampNumber(raw.confidenceHigh, 0.1, 0.99, base.confidenceHigh)))
-  const vocabulary = "vocabulary" in raw ? sanitizeVocabulary(raw.vocabulary) : null
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : base.enabled,
     sampleFps: clampNumber(raw.sampleFps, 0.2, 10, base.sampleFps),
@@ -160,11 +154,6 @@ export function sanitizeVisionConfig(input: unknown, base: VisionConfig = DEFAUL
     minConsecutiveFrames: Math.round(clampNumber(raw.minConsecutiveFrames, 1, 30, base.minConsecutiveFrames)),
     cooldownSeconds: clampNumber(raw.cooldownSeconds, 0, 3600, base.cooldownSeconds),
     staticRecheckSeconds: clampNumber(raw.staticRecheckSeconds, 0, 300, base.staticRecheckSeconds),
-    naturalLanguageInstruction:
-      typeof raw.naturalLanguageInstruction === "string"
-        ? raw.naturalLanguageInstruction.slice(0, 1000)
-        : base.naturalLanguageInstruction,
-    vocabulary: vocabulary ?? base.vocabulary,
   }
 }
 
@@ -336,21 +325,6 @@ export interface VisionConfigResponse {
   reload?: { ok: boolean; reloadMs: number; message: string }
 }
 
-export interface CompileResponse {
-  status: "ok"
-  source: "llm" | "fallback"
-  model?: string
-  note: string
-  /** 本次编译模型给出的词条（不含已有词条）。 */
-  vocabulary: VocabularyItem[]
-  config: VisionConfig
-  mode: "append" | "replace"
-  added: number
-  skipped: number
-  reenabled: number
-  reload?: { ok: boolean; reloadMs: number; message: string }
-}
-
 export interface InspectDetection {
   prompt: string
   labelZh: string
@@ -384,7 +358,6 @@ export interface InspectResponse {
 export const VISION_ENDPOINTS = {
   config: "/api/v1/vision/config",
   engine: "/api/v1/vision/engine",
-  compile: "/api/v1/vision/prompts/compile",
   hits: "/api/v1/vision/hits",
   learning: "/api/v1/vision/learning",
 } as const

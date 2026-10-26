@@ -111,7 +111,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
       setPrompt("")
       setNote(null)
       setCompiled(null)
-      toast.success(`「${channelName}」已恢复为全局默认词表`, { description: response.reload?.ok ? "视觉服务已热更新" : undefined })
+      toast.success(`「${channelName}」专属词表已清空，仅保留人员锚点基线`, { description: response.reload?.ok ? "视觉服务已热更新" : undefined })
     } catch (caught) {
       toast.error("重置失败", { description: errorMessage(caught) })
     } finally {
@@ -168,7 +168,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
         {data.configured ? (
           <Button variant="outline" size="sm" onClick={() => void handleReset()} disabled={busy}>
             <RotateCcw data-icon="inline-start" />
-            恢复全局默认
+            清空本通道词表
           </Button>
         ) : null}
       </div>
@@ -215,7 +215,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
             variant="outline"
             className={cn("text-[10px]", data.source === "channel" ? "border-primary/40 bg-primary/10 text-primary" : "text-muted-foreground")}
           >
-            {data.source === "channel" ? "本通道专属词表" : "沿用全局默认词表"}
+            {data.source === "channel" ? "本通道专属词表" : "未配置 · 仅人员锚点基线"}
           </Badge>
         </div>
         {tags.length === 0 ? (
@@ -282,7 +282,7 @@ export function ChannelPerceptionCard() {
           通道专属初筛词表
         </CardTitle>
         <CardDescription>
-          每路通道独立维护提示词、编译词表与自优化记忆，推理时只加载本通道词表，互不串扰。切换通道会同步切换上方画面与二级反哺面板。
+          系统不维护全局词表：每路通道独立管理提示词、编译标签、记忆锚点与二级反哺状态，推理时只加载本通道词表，互不串扰。切换通道会同步切换上方画面与二级反哺面板。
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -306,7 +306,7 @@ export function ChannelPerceptionCard() {
         ) : (
           <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <CircleAlert className="size-4" aria-hidden="true" />
-            当前视频源不是实时通道（本地视频或演示源），使用下方全局默认词表；请先在上方选择一个实时通道以配置专属词表。
+            当前视频源不是实时通道（本地视频或演示源），没有可配置的专属词表；请先选择一个实时通道。
           </p>
         )}
       </CardContent>

@@ -8,12 +8,10 @@ import { errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
 import {
   VISION_ENDPOINTS,
   streamInspectUrl,
-  type CompileResponse,
   type InspectResponse,
   type VisionConfig,
   type VisionConfigResponse,
   type VisionInfo,
-  type VocabularyItem,
 } from "@/lib/vigil/vision"
 
 /** 视觉漏斗的配置与引擎状态：多处共享同一个 SWR key，安装/加载期间加快轮询。 */
@@ -36,25 +34,6 @@ export function useVision() {
         return response
       } catch (caught) {
         toast.error("保存视觉配置失败", { description: errorMessage(caught) })
-        return null
-      }
-    },
-    [mutate]
-  )
-
-  const compile = React.useCallback(
-    async (instruction: string, apply: boolean, options?: { mode?: "append" | "replace"; baseVocabulary?: VocabularyItem[] }) => {
-      try {
-        const response = await sendJson<CompileResponse>(VISION_ENDPOINTS.compile, "POST", {
-          instruction,
-          apply,
-          mode: options?.mode ?? "append",
-          baseVocabulary: options?.baseVocabulary,
-        })
-        if (apply) await mutate()
-        return response
-      } catch (caught) {
-        toast.error("编译检测词表失败", { description: errorMessage(caught) })
         return null
       }
     },
@@ -91,7 +70,6 @@ export function useVision() {
     loading: isLoading && !data,
     loadError: error ? errorMessage(error) : null,
     save,
-    compile,
     engineAction,
     inspect,
     refresh: mutate,

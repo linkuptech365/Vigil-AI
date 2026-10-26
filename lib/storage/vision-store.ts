@@ -13,7 +13,7 @@ export function loadVisionConfig(): VisionConfig {
     const parsed = JSON.parse(fs.readFileSync(visionConfigPath(), "utf8")) as { config?: unknown }
     return sanitizeVisionConfig(parsed.config, DEFAULT_VISION_CONFIG)
   } catch {
-    return { ...DEFAULT_VISION_CONFIG, vocabulary: DEFAULT_VISION_CONFIG.vocabulary.map((item) => ({ ...item })) }
+    return { ...DEFAULT_VISION_CONFIG }
   }
 }
 

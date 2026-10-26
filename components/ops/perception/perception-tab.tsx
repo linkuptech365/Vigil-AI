@@ -33,7 +33,7 @@ export function PerceptionTab() {
             一级初筛规则录入
           </h3>
           <p className="text-xs text-muted-foreground">
-            先在下方为当前通道配置专属提示词与词表（仅对该通道生效）；未单独配置的通道沿用最底部的全局默认词表。
+            检测词表只在各通道内配置并仅对该通道生效；最底部是所有通道共用的视觉引擎运行参数，不含词表。
           </p>
         </div>
         <ChannelPerceptionCard />

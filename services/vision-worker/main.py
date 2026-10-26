@@ -697,7 +697,7 @@ def motion_ratio(prev: np.ndarray | None, image: np.ndarray) -> tuple[float | No
 # Tier-1：检测、门控
 # --------------------------------------------------------------------------- #
 def prompts_of(sid: str) -> list[str]:
-    """该通道专属的检测词表；未单独配置的通道回落到默认词表。"""
+    """该通道专属的检测词表；没有全局词表可回落，未知通道返回空词表。"""
     return RT.channel_model_contexts.get(sid, RT.default_prompts)
 
 
@@ -1765,7 +1765,7 @@ def classes_view() -> list[dict[str, str]]:
 def channel_contexts_view() -> dict[str, Any]:
     return {
         sid: {
-            "source": RT.channel_source.get(sid, "default"),
+            "source": RT.channel_source.get(sid, "pipeline-only"),
             "tags": [
                 {"promptEn": p, "labelZh": RT.channel_labels.get(sid, {}).get(p, ""), "role": RT.channel_roles.get(sid, {}).get(p, "")}
                 for p in prompts
@@ -1929,7 +1929,11 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
             labels[prompt] = item.labelZh
         return prompts, roles, labels
 
-    default_prompts, default_roles, default_labels = build_context(req.vocabulary)
+    # 不再存在与通道解绑的全局词表：req.vocabulary 仅为兼容旧调用方保留，一律忽略，
+    # 所有检测词表只从 channelVocabulary（各通道独立配置）抽取
+    default_prompts: list[str] = []
+    default_roles: dict[str, str] = {}
+    default_labels: dict[str, str] = {}
     channel_contexts: dict[str, list[str]] = {}
     channel_roles: dict[str, dict[str, str]] = {}
     channel_labels: dict[str, dict[str, str]] = {}
@@ -1941,8 +1945,8 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
             prompts, roles, labels = build_context(own)
             channel_source[sid] = "channel"
         else:
-            prompts, roles, labels = list(default_prompts), dict(default_roles), dict(default_labels)
-            channel_source[sid] = "default"
+            prompts, roles, labels = [], {}, {}
+            channel_source[sid] = "pipeline-only"
         channel_contexts[sid], channel_roles[sid], channel_labels[sid] = prompts, roles, labels
     # 管道用到的主体/伴生类别并入对应通道词表（角色 ROLE_PIPE，不触发既有判定）；词表里已有的类别不重复添加
     for pipe in cfg.pipelines:
@@ -1953,10 +1957,8 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         targets = cfg.stream_ids if "ALL" in pipe["channels"] else [s for s in pipe["channels"] if s in channel_contexts]
         for sid in targets:
             if sid not in channel_contexts:
-                channel_contexts[sid], channel_roles[sid], channel_labels[sid] = (
-                    list(default_prompts), dict(default_roles), dict(default_labels),
-                )
-                channel_source[sid] = "default"
+                channel_contexts[sid], channel_roles[sid], channel_labels[sid] = [], {}, {}
+                channel_source[sid] = "pipeline-only"
             prompts, roles, labels = channel_contexts[sid], channel_roles[sid], channel_labels[sid]
             lowered = {norm_class(p): p for p in prompts}
             for cls in wanted:
@@ -2010,7 +2012,7 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         ok, message = False, RT.reason
     RT.last_reload_ms = round((time.perf_counter() - started) * 1000, 1)
     log(
-        f"配置已受理（{RT.last_reload_ms}ms）：默认词表 {len(default_prompts)} 条 · "
+        f"配置已受理（{RT.last_reload_ms}ms）：仅按通道词表 · "
         f"{len(channel_contexts)} 路独立词表上下文 · {len(cfg.stream_ids)} 路通道 · {message}"
     )
     return {

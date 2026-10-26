@@ -8,7 +8,7 @@ export interface ChannelPerceptionConfig {
   channelId: string
   /** 中文稽查描述，例如 1 楼为「快递或外卖小哥」，2 楼为「猫吃猫粮」 */
   raw_prompt: string
-  /** 该通道专属编译词表；为空表示尚未单独配置，沿用全局默认词表 */
+  /** 该通道专属编译词表；为空表示尚未配置，仅使用人员锚点基线 */
   compiled_tags: CompiledTag[]
   /** 该通道专属记忆锚点与自优化状态 */
   learning_state: Tier1LearningState
@@ -38,9 +38,9 @@ export interface ChannelConfigResponse {
   config: ChannelPerceptionConfig
   /** 该通道是否已有专属词表 */
   configured: boolean
-  /** 视觉服务实际使用的基础词表来源 */
-  source: "channel" | "default"
-  /** 视觉服务实际使用的基础词表（专属词表，或全局默认词表） */
+  /** 视觉服务实际使用的基础词表来源：channel 为本通道专属词表，baseline 为未配置时的人员锚点基线 */
+  source: "channel" | "baseline"
+  /** 视觉服务实际使用的基础词表（本通道专属词表，或人员锚点基线） */
   effective_tags: CompiledTag[]
   updatedAt: string | null
   compile?: ChannelCompileSummary

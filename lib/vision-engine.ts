@@ -452,7 +452,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?
     void ensureVisionEngine({ waitMs: 8_000 })
   }
   child.once("error", (error) => finish(`安装进程启动失败：${error.message}`))
-  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败���退出码 ${code}），请查看上方日志`))
+  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败�����退出码 ${code}），请查看上方日志`))
   return { started: true, message: "已开始安装视觉环境，首次需要下载 PyTorch 与模型权重，可能需要数分钟到数十分钟" }
 }
 
@@ -516,8 +516,7 @@ function buildPayload(config: VisionConfig) {
     minConsecutiveFrames: config.minConsecutiveFrames,
     cooldownSeconds: config.cooldownSeconds,
     staticRecheckSec: config.staticRecheckSeconds,
-    vocabulary: config.vocabulary,
-    channelVocabulary: channelVocabularies(),
+    channelVocabulary: channelVocabularies(monitoredStreamIds()),
     zones: workerZones(),
     streamIds: monitoredStreamIds(),
     learning: workerLearning(),
