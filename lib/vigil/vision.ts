@@ -392,6 +392,10 @@ export const VISION_ENDPOINTS = {
 export function streamAnnotatedUrl(streamId: string) {
   return `/api/v1/streams/${encodeURIComponent(streamId)}/annotated`
 }
+
+export function streamOverlayUrl(streamId: string) {
+  return `/api/v1/streams/${encodeURIComponent(streamId)}/overlay`
+}
 export function streamInspectUrl(streamId: string) {
   return `/api/v1/streams/${encodeURIComponent(streamId)}/inspect`
 }

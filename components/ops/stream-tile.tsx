@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { AnnotatedFeed } from "@/components/vigil/streams/annotated-feed"
+import { AnnotationOverlay } from "@/components/vigil/streams/annotation-overlay"
 import { LiveFeed, useVisible } from "@/components/vigil/streams/live-wall"
 import { streamSnapshotUrl } from "@/components/vigil/streams/use-streams"
 import { cn } from "@/lib/utils"
@@ -67,10 +67,20 @@ async function downloadSnapshot(stream: StreamView) {
 
 export function StreamTile({ stream, live, annotated, size, className, onFocus, onMaximize, onHide }: StreamTileProps) {
   const [ref, visible] = useVisible<HTMLDivElement>()
+  const [overlayReady, setOverlayReady] = React.useState(false)
   const online = stream.status === "online"
   const alerting = stream.lastAnalysis?.status === "alert"
   const isLarge = size === "lg"
-  const statusText = online ? (annotated ? "AI 标注" : live ? "实时" : "快照") : stream.status === "idle" ? "待命" : "离线"
+  const showOverlay = annotated && visible
+  const statusText = online
+    ? annotated && overlayReady
+      ? "AI 标注"
+      : live
+        ? "实时"
+        : "快照"
+    : stream.status === "idle"
+      ? "待命"
+      : "离线"
 
   return (
     <div
@@ -95,10 +105,13 @@ export function StreamTile({ stream, live, annotated, size, className, onFocus, 
             <CameraOff className="size-6" aria-hidden="true" />
             <span className="text-xs">通道离线</span>
           </div>
-        ) : annotated && visible ? (
-          <AnnotatedFeed streamId={stream.id} name={stream.name} />
         ) : (
-          <LiveFeed stream={stream} live={live && !annotated} active={visible} />
+          <>
+            <LiveFeed stream={stream} live={live} active={visible} />
+            {annotated ? (
+              <AnnotationOverlay streamId={stream.id} active={showOverlay} onReadyChange={setOverlayReady} />
+            ) : null}
+          </>
         )}
       </div>
 

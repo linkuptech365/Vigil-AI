@@ -839,7 +839,7 @@ def zone_suspects(
                             key=f"zone:{zone['id']}:s{index}",
                             track_id=None,
                             conf=round(subject.conf, 3),
-                            reasons=[f"{label_of(subject.prompt, sid)} 进��电子围栏：{zone.get('name') or zone['id']}"],
+                            reasons=[f"{label_of(subject.prompt, sid)} 进����子围栏：{zone.get('name') or zone['id']}"],
                         )
                     )
         if "person" not in targets:
@@ -949,6 +949,51 @@ def draw(
         cv2.putText(canvas, text, (x1 + 3, top + th + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.rectangle(canvas, (0, 0), (width, 24), (20, 20, 20), -1)
     cv2.putText(canvas, header, (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 190, 255) if warn else (120, 220, 120), 1, cv2.LINE_AA)
+    return canvas
+
+
+def draw_overlay(
+    shape: tuple[int, ...],
+    dets: list[Det],
+    zones: list[dict[str, Any]] | None = None,
+    anchor: dict[str, Any] | None = None,
+) -> np.ndarray:
+    """生成与画面同尺寸的透明 BGRA 图层：只含检测框 / Track ID / 电子围栏 / 记忆锚点，不含底图。"""
+    height, width = shape[:2]
+    canvas = np.zeros((height, width, 4), dtype=np.uint8)
+    for zone in zones or []:
+        points = np.array(
+            [[int(p[0] / 100.0 * width), int(p[1] / 100.0 * height)] for p in zone.get("coordinates", [])],
+            dtype=np.int32,
+        )
+        if len(points) < 2:
+            continue
+        color = (60, 60, 230)
+        if zone.get("type") == "polygon" and len(points) >= 3:
+            cv2.fillPoly(canvas, [points], (*color, 46))
+            cv2.polylines(canvas, [points], True, (*color, 255), 2, cv2.LINE_AA)
+        else:
+            cv2.line(canvas, tuple(points[0]), tuple(points[1]), (*color, 255), 3, cv2.LINE_AA)
+        cv2.putText(
+            canvas, str(zone.get("name") or zone.get("id")), (int(points[0][0]) + 4, int(points[0][1]) + 16),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (*color, 255), 1, cv2.LINE_AA,
+        )
+    if anchor:
+        center = (int(anchor["center"][0] / 1000 * width), int(anchor["center"][1] / 1000 * height))
+        axes = (max(4, int(anchor["radius"] / 1000 * width)), max(4, int(anchor["radius"] / 1000 * height)))
+        cv2.ellipse(canvas, center, axes, 0, 0, 360, (255, 200, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "anchor", (center[0] - axes[0], max(16, center[1] - axes[1] - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0, 255), 1, cv2.LINE_AA)
+    for det in dets:
+        color = (*ROLE_COLORS.get(det.role, (200, 200, 200)), 255)
+        x1, y1, x2, y2 = (int(v) for v in det.box)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        tag = f"#{det.track_id} " if det.track_id is not None else ""
+        text = f"{tag}{det.prompt} {det.conf:.2f}"
+        (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        top = max(0, y1 - th - base - 4)
+        cv2.rectangle(canvas, (x1, top), (x1 + tw + 6, top + th + base + 4), color, -1)
+        cv2.putText(canvas, text, (x1 + 3, top + th + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255, 255), 1, cv2.LINE_AA)
     return canvas
 
 
@@ -1462,6 +1507,17 @@ def annotated(stream_id: str) -> Response:
         view.get("mask") if degraded else None, degraded, zones_for(stream_id), anchor_of(stream_id),
     )
     return Response(content=encode_jpeg(canvas), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/streams/{stream_id}/overlay.png")
+def overlay(stream_id: str) -> Response:
+    """透明标注图层：前端叠在原始视频上方，没有帧 / 没有检测时仍可返回围栏与锚点。"""
+    view = fresh_view(stream_id)
+    layer = draw_overlay(view["image"].shape, view["dets"], zones_for(stream_id), anchor_of(stream_id))
+    ok, buffer = cv2.imencode(".png", layer)
+    if not ok:
+        raise HTTPException(status_code=500, detail="PNG 编码失败")
+    return Response(content=buffer.tobytes(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/streams/{stream_id}/inspect-once")

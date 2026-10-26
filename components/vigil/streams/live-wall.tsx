@@ -10,7 +10,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
 import type { StreamView } from "@/lib/vigil/streams"
 import { useVigil } from "../vigil-provider"
-import { AnnotatedFeed } from "./annotated-feed"
+import { AnnotationOverlay } from "./annotation-overlay"
 import { EngineBanner } from "./engine-banner"
 import { useVision } from "./use-vision"
 import { VisionFunnel } from "./vision-funnel"
@@ -113,10 +113,11 @@ function LiveTile({
             <CameraOff className="size-6" aria-hidden="true" />
             <span className="text-xs">通道离线</span>
           </div>
-        ) : showAnnotated && visible ? (
-          <AnnotatedFeed streamId={stream.id} name={stream.name} />
         ) : (
-          <LiveFeed stream={stream} live={live && !showAnnotated} active={visible} />
+          <>
+            <LiveFeed stream={stream} live={live} active={visible} />
+            {showAnnotated ? <AnnotationOverlay streamId={stream.id} active={visible} /> : null}
+          </>
         )}
         <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-background/80 to-transparent p-2">
           <Badge variant="outline" className="gap-1.5 border-border bg-background/80 font-mono text-xs">
