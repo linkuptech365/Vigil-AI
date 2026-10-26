@@ -1,12 +1,10 @@
 "use client"
 
 import * as React from "react"
-import { Plus, Quote, Ruler } from "lucide-react"
+import { Plus, SearchX } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Field, FieldLabel } from "@/components/ui/field"
 import {
   Select,
   SelectContent,
@@ -15,285 +13,72 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Slider } from "@/components/ui/slider"
-import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { SCOPE_BINDINGS, bindingLabel, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
-import {
-  ALL_CHANNELS,
-  COOLDOWN_OPTIONS,
-  SCHEDULE_LABEL,
-  SEVERITY_LABEL,
-} from "@/lib/ops/rules-data"
-import type {
-  InspectionRule,
-  InspectionRuleType,
-  RuleSchedule,
-  RuleSeverity,
-} from "@/lib/ops/rules-types"
-import { cn } from "@/lib/utils"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { SCOPE_BINDINGS, SOURCE_ALL, bindingLabel } from "@/lib/ops/rule-binding"
+import { ALL_CHANNELS } from "@/lib/ops/rules-data"
+import type { InspectionRule } from "@/lib/ops/rules-types"
 import { CustomRuleDialog } from "./custom-rule-dialog"
-import { DeleteRuleButton, LoadGmpPresetButton, ResetRulesButton } from "./rule-danger-actions"
+import { LoadGmpPresetButton, ResetRulesButton } from "./rule-danger-actions"
+import { RuleCard } from "./rule-card"
 import { useRules } from "./rules-provider"
 
-const TYPE_META: Record<InspectionRuleType, { label: string; className: string }> = {
-  GEOMETRIC: { label: "确定性几何规则", className: "border-signal/40 text-signal" },
-  THRESHOLD: { label: "阈值规则", className: "border-warning/40 text-warning" },
-  PROMPT_SEMANTIC: { label: "VLM 语义 Prompt", className: "border-primary/40 text-primary" },
+type RuleFilter = "all" | "enabled" | "semantic" | "deterministic"
+
+const ALL_CHANNELS_VALUE = "__all_channels__"
+
+const isSemantic = (rule: InspectionRule) => rule.type === "PROMPT_SEMANTIC"
+
+function appliesToChannel(rule: InspectionRule, channel: string) {
+  return rule.boundChannels.includes(SOURCE_ALL) || rule.boundChannels.includes(channel)
 }
 
-const MIN_DESCRIPTION = 4
-const MAX_DESCRIPTION = 400
-
-function DescriptionEditor({
-  rule,
-  textareaId,
-  onSave,
-}: {
-  rule: InspectionRule
-  textareaId: string
-  onSave: (description: string) => void
-}) {
-  const saved = ruleDescription(rule)
-  const [draft, setDraft] = React.useState(saved)
-  const text = draft.trim()
-  const valid = text.length >= MIN_DESCRIPTION && text.length <= MAX_DESCRIPTION
-  const Icon = rule.type === "PROMPT_SEMANTIC" ? Quote : Ruler
-
-  const commit = () => {
-    if (valid && text !== saved) onSave(text)
-  }
-
+function StatTile({ label, value, hint }: { label: string; value: number; hint?: string }) {
   return (
-    <Field>
-      <FieldLabel htmlFor={textareaId} className="flex items-center gap-1.5">
-        <Icon className="size-3.5 text-primary" aria-hidden="true" />
-        语义判定依据 (VLM Description)
-      </FieldLabel>
-      <Textarea
-        id={textareaId}
-        value={draft}
-        disabled={!rule.enabled}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        rows={3}
-        maxLength={MAX_DESCRIPTION}
-        aria-invalid={!valid}
-        className="resize-none text-xs leading-relaxed"
-      />
-      {!valid ? (
-        <p className="text-[11px] text-destructive">
-          描述需为 {MIN_DESCRIPTION}~{MAX_DESCRIPTION} 个字符，未满足前不会保存。
-        </p>
-      ) : (
-        <p className="text-[11px] text-muted-foreground">失焦后自动保存，下一次研判即按新描述注入大模型。</p>
-      )}
-    </Field>
-  )
-}
-
-function SensitivityField({
-  rule,
-  sliderId,
-  onCommit,
-}: {
-  rule: InspectionRule
-  sliderId: string
-  onCommit: (sensitivity: number) => void
-}) {
-  const [value, setValue] = React.useState(ruleSensitivity(rule))
-
-  return (
-    <Field>
-      <div className="flex items-center justify-between">
-        <FieldLabel htmlFor={sliderId}>灵敏度 / 置信度阈值</FieldLabel>
-        <span className="font-mono text-xs text-signal">≥ {value.toFixed(2)}</span>
-      </div>
-      <Slider
-        id={sliderId}
-        value={[value]}
-        min={0.3}
-        max={0.99}
-        step={0.01}
-        disabled={!rule.enabled}
-        onValueChange={([next]) => setValue(next)}
-        onValueCommit={([next]) => onCommit(next)}
-        aria-label={`${rule.id} 灵敏度阈值`}
-      />
-    </Field>
-  )
-}
-
-function RuleCard({ rule }: { rule: InspectionRule }) {
-  const { updateRule, deleteRule } = useRules()
-  const ids = {
-    switch: `${rule.id}-enabled`,
-    severity: `${rule.id}-severity`,
-    cooldown: `${rule.id}-cooldown`,
-    schedule: `${rule.id}-schedule`,
-    description: `${rule.id}-description`,
-    sensitivity: `${rule.id}-sensitivity`,
-  }
-  const type = TYPE_META[rule.type]
-
-  return (
-    <li
-      className={cn(
-        "flex flex-col gap-4 rounded-lg border border-border bg-background p-4 transition-opacity",
-        !rule.enabled && "opacity-60"
-      )}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary" className="font-mono">
-              {rule.id}
-            </Badge>
-            <Badge variant="outline" className={type.className}>
-              {type.label}
-            </Badge>
-            {rule.custom && (
-              <Badge variant="outline" className="border-success/40 text-success">
-                自定义
-              </Badge>
-            )}
-          </div>
-          <label htmlFor={ids.switch} className="text-sm font-semibold leading-snug">
-            {rule.name}
-          </label>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <DeleteRuleButton rule={rule} onDelete={deleteRule} />
-          <Switch
-            id={ids.switch}
-            checked={rule.enabled}
-            onCheckedChange={(checked) => updateRule(rule.id, { enabled: checked })}
-            aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.id}`}
-          />
-        </div>
-      </div>
-
-      <DescriptionEditor
-        key={`${rule.id}:${ruleDescription(rule)}`}
-        rule={rule}
-        textareaId={ids.description}
-        onSave={(description) => updateRule(rule.id, { description })}
-      />
-
-      <SensitivityField
-        key={`${rule.id}:${ruleSensitivity(rule)}`}
-        rule={rule}
-        sliderId={ids.sensitivity}
-        onCommit={(sensitivity) => updateRule(rule.id, { sensitivity })}
-      />
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Field className="sm:col-span-3">
-          <FieldLabel>绑定通道 (Bound Channels)</FieldLabel>
-          <ToggleGroup
-            type="multiple"
-            variant="outline"
-            size="sm"
-            spacing={1}
-            disabled={!rule.enabled}
-            value={rule.boundChannels}
-            onValueChange={(value) => updateRule(rule.id, { boundChannels: value })}
-            aria-label={`${rule.id} 绑定通道`}
-            className="flex-wrap"
-          >
-            {SCOPE_BINDINGS.map((scope) => (
-              <ToggleGroupItem key={scope} value={scope} className="text-xs">
-                {bindingLabel(scope)} ({scope})
-              </ToggleGroupItem>
-            ))}
-            {ALL_CHANNELS.map((channel) => (
-              <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs">
-                {channel}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <p className="text-[11px] text-muted-foreground">
-            ALL 覆盖实时通道与本地视频；LOCAL 仅用于本地导入/检索目录视频。
-          </p>
-          {rule.boundChannels.length === 0 && (
-            <p className="text-[11px] text-warning">未绑定任何通道，该规则不会产生触发。</p>
-          )}
-        </Field>
-
-        <Field>
-          <FieldLabel htmlFor={ids.severity}>告警等级</FieldLabel>
-          <Select
-            value={rule.severity}
-            disabled={!rule.enabled}
-            onValueChange={(value) => updateRule(rule.id, { severity: value as RuleSeverity })}
-          >
-            <SelectTrigger id={ids.severity} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {(Object.keys(SEVERITY_LABEL) as RuleSeverity[]).map((severity) => (
-                  <SelectItem key={severity} value={severity}>
-                    {SEVERITY_LABEL[severity]}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <Field>
-          <FieldLabel htmlFor={ids.cooldown}>冷却窗口</FieldLabel>
-          <Select
-            value={String(rule.cooldownSeconds)}
-            disabled={!rule.enabled}
-            onValueChange={(value) => updateRule(rule.id, { cooldownSeconds: Number(value) })}
-          >
-            <SelectTrigger id={ids.cooldown} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {COOLDOWN_OPTIONS.map((seconds) => (
-                  <SelectItem key={seconds} value={String(seconds)}>
-                    {seconds}s
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <Field>
-          <FieldLabel htmlFor={ids.schedule}>生效时段</FieldLabel>
-          <Select
-            value={rule.schedule}
-            disabled={!rule.enabled}
-            onValueChange={(value) => updateRule(rule.id, { schedule: value as RuleSchedule })}
-          >
-            <SelectTrigger id={ids.schedule} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {(Object.keys(SCHEDULE_LABEL) as RuleSchedule[]).map((schedule) => (
-                  <SelectItem key={schedule} value={schedule}>
-                    {SCHEDULE_LABEL[schedule]}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </Field>
-      </div>
-    </li>
+    <div className="flex min-w-24 flex-1 flex-col gap-0.5 rounded-md border border-border bg-background px-3 py-2">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <span className="flex items-baseline gap-1.5">
+        <span className="font-mono text-lg font-semibold leading-none">{value}</span>
+        {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
+      </span>
+    </div>
   )
 }
 
 export function RuleStudioView() {
   const { rules, setCustomDialogOpen, resetRules, loadGmpPreset } = useRules()
-  const enabled = rules.filter((rule) => rule.enabled).length
+  const [filter, setFilter] = React.useState<RuleFilter>("all")
+  const [channel, setChannel] = React.useState(ALL_CHANNELS_VALUE)
+
+  const counts = React.useMemo(() => {
+    const enabled = rules.filter((rule) => rule.enabled).length
+    const semantic = rules.filter(isSemantic).length
+    return {
+      total: rules.length,
+      enabled,
+      disabled: rules.length - enabled,
+      semantic,
+      deterministic: rules.length - semantic,
+    }
+  }, [rules])
+
+  const channelOptions = React.useMemo(() => {
+    const extra = rules
+      .flatMap((rule) => rule.boundChannels)
+      .filter((id) => !SCOPE_BINDINGS.includes(id) && !ALL_CHANNELS.includes(id))
+    return [...ALL_CHANNELS, ...Array.from(new Set(extra)).sort()]
+  }, [rules])
+
+  const visibleRules = React.useMemo(
+    () =>
+      rules.filter((rule) => {
+        if (filter === "enabled" && !rule.enabled) return false
+        if (filter === "semantic" && !isSemantic(rule)) return false
+        if (filter === "deterministic" && isSemantic(rule)) return false
+        if (channel !== ALL_CHANNELS_VALUE && !appliesToChannel(rule, channel)) return false
+        return true
+      }),
+    [rules, filter, channel]
+  )
 
   return (
     <Card className="gap-4 py-4">
@@ -301,9 +86,7 @@ export function RuleStudioView() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex flex-col gap-1">
             <CardTitle className="text-sm">混合规则工作室 (Hybrid Rule Studio)</CardTitle>
-            <CardDescription>
-              几何/阈值规则由一级引擎确定性判定，语义规则由大模型按 Prompt 研判。共 {rules.length} 条，{enabled} 条已启用。
-            </CardDescription>
+            <CardDescription>几何/阈值规则由一级引擎确定性判定，语义规则由大模型按 Prompt 研判。</CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <LoadGmpPresetButton onLoad={loadGmpPreset} />
@@ -315,12 +98,70 @@ export function RuleStudioView() {
           </div>
         </div>
       </CardHeader>
-      <CardContent className="px-4">
-        <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-          {rules.map((rule) => (
-            <RuleCard key={rule.id} rule={rule} />
-          ))}
-        </ul>
+
+      <CardContent className="flex flex-col gap-3 px-4">
+        <div className="flex flex-wrap gap-2" role="group" aria-label="规则统计">
+          <StatTile label="规则总数" value={counts.total} />
+          <StatTile label="已启用" value={counts.enabled} hint={`/ 停用 ${counts.disabled}`} />
+          <StatTile label="确定性规则" value={counts.deterministic} />
+          <StatTile label="VLM 语义规则" value={counts.semantic} />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Tabs value={filter} onValueChange={(value) => setFilter(value as RuleFilter)}>
+            <TabsList className="h-auto flex-wrap justify-start">
+              <TabsTrigger value="all">全部 ({counts.total})</TabsTrigger>
+              <TabsTrigger value="enabled">已启用 ({counts.enabled})</TabsTrigger>
+              <TabsTrigger value="semantic">VLM 语义研判 ({counts.semantic})</TabsTrigger>
+              <TabsTrigger value="deterministic">确定性/几何引擎 ({counts.deterministic})</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <Select value={channel} onValueChange={setChannel}>
+            <SelectTrigger className="w-40" aria-label="按通道过滤规则">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value={ALL_CHANNELS_VALUE}>全部通道</SelectItem>
+                {channelOptions.map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {bindingLabel(id)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {channel !== ALL_CHANNELS_VALUE && (
+          <p className="text-[11px] text-muted-foreground">
+            显示绑定 {channel} 或「全部视频源」的规则，共 {visibleRules.length} 条
+          </p>
+        )}
+
+        {visibleRules.length > 0 ? (
+          <ul className="flex flex-col gap-2">
+            {visibleRules.map((rule) => (
+              <RuleCard key={rule.id} rule={rule} />
+            ))}
+          </ul>
+        ) : (
+          <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border py-10 text-center">
+            <SearchX className="size-5 text-muted-foreground" aria-hidden="true" />
+            <p className="text-sm text-muted-foreground">没有符合当前过滤条件的规则</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFilter("all")
+                setChannel(ALL_CHANNELS_VALUE)
+              }}
+            >
+              清除过滤
+            </Button>
+          </div>
+        )}
       </CardContent>
       <CustomRuleDialog />
     </Card>
