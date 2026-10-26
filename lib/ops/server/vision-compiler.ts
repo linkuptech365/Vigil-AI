@@ -19,12 +19,15 @@ const MAX_PER_COMPILE = 30
 const SYSTEM_PROMPT = `你是工业视觉检测系统的「检测词表编译器」。用户会用中文描述需要稽查的违规行为，你要把它翻译成开放词汇目标检测模型（YOLO-World）能识别的英文检测提示词。
 
 只输出一个 JSON 对象，不要任何解释，格式：
-{"vocabulary":[{"labelZh":"中文名","promptEn":"english noun phrase","role":"anchor_person|required_ppe|hazard_target"}]}
+{"vocabulary":[{"labelZh":"中文名","promptEn":"english noun phrase","role":"anchor_person|required_ppe|hazard_target|subject_target|context_object"}]}
 
 规则：
-1. promptEn 必须是 2~6 个单词的英文名词短语，描述画面中肉眼可见的物体或状态，例如 "face mask on face"、"gloved hands"、"safety goggles"、"person using mobile phone"、"tool left on floor"。不要写句子、否定词（without/no/not）或动词短句。
-2. role 含义：anchor_person=画面中的被检查人员（必须有 1 条）；required_ppe=人员必须穿戴的装备，缺失就违规（用户说「没戴/未戴/是否戴好」的装备都归这一类，写成装备本身，如 "safety goggles"）；hazard_target=只要出现就违规的物体或行为（手机、遗留工具、抹布、裸露皮肤、倚靠设备等）。
-3. 本次最多输出 ${MAX_PER_COMPILE} 条，不要重复，只输出本次描述涉及的词条。labelZh 不超过 10 个汉字。`
+1. promptEn 必须是 1~6 个单词的英文名词短语，描述画面中肉眼可见的物体或状态，例如 "face mask on face"、"gloved hands"、"safety goggles"、"person using mobile phone"、"tool left on floor"、"cat"、"pet feeder"。不要写句子、否定词（without/no/not）或动词短句。
+2. role 含义：anchor_person=画面中的被检查人员（人员类场景必须有 1 条）；required_ppe=人员必须穿戴的装备，缺失就违规（用户说「没戴/未戴/是否戴好」的装备都归这一类，写成装备本身，如 "safety goggles"）；hazard_target=只要出现就违规的物体或行为（手机、遗留工具、抹布、裸露皮肤、倚靠设备等）；subject_target=动作的发起主体（猫、狗、小孩、叉车等）；context_object=动作发生的对象或场所（喂食器、食盆、猫粮、沙发、门口等）。
+3. 【动宾/行为描述降解】YOLO-World 只能检测"物体"，不能检测"动作"。遇到「某主体 + 动词 + 对象」的行为描述，必须拆成实体名词：动作主体 → subject_target，动作涉及的对象、器具、场所 → context_object，不要输出动词本身。主体与关联物体空间靠近时系统才会判定疑似，真正的动作由二级大模型复核。同时尽量补全该场景下常见的同义实体（器具、容器、食物等），提高召回。
+   示例：「猫吃猫粮」→ [{"labelZh":"猫","promptEn":"cat","role":"subject_target"},{"labelZh":"喂食器","promptEn":"pet feeder","role":"context_object"},{"labelZh":"食盆","promptEn":"food bowl","role":"context_object"},{"labelZh":"猫粮","promptEn":"cat food","role":"context_object"}]
+   示例：「狗在沙发上睡觉」→ [{"labelZh":"狗","promptEn":"dog","role":"subject_target"},{"labelZh":"沙发","promptEn":"sofa","role":"context_object"}]
+4. 本次最多输出 ${MAX_PER_COMPILE} 条，不要重复，只输出本次描述涉及的词条。labelZh 不超过 10 个汉字。`
 
 function pickProfile(modelProfileId?: string): ModelProfile | null {
   const profile = modelProfileId ? getProfile(modelProfileId) : (loadProfiles().find((item) => item.isDefault && item.enabled) ?? null)
@@ -100,11 +103,18 @@ function parseVocabulary(text: string): VocabularyItem[] {
   return normalize(items)
 }
 
-/** 保证有主体锚点，按 锚点 → 必需劳保 → 违规目标 排序并重编 id。 */
+/** 人员类场景保证有人员锚点；纯「主体 + 关联物体」场景（如猫吃猫粮）不强加人员。按角色排序并重编 id。 */
 function normalize(items: VocabularyItem[]): VocabularyItem[] {
-  const order: Record<VisionRole, number> = { anchor_person: 0, required_ppe: 1, hazard_target: 2 }
+  const order: Record<VisionRole, number> = {
+    anchor_person: 0,
+    required_ppe: 1,
+    hazard_target: 2,
+    subject_target: 3,
+    context_object: 4,
+  }
   const list = [...items]
-  if (!list.some((item) => item.role === "anchor_person")) {
+  const behaviorOnly = list.every((item) => item.role === "subject_target" || item.role === "context_object")
+  if (!behaviorOnly && !list.some((item) => item.role === "anchor_person")) {
     list.unshift({ id: "", labelZh: "人员", promptEn: "person", role: "anchor_person", enabled: true })
   }
   return list
@@ -147,6 +157,20 @@ const DICTIONARY: DictEntry[] = [
   { pattern: /奔跑|跑动|追逐/, labelZh: "奔跑", promptEn: "running person", role: "hazard_target" },
   { pattern: /泄漏|漏液|泼洒|积水/, labelZh: "液体泄漏", promptEn: "liquid spill on floor", role: "hazard_target" },
   { pattern: /纸箱|纸张|纸板/, labelZh: "纸箱纸张", promptEn: "cardboard box", role: "hazard_target" },
+  { pattern: /猫/, labelZh: "猫", promptEn: "cat", role: "subject_target" },
+  { pattern: /狗|犬/, labelZh: "狗", promptEn: "dog", role: "subject_target" },
+  { pattern: /小孩|儿童|孩子|婴儿/, labelZh: "儿童", promptEn: "child", role: "subject_target" },
+  { pattern: /鸟/, labelZh: "鸟", promptEn: "bird", role: "subject_target" },
+  { pattern: /叉车/, labelZh: "叉车", promptEn: "forklift", role: "subject_target" },
+  { pattern: /猫粮/, labelZh: "猫粮", promptEn: "cat food", role: "context_object" },
+  { pattern: /狗粮/, labelZh: "狗粮", promptEn: "dog food", role: "context_object" },
+  { pattern: /吃|喂|进食|猫粮|狗粮|食盆|喂食/, labelZh: "喂食器", promptEn: "pet feeder", role: "context_object" },
+  { pattern: /吃|喂|进食|猫粮|狗粮|食盆|喂食/, labelZh: "食盆", promptEn: "food bowl", role: "context_object" },
+  { pattern: /喝水|饮水|水碗|水盆/, labelZh: "水碗", promptEn: "water bowl", role: "context_object" },
+  { pattern: /沙发/, labelZh: "沙发", promptEn: "sofa", role: "context_object" },
+  { pattern: /床/, labelZh: "床", promptEn: "bed", role: "context_object" },
+  { pattern: /桌子|餐桌|桌上/, labelZh: "桌子", promptEn: "table", role: "context_object" },
+  { pattern: /垃圾桶/, labelZh: "垃圾桶", promptEn: "trash can", role: "context_object" },
 ]
 
 function compileByDictionary(instruction: string): VocabularyItem[] {

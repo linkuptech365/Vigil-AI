@@ -1,10 +1,18 @@
-export type VisionRole = "anchor_person" | "required_ppe" | "hazard_target"
+export type VisionRole = "anchor_person" | "required_ppe" | "hazard_target" | "subject_target" | "context_object"
 
 export const VISION_ROLES: { id: VisionRole; label: string; hint: string }[] = [
   { id: "anchor_person", label: "主体锚点", hint: "画面中的人员，用于分配 Track ID 并关联其余目标" },
   { id: "required_ppe", label: "必需劳保", hint: "必须穿戴的装备，缺失即视为疑似违规" },
   { id: "hazard_target", label: "违规目标", hint: "一旦出现就视为疑似违规的物体或行为" },
+  { id: "subject_target", label: "行为主体", hint: "行为的发起者（如猫、狗）；与「关联物体」空间靠近或框重叠时判为疑似" },
+  { id: "context_object", label: "关联物体", hint: "行为发生的对象或场所（如喂食器、食盆、猫粮）；单独出现不触发" },
 ]
+
+const ROLE_IDS: VisionRole[] = VISION_ROLES.map((role) => role.id)
+
+export function visionRoleLabel(role: string) {
+  return VISION_ROLES.find((item) => item.id === role)?.label ?? role
+}
 
 export interface VocabularyItem {
   id: string
@@ -69,7 +77,7 @@ export function sanitizeVocabulary(input: unknown): VocabularyItem[] | null {
     const promptEn = typeof item.promptEn === "string" ? item.promptEn.replace(/\s+/g, " ").trim() : ""
     const role = item.role
     if (!PROMPT_PATTERN.test(promptEn)) continue
-    if (role !== "anchor_person" && role !== "required_ppe" && role !== "hazard_target") continue
+    if (typeof role !== "string" || !ROLE_IDS.includes(role as VisionRole)) continue
     const key = promptEn.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
@@ -78,7 +86,7 @@ export function sanitizeVocabulary(input: unknown): VocabularyItem[] | null {
       id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 40) : `v${result.length + 1}`,
       labelZh: labelZh || promptEn,
       promptEn,
-      role,
+      role: role as VisionRole,
       enabled: item.enabled !== false,
     })
     if (result.length >= MAX_VOCABULARY) break
@@ -198,7 +206,58 @@ export interface VisionStreamHealth {
   motionPct?: number | null
   persons?: number
   pendingTracks?: number
+  /** 帧缓冲（Ring Buffer）里当前缓存的帧数 */
+  ringFrames?: number
+  /** 该通道下发到视觉服务的围栏数；0 表示全局检测模式 */
+  zones?: number
   error: string
+}
+
+/** 初筛命中日志里一帧画面上检出的单个标签 */
+export interface VisionHitTag {
+  label: string
+  prompt: string
+  role: string
+  confidence: number
+}
+
+export type VisionHitGate = "passed" | "pending" | "cooldown" | "escalated"
+
+export interface VisionHitEntry {
+  id: string
+  at: string
+  streamId: string
+  gate: VisionHitGate
+  hits: VisionHitTag[]
+  reasons: string[]
+  /** 连续命中进度，仅 pending 时有意义 */
+  progress?: { hits: number; need: number }
+  /** gate 为 escalated 时对应的二级研判事件 id，可在 recentEvents 里查到研判结果 */
+  eventId?: string
+  /** 相同内容在去重窗口内重复出现的次数 */
+  repeat: number
+}
+
+export interface VisionHitsResponse {
+  status: "ok"
+  online: boolean
+  mode: string
+  modelLoaded: boolean
+  message: string
+  hitLog: VisionHitEntry[]
+  recentEvents: VisionEvent[]
+  stats: VisionStats
+  streams: {
+    id: string
+    name: string
+    monitored: boolean
+    online: boolean
+    frames: number
+    ringFrames: number
+    zones: number
+    persons: number
+    error: string
+  }[]
 }
 
 export interface VisionEvent {
@@ -234,6 +293,7 @@ export interface VisionInfo {
   stats: VisionStats
   streams: Record<string, VisionStreamHealth>
   recentEvents: VisionEvent[]
+  hitLog: VisionHitEntry[]
   versions: Record<string, string>
   lastReloadMs: number
   restarts: number
@@ -323,6 +383,7 @@ export const VISION_ENDPOINTS = {
   config: "/api/v1/vision/config",
   engine: "/api/v1/vision/engine",
   compile: "/api/v1/vision/prompts/compile",
+  hits: "/api/v1/vision/hits",
 } as const
 
 export function streamAnnotatedUrl(streamId: string) {

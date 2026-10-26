@@ -43,17 +43,23 @@ EDGE_TOKEN = os.environ.get("VIGIL_EDGE_TOKEN", "").strip()
 ROLE_ANCHOR = "anchor_person"
 ROLE_PPE = "required_ppe"
 ROLE_HAZARD = "hazard_target"
-ROLES = (ROLE_ANCHOR, ROLE_PPE, ROLE_HAZARD)
+ROLE_SUBJECT = "subject_target"
+ROLE_CONTEXT = "context_object"
+ROLES = (ROLE_ANCHOR, ROLE_PPE, ROLE_HAZARD, ROLE_SUBJECT, ROLE_CONTEXT)
 
 ROLE_COLORS = {  # BGR
     ROLE_ANCHOR: (255, 140, 30),
     ROLE_PPE: (90, 200, 80),
     ROLE_HAZARD: (60, 60, 235),
+    ROLE_SUBJECT: (0, 150, 255),
+    ROLE_CONTEXT: (200, 160, 40),
 }
 
 RING_SIZE = 5
 FRESH_SECONDS = 2.5
 MAX_EVENTS = 30
+MAX_HIT_LOG = 80
+HIT_DEDUPE_SECONDS = 8.0
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +160,9 @@ class StreamState:
     last_persons: int = 0
     last: dict[str, Any] | None = None
     frames: int = 0
+    last_entry: dict[str, Any] | None = None
+    last_entry_sig: str = ""
+    last_entry_ts: float = 0.0
 
 
 class Stats:
@@ -206,6 +215,7 @@ class Runtime:
         self.vocab: list[VocabItem] = []
         self.streams: dict[str, StreamState] = {}
         self.events: deque = deque(maxlen=MAX_EVENTS)
+        self.hitlog: deque = deque(maxlen=MAX_HIT_LOG)
         self.tracker_kind = "bytetrack"
         self.last_reload_ms = 0.0
         self.model_lock = threading.RLock()
@@ -540,7 +550,60 @@ def evaluate(dets: list[Det]) -> tuple[list[Suspect], int, int]:
                 reasons=[f"画面中检出违规目标：{label_of(hazard.prompt)}（{hazard.conf:.2f}）"],
             )
         )
+    suspects.extend(relation_suspects(dets))
     return suspects, passed, len(persons)
+
+
+def proximity(subject: Det, other: Det) -> float | None:
+    """两框 IOU>0 返回 IOU；不重叠但主体框外扩 25% 后相交，视为"靠近"返回 0.0；否则 None。"""
+    overlap = iou(subject.box, other.box)
+    if overlap > 0:
+        return overlap
+    x1, y1, x2, y2 = subject.box
+    pad = 0.25 * max(x2 - x1, y2 - y1)
+    grown = (x1 - pad, y1 - pad, x2 + pad, y2 + pad)
+    return 0.0 if iou(grown, other.box) > 0 else None
+
+
+def relation_suspects(dets: list[Det]) -> list[Suspect]:
+    """行为主体（如猫）与关联物体（如喂食器/食盆）空间靠近或重叠才判为疑似。
+
+    词表里没有任何启用的关联物体时，行为主体一出现即判为疑似（等价于违规目标）。
+    """
+    low = RT.cfg.low
+    subjects = [d for d in dets if d.role == ROLE_SUBJECT and d.conf >= low]
+    if not subjects:
+        return []
+    contexts = [d for d in dets if d.role == ROLE_CONTEXT and d.conf >= low]
+    context_configured = any(r == ROLE_CONTEXT and p in RT.classes_applied for p, r in RT.role_map.items())
+    best: dict[str, Suspect] = {}
+    for subject in subjects:
+        key = f"rel:{subject.prompt}"
+        if not context_configured:
+            candidate = Suspect(
+                key=key, track_id=None, conf=round(subject.conf, 3),
+                reasons=[f"画面中检出行为主体：{label_of(subject.prompt)}（{subject.conf:.2f}）"],
+            )
+        else:
+            candidate = None
+            for other in contexts:
+                score = proximity(subject, other)
+                if score is None:
+                    continue
+                conf = min(subject.conf, other.conf)
+                if candidate is not None and conf <= candidate.conf:
+                    continue
+                relation = f"重叠（IOU {score:.2f}）" if score > 0 else "靠近"
+                candidate = Suspect(
+                    key=key, track_id=None, conf=round(conf, 3),
+                    reasons=[f"{label_of(subject.prompt)} 与 {label_of(other.prompt)} 空间{relation}"],
+                )
+            if candidate is None:
+                continue
+        current = best.get(key)
+        if current is None or candidate.conf > current.conf:
+            best[key] = candidate
+    return list(best.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -716,6 +779,7 @@ def push_event(event: dict[str, Any], frames: list[str]) -> None:
         "trackId": event["trackId"],
         "edgeConfidence": event["confidence"],
         "label": event["label"],
+        "reasons": event["reasons"],
         "keyframesBase64": frames,
     }
     try:
@@ -738,6 +802,58 @@ def push_event(event: dict[str, Any], frames: list[str]) -> None:
         event["status"] = "error"
         event["summary"] = f"送审失败：{str(error)[:160]}"
         RT.stats.tier2_failed += 1
+
+
+# --------------------------------------------------------------------------- #
+# 初筛命中日志
+# --------------------------------------------------------------------------- #
+def hit_tags(dets: list[Det]) -> list[dict[str, Any]]:
+    low = RT.cfg.low
+    seen: set[str] = set()
+    tags: list[dict[str, Any]] = []
+    for d in sorted(dets, key=lambda item: -item.conf):
+        if d.conf < low or d.prompt in seen:
+            continue
+        seen.add(d.prompt)
+        tags.append({"label": label_of(d.prompt), "prompt": d.prompt, "role": d.role, "confidence": round(d.conf, 3)})
+    return tags[:6]
+
+
+def log_hit(
+    st: StreamState,
+    tags: list[dict[str, Any]],
+    reasons: list[str],
+    gate: str,
+    progress: dict[str, int] | None = None,
+    event_id: str | None = None,
+) -> None:
+    if not tags and not reasons:
+        return
+    now = time.time()
+    sig = f"{gate}|{event_id or ''}|" + ",".join(t["prompt"] for t in tags)
+    last = st.last_entry
+    if last is not None and event_id is None and st.last_entry_sig == sig and now - st.last_entry_ts < HIT_DEDUPE_SECONDS:
+        last["repeat"] += 1
+        last["hits"] = tags
+        if progress:
+            last["progress"] = progress
+        st.last_entry_ts = now
+        return
+    entry: dict[str, Any] = {
+        "id": uuid.uuid4().hex[:10],
+        "at": now_iso(),
+        "streamId": st.sid,
+        "gate": gate,
+        "hits": tags,
+        "reasons": reasons[:3],
+        "repeat": 1,
+    }
+    if progress:
+        entry["progress"] = progress
+    if event_id:
+        entry["eventId"] = event_id
+    RT.hitlog.appendleft(entry)
+    st.last_entry, st.last_entry_sig, st.last_entry_ts = entry, sig, now
 
 
 # --------------------------------------------------------------------------- #
@@ -786,10 +902,13 @@ def scan_stream(sid: str) -> None:
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
 
+    tags = hit_tags(dets)
+
     if not suspects:
         RT.stats.tier1_passed += 1
         st.tracks.clear()
         st.has_pending = False
+        log_hit(st, tags, [], "passed")
         return
 
     keys = {s.key for s in suspects if not s.instant}
@@ -797,11 +916,13 @@ def scan_stream(sid: str) -> None:
         if key not in keys:
             del st.tracks[key]
     triggered: list[Suspect] = []
-    pending = False
+    pending_list: list[tuple[Suspect, int]] = []
+    cooled_list: list[Suspect] = []
     for suspect in suspects:
         if suspect.instant:
             if st.cooldown.get(suspect.key, 0.0) > now:
                 RT.stats.cooldown_suppressed += 1
+                cooled_list.append(suspect)
             else:
                 triggered.append(suspect)
             continue
@@ -809,16 +930,22 @@ def scan_stream(sid: str) -> None:
         hits = (prev.hits + 1) if prev else 1
         st.tracks[suspect.key] = TrackState(hits=hits, last_conf=suspect.conf, reasons=suspect.reasons)
         if hits < cfg.min_frames:
-            pending = True
+            pending_list.append((suspect, hits))
             continue
         if st.cooldown.get(suspect.key, 0.0) > now:
             RT.stats.cooldown_suppressed += 1
+            cooled_list.append(suspect)
             continue
         triggered.append(suspect)
-    st.has_pending = pending
+    st.has_pending = bool(pending_list)
 
     if not triggered:
         RT.stats.tier1_pending += 1
+        if pending_list:
+            best, hits = max(pending_list, key=lambda item: item[1])
+            log_hit(st, tags, best.reasons, "pending", {"hits": hits, "need": cfg.min_frames})
+        elif cooled_list:
+            log_hit(st, tags, cooled_list[0].reasons, "cooldown")
         return
 
     annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets), zones=zones_for(sid)))
@@ -840,6 +967,7 @@ def scan_stream(sid: str) -> None:
             "alertId": None,
         }
         RT.events.appendleft(event)
+        log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"])
         PUSH_POOL.submit(push_event, event, frames)
     for key in [k for k, until in st.cooldown.items() if until < now - 60]:
         del st.cooldown[key]
@@ -896,12 +1024,17 @@ def health() -> dict[str, Any]:
     for sid in RT.cfg.stream_ids:
         st = RT.streams.get(sid)
         if st is None:
-            streams[sid] = {"online": False, "monitored": True, "frames": 0, "error": ""}
+            streams[sid] = {
+                "online": False, "monitored": True, "frames": 0, "ringFrames": 0,
+                "zones": len(zones_for(sid)), "error": "",
+            }
             continue
         streams[sid] = {
             "online": bool(st.last_ok_ts) and now - st.last_ok_ts < 10 and not st.last_error,
             "monitored": True,
             "frames": st.frames,
+            "ringFrames": len(st.ring),
+            "zones": len(zones_for(sid)),
             "motionPct": None if st.last_motion_pct is None else round(st.last_motion_pct, 2),
             "persons": st.last_persons,
             "pendingTracks": len(st.tracks),
@@ -922,6 +1055,7 @@ def health() -> dict[str, Any]:
         "stats": RT.stats.as_dict(),
         "streams": streams,
         "recentEvents": list(RT.events)[:12],
+        "hitLog": list(RT.hitlog)[:40],
         "versions": RT.versions,
         "lastReloadMs": RT.last_reload_ms,
         "uptimeSec": int(time.time() - RT.started_at),

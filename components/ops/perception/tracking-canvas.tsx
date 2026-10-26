@@ -330,7 +330,8 @@ function RealChannelCanvas() {
             <div className="pointer-events-none absolute left-0 top-0 flex flex-col gap-1 p-2.5">
               <span className="rounded bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">{stream.name}</span>
               <span className="w-fit rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white/80">
-                {stream.status === "online" ? "在线" : "离线"} · ROI {camZones.filter((z) => z.enabled).length}
+                {stream.status === "online" ? "在线" : "离线"} ·{" "}
+                {camZones.filter((z) => z.enabled).length > 0 ? `ROI ${camZones.filter((z) => z.enabled).length}` : "全局检测"}
               </span>
             </div>
             <CanvasControls

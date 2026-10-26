@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils"
 import {
   VISION_ROLES,
   sanitizeVisionConfig,
+  visionRoleLabel,
   type VisionConfig,
   type VisionInfo,
   type VisionRole,
@@ -176,6 +177,7 @@ export function VisionCard() {
   const [compiling, setCompiling] = React.useState(false)
   const [replaceMode, setReplaceMode] = React.useState(false)
   const [compileNote, setCompileNote] = React.useState<{ source: "llm" | "fallback"; text: string } | null>(null)
+  const [compiledTags, setCompiledTags] = React.useState<{ item: VocabularyItem; state: "new" | "existing" }[] | null>(null)
 
   React.useEffect(() => {
     if (config && !draft) setDraft(config)
@@ -237,12 +239,23 @@ export function VisionCard() {
   }
 
   const handleCompile = async () => {
+    if (compiling || draft.naturalLanguageInstruction.trim().length < 2) return
     setCompiling(true)
     setCompileNote(null)
+    setCompiledTags(null)
     const mode = replaceMode ? "replace" : "append"
+    const previous = new Set(draft.vocabulary.map((item) => item.promptEn.trim().toLowerCase()))
+    const loadingId = toast.loading("正在编译检测词表并热更新…")
     const response = await compile(draft.naturalLanguageInstruction, true, { mode, baseVocabulary: draft.vocabulary })
+    toast.dismiss(loadingId)
     setCompiling(false)
     if (!response) return
+    setCompiledTags(
+      response.vocabulary.map((item) => ({
+        item,
+        state: mode === "replace" || !previous.has(item.promptEn.trim().toLowerCase()) ? "new" : "existing",
+      }))
+    )
     setDraft((prev) =>
       prev
         ? { ...prev, naturalLanguageInstruction: response.config.naturalLanguageInstruction, vocabulary: response.config.vocabulary }
@@ -287,10 +300,16 @@ export function VisionCard() {
               rows={3}
               value={draft.naturalLanguageInstruction}
               onChange={(event) => patch({ naturalLanguageInstruction: event.target.value })}
-              placeholder="例如：洁净区人员必须戴口罩和手套，不允许露出头发，地面不能遗留工具"
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+                event.preventDefault()
+                void handleCompile()
+              }}
+              disabled={compiling}
+              placeholder="例如：洁净区人员必须戴口罩和手套；或行为描述：猫吃猫粮"
             />
             <FieldDescription>
-              点击编译后，系统自动翻译为英文检测词并追加到现有词表（按英文词去重，保留已有词条及手动修改），立即热更新，无需重启。词表条数不设上限，可逐步完善。
+              按回车（Shift+回车换行）或点击编译：系统自动把中文降解为 YOLO-World 可识别的英文实体名词（行为描述如「猫吃猫粮」会拆成 cat、pet feeder、food bowl、cat food），按英文词去重追加到词表并立即热更新，无需重启。
             </FieldDescription>
           </Field>
           <div className="flex flex-wrap items-center gap-3">
@@ -311,6 +330,37 @@ export function VisionCard() {
               </p>
             ) : null}
           </div>
+          {compiling || compiledTags ? (
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/40 p-3" aria-live="polite">
+              <div className="flex items-center gap-2 text-xs font-medium">
+                {compiling ? <Spinner /> : <CircleCheck className="size-3.5 text-success" aria-hidden="true" />}
+                {compiling ? "正在编译为英文检测词…" : `本次编译出 ${compiledTags?.length ?? 0} 个检测 Tag，已热更新`}
+              </div>
+              {compiledTags && compiledTags.length > 0 ? (
+                <ul className="flex flex-wrap gap-1.5">
+                  {compiledTags.map(({ item, state }) => (
+                    <li
+                      key={item.promptEn}
+                      title={visionRoleLabel(item.role)}
+                      className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    >
+                      <span className="font-mono">{item.promptEn}</span>
+                      <span className="text-muted-foreground">{item.labelZh}</span>
+                      <Badge variant="outline" className="text-[10px]">
+                        {visionRoleLabel(item.role)}
+                      </Badge>
+                      <Badge
+                        variant="outline"
+                        className={cn("text-[10px]", state === "new" ? "border-success/40 bg-success/10 text-success" : "text-muted-foreground")}
+                      >
+                        {state === "new" ? "新增" : "已存在"}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
         </FieldGroup>
 
         <Separator />
@@ -331,7 +381,7 @@ export function VisionCard() {
             ))}
           </ul>
           <p className="text-xs text-muted-foreground">
-            主体锚点用于分配 Track ID（至少启用一个）；必需劳保在人员身上检测不到时判为疑似；违规目标一出现即判为疑似。
+            主体锚点 / 行为主体用于分配 Track ID（至少启用一个）；必需劳保在人员身上检测不到时判为疑似；违规目标一出现即判为疑似；行为主体与关联物体空间靠近或重叠时判为疑似，再交二级大模型复核动作。未配置围栏时自动使用全局检测。
           </p>
         </div>
 

@@ -18,6 +18,8 @@ import {
   EMPTY_VISION_STATS,
   type VisionConfig,
   type VisionEvent,
+  type VisionHitEntry,
+  type VisionHitsResponse,
   type VisionInfo,
   type VisionIssue,
   type VisionStats,
@@ -48,6 +50,7 @@ interface WorkerHealth {
   stats: VisionStats
   streams: Record<string, VisionStreamHealth>
   recentEvents: VisionEvent[]
+  hitLog?: VisionHitEntry[]
   versions: Record<string, string>
   lastReloadMs: number
 }
@@ -524,10 +527,51 @@ export async function getVisionInfo(): Promise<VisionInfo> {
     stats: health?.stats ?? fallback?.stats ?? { ...EMPTY_VISION_STATS },
     streams: health?.streams ?? fallback?.streams ?? {},
     recentEvents: health?.recentEvents ?? [],
+    hitLog: health?.hitLog ?? [],
     versions: health?.versions ?? {},
     lastReloadMs: health?.lastReloadMs ?? 0,
     restarts: s.restarts,
     installOutput: s.installing || s.installOutput ? s.installOutput : undefined,
+  }
+}
+
+/** 初筛命中日志轻量流：每次实时探测一次 worker，避免读到 5 秒前的缓存。 */
+export async function getVisionHits(): Promise<VisionHitsResponse> {
+  await ensureVisionEngine()
+  const s = state()
+  const live = s.child || s.healthy ? await probeHealth() : null
+  if (live) {
+    s.healthy = true
+    s.health = live
+  }
+  const health = live ?? (s.healthy ? s.health : null)
+  const info = describe()
+  const fallback = !health && motionFallbackActive() ? motionFallbackSnapshot() : null
+  const workerStreams = health?.streams ?? fallback?.streams ?? {}
+  const streams = loadStreams().map((stream) => {
+    const item = workerStreams[stream.id]
+    return {
+      id: stream.id,
+      name: stream.name,
+      monitored: Boolean(stream.autoPatrol),
+      online: item?.online ?? false,
+      frames: item?.frames ?? 0,
+      ringFrames: item?.ringFrames ?? 0,
+      zones: item?.zones ?? 0,
+      persons: item?.persons ?? 0,
+      error: item?.error ?? "",
+    }
+  })
+  return {
+    status: "ok",
+    online: Boolean(health),
+    mode: health?.mode ?? (fallback ? "node-motion" : "offline"),
+    modelLoaded: health?.modelLoaded ?? false,
+    message: info.message,
+    hitLog: health?.hitLog ?? [],
+    recentEvents: health?.recentEvents ?? [],
+    stats: health?.stats ?? fallback?.stats ?? { ...EMPTY_VISION_STATS },
+    streams,
   }
 }
 

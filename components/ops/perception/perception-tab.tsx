@@ -3,6 +3,7 @@
 import { VisionCard } from "@/components/vigil/config/vision-card"
 import { EscalationQueue } from "./escalation-queue"
 import { FilterMetrics } from "./filter-metrics"
+import { HitLog } from "./hit-log"
 import { RoiManager } from "./roi-manager"
 import { TrackingCanvas } from "./tracking-canvas"
 
@@ -17,7 +18,10 @@ export function PerceptionTab() {
       </div>
       <FilterMetrics />
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
-        <TrackingCanvas />
+        <div className="flex min-w-0 flex-col gap-4">
+          <TrackingCanvas />
+          <HitLog />
+        </div>
         <RoiManager />
       </div>
       <section aria-labelledby="tier1-rules-title" className="flex flex-col gap-2">

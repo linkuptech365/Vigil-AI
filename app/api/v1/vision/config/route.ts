@@ -17,8 +17,11 @@ export async function PUT(request: Request) {
   if (!body.ok) return jsonError(400, "INVALID_JSON", body.message)
 
   const config = sanitizeVisionConfig(body.value, loadVisionConfig())
-  if (!config.vocabulary.some((item) => item.enabled && item.role === "anchor_person")) {
-    return jsonError(400, "NO_ANCHOR", "词表中至少需要启用一个「主体锚点」词条（通常是人员），否则无法分配 Track ID")
+  const hasTracked = config.vocabulary.some(
+    (item) => item.enabled && (item.role === "anchor_person" || item.role === "subject_target")
+  )
+  if (!hasTracked) {
+    return jsonError(400, "NO_ANCHOR", "词表中至少需要启用一个「主体锚点」或「行为主体」词条，否则无法分配 Track ID")
   }
   try {
     saveVisionConfig(config)
