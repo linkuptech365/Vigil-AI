@@ -24,6 +24,13 @@ export class StreamAnalysisError extends Error {
   }
 }
 
+/** 冷启动探索时视觉服务给出的行为主体停留区域（0~1000 归一化坐标） */
+export interface ExploreHint {
+  center: [number, number]
+  radius: number
+  subjectLabel: string
+}
+
 export interface AnalyzeStreamOptions {
   streamId: string
   source: StreamAlertSource
@@ -33,6 +40,8 @@ export interface AnalyzeStreamOptions {
   /** 边缘端已抓好的帧（Base64 或 data URL）；提供后不再从引擎抓帧 */
   providedFrames?: string[]
   edge?: { trackId: string; edgeConfidence: number; label?: string }
+  /** 冷启动探索：通道尚无 spatial_hotspot 锚点，行为主体在同一区域停留后发起的首次研判 */
+  explore?: ExploreHint
   requestHost: string | null
   signal: AbortSignal
 }
@@ -44,6 +53,28 @@ export interface AnalyzeStreamOutcome extends AnalyzeStreamResponse {
 
 const FRAME_WIDTH = 960
 const MAX_FRAMES = 6
+
+/**
+ * 冷启动探索研判成立后，若模型没有给出空间热点，就用主体停留区域兜底，
+ * 让一级初筛立即获得锚点并升级为成熟期；模型已给出的反馈优先。
+ */
+function withExploreAnchor(result: VlmFinalResult, verdict: VlmVerdict, explore?: ExploreHint): VlmFinalResult {
+  if (!explore || !verdict.triggered) return result
+  const base = result.tier1Feedback ?? {}
+  if (base.spatial_hotspot) return result
+  return {
+    ...result,
+    tier1Feedback: {
+      ...base,
+      spatial_hotspot: {
+        center: explore.center,
+        radius: explore.radius,
+        description: `${explore.subjectLabel}停留点`,
+      },
+      trigger_policy: base.trigger_policy ?? "ANCHOR_PROXIMITY",
+    },
+  }
+}
 
 function timecode(seconds: number) {
   const whole = Math.floor(seconds)
@@ -181,7 +212,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       result = chunk.result
       metrics = chunk.metrics
       verdict = chunk.verdict
-      feedbackFromAnalysis("channel", meta.id, chunk.result, chunk.verdict)
+      feedbackFromAnalysis("channel", meta.id, withExploreAnchor(chunk.result, chunk.verdict, options.explore), chunk.verdict)
     } else if (chunk.type === "error") {
       errorMessage = chunk.message
     }

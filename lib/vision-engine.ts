@@ -398,15 +398,16 @@ export function monitoredStreamIds() {
     .map((stream) => stream.id)
 }
 
-/** 只下发启用且会送检的围栏（「仅记录」不触发研判）；目前只对人员目标判定。 */
+/** 只下发启用且会送检的围栏（「仅记录」不触发研判）；围栏入侵与全景行为感知并行，围栏不会裁掉围栏外的目标。 */
 function workerZones() {
   return loadZones()
-    .filter((zone) => zone.enabled && zone.action !== "log" && zone.targets.includes("person"))
+    .filter((zone) => zone.enabled && zone.action !== "log")
     .map((zone) => ({
       id: zone.id,
       name: zone.name,
       type: zone.type,
       cameraId: zone.cameraId,
+      targets: zone.targets,
       coordinates: zone.coordinates,
       directional: zone.directional === true,
     }))
@@ -589,4 +590,10 @@ export async function getVisionHits(): Promise<VisionHitsResponse> {
 
 export function visionHealthy() {
   return state().healthy
+}
+
+/** 视觉服务正在持续读到该通道的帧：说明视频流已接入并在被初筛，不应再显示为「待命」。 */
+export function visionStreamOnline(streamId: string) {
+  const s = state()
+  return s.healthy && s.health?.streams?.[streamId]?.online === true
 }

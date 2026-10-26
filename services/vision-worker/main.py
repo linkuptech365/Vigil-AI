@@ -49,6 +49,10 @@ ROLE_CONTEXT = "context_object"
 POLICY_DUAL = "DUAL_INTERACTION"
 POLICY_ANCHOR = "ANCHOR_PROXIMITY"
 ANCHOR_MIN_FRAMES = 3  # 主体停留在记忆锚点内的最少连续帧
+EXPLORE_MIN_FRAMES = 5  # 冷启动探索：主体在同一区域停留的最少连续帧
+EXPLORE_LINGER = 90.0  # 冷启动探索：判定"同一区域"的中心位移上限（0-1000 归一化坐标）
+EXPLORE_COOLDOWN = 120.0  # 冷启动探索被二级驳回后的最短重试间隔（秒）
+EXPLORE_RADIUS = 150.0  # 探索确认后默认下发的锚点半径
 MAX_LEARNED_TAGS = 6
 ROLES = (ROLE_ANCHOR, ROLE_PPE, ROLE_HAZARD, ROLE_SUBJECT, ROLE_CONTEXT)
 
@@ -85,6 +89,7 @@ class ZoneItem(BaseModel):
     cameraId: str = ""
     coordinates: list[list[float]] = Field(default_factory=list)
     directional: bool = False
+    targets: list[str] = Field(default_factory=lambda: ["person"])
 
 
 class LearnTagItem(BaseModel):
@@ -160,6 +165,8 @@ class Suspect:
     instant: bool = False  # 绊线越界是瞬时事件，不走连续帧门控
     min_frames: int | None = None  # 覆盖全局连续帧门槛（记忆锚点停留判定使用）
     anchor: bool = False  # 由记忆锚点靠近触发
+    explore: bool = False  # 冷启动探索：主体在同一区域停留，但伴生物体未检出
+    hint: dict[str, Any] | None = None  # 探索时随送审附带的空间线索（center/radius/subject）
 
 
 @dataclass
@@ -180,6 +187,7 @@ class StreamState:
     tracks: dict[str, TrackState] = field(default_factory=dict)
     cooldown: dict[str, float] = field(default_factory=dict)
     zone_side: dict[str, float] = field(default_factory=dict)
+    explore_ref: dict[str, tuple[float, float]] = field(default_factory=dict)
     next_at: float = 0.0
     last_infer_ts: float = 0.0
     last_had_person: bool = False
@@ -653,6 +661,56 @@ def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
     return list(best.values())
 
 
+def explore_suspects(
+    sid: str, dets: list[Det], shape: tuple[int, int], st: StreamState, relation_keys: set[str]
+) -> list[Suspect]:
+    """冷启动探索：通道还没有学到 spatial_hotspot 锚点时，行为主体（如猫）在同一区域连续停留，
+    即使伴生物体（喂食器）没被检出，也允许发起一次二级研判，让 VLM 去确认并反哺锚点。
+
+    只在"词表里配了伴生物体但本帧没有配对成功"时补位；已有关系疑似或已学到锚点的主体不重复触发。
+    主体中心位移超过 EXPLORE_LINGER 视为离开该区域，停留计数重新开始。
+    """
+    learn = RT.cfg.learning.get(sid)
+    if learn and learn.get("anchor"):
+        st.explore_ref.clear()
+        return []
+    height, width = shape
+    best: dict[str, Suspect] = {}
+    seen: set[str] = set()
+    for det in dets:
+        if det.role != ROLE_SUBJECT or not passes(det, RT.cfg.low):
+            continue
+        if f"rel:{det.prompt}" in relation_keys:
+            continue
+        key = f"explore:{det.prompt}"
+        seen.add(key)
+        cx = (det.box[0] + det.box[2]) / 2 / max(1, width) * 1000.0
+        cy = (det.box[1] + det.box[3]) / 2 / max(1, height) * 1000.0
+        ref = st.explore_ref.get(key)
+        if ref is not None and math.hypot(cx - ref[0], cy - ref[1]) > EXPLORE_LINGER:
+            st.explore_ref[key] = (cx, cy)
+            continue
+        if ref is None:
+            st.explore_ref[key] = (cx, cy)
+            ref = (cx, cy)
+        current = best.get(key)
+        if current is None or det.conf > current.conf:
+            best[key] = Suspect(
+                key=key, track_id=None, conf=round(det.conf, 3),
+                reasons=[f"冷启动探索：{label_of(det.prompt)} 在同一区域停留，未检出伴生物体"],
+                min_frames=EXPLORE_MIN_FRAMES, explore=True,
+                hint={
+                    "center": [round(ref[0], 1), round(ref[1], 1)],
+                    "radius": EXPLORE_RADIUS,
+                    "subject": det.prompt,
+                    "subjectLabel": label_of(det.prompt),
+                },
+            )
+    for key in [k for k in st.explore_ref if k not in seen]:
+        del st.explore_ref[key]
+    return list(best.values())
+
+
 def anchor_of(sid: str) -> dict[str, Any] | None:
     learn = RT.cfg.learning.get(sid)
     return learn.get("anchor") if learn else None
@@ -726,9 +784,27 @@ def zone_suspects(
         return []
     height, width = shape
     persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= RT.cfg.low]
+    subjects = [d for d in dets if d.role == ROLE_SUBJECT and passes(d, RT.cfg.low)]
     suspects: list[Suspect] = []
     for zone in zones:
         coords = zone.get("coordinates") or []
+        targets = zone.get("targets") or ["person"]
+        if zone.get("type") == "polygon" and len(coords) >= 3 and any(t != "person" for t in targets):
+            # 围栏入侵与全景行为感知并行：非人员围栏只负责"主体进入围栏"，不影响围栏外目标的全景判定
+            for index, subject in enumerate(subjects):
+                foot_x = (subject.box[0] + subject.box[2]) / 2 / max(1, width) * 100.0
+                foot_y = subject.box[3] / max(1, height) * 100.0
+                if point_in_polygon(foot_x, foot_y, coords):
+                    suspects.append(
+                        Suspect(
+                            key=f"zone:{zone['id']}:s{index}",
+                            track_id=None,
+                            conf=round(subject.conf, 3),
+                            reasons=[f"{label_of(subject.prompt)} 进入电子围栏：{zone.get('name') or zone['id']}"],
+                        )
+                    )
+        if "person" not in targets:
+            continue
         for index, person in enumerate(persons):
             foot_x = (person.box[0] + person.box[2]) / 2 / max(1, width) * 100.0
             foot_y = person.box[3] / max(1, height) * 100.0
@@ -870,6 +946,8 @@ def push_event(event: dict[str, Any], frames: list[str]) -> None:
         "label": event["label"],
         "reasons": event["reasons"],
         "keyframesBase64": frames,
+        "explore": bool(event.get("explore")),
+        "hint": event.get("hint"),
     }
     try:
         response = httpx.post(url, json=body, headers=headers, timeout=httpx.Timeout(170.0, connect=5.0))
@@ -916,11 +994,12 @@ def log_hit(
     progress: dict[str, int] | None = None,
     event_id: str | None = None,
     anchor: bool = False,
+    explore: bool = False,
 ) -> None:
     if not tags and not reasons:
         return
     now = time.time()
-    sig = f"{gate}|{event_id or ''}|{int(anchor)}|" + ",".join(t["prompt"] for t in tags)
+    sig = f"{gate}|{event_id or ''}|{int(anchor)}{int(explore)}|" + ",".join(t["prompt"] for t in tags)
     last = st.last_entry
     if last is not None and event_id is None and st.last_entry_sig == sig and now - st.last_entry_ts < HIT_DEDUPE_SECONDS:
         last["repeat"] += 1
@@ -942,6 +1021,8 @@ def log_hit(
         entry["progress"] = progress
     if anchor:
         entry["anchor"] = True
+    if explore:
+        entry["explore"] = True
     if event_id:
         entry["eventId"] = event_id
     RT.hitlog.appendleft(entry)
@@ -993,8 +1074,9 @@ def scan_stream(sid: str) -> None:
     for hit in anchor_suspects(sid, dets, image.shape[:2]):
         if f"rel:{hit.key[len('anchor:'):]}" not in relation_keys:
             suspects.append(hit)
+    suspects.extend(explore_suspects(sid, dets, image.shape[:2], st, relation_keys))
     suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
-    st.last_had_person = persons > 0
+    st.last_had_person = persons > 0 or any(d.role == ROLE_SUBJECT and passes(d, cfg.low) for d in dets)
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
 
@@ -1039,16 +1121,19 @@ def scan_stream(sid: str) -> None:
         RT.stats.tier1_pending += 1
         if pending_list:
             best, hits = max(pending_list, key=lambda item: item[1])
-            log_hit(st, tags, best.reasons, "pending", {"hits": hits, "need": best.min_frames or cfg.min_frames}, anchor=best.anchor)
+            log_hit(
+                st, tags, best.reasons, "pending", {"hits": hits, "need": best.min_frames or cfg.min_frames},
+                anchor=best.anchor, explore=best.explore,
+            )
         elif cooled_list:
-            log_hit(st, tags, cooled_list[0].reasons, "cooldown", anchor=cooled_list[0].anchor)
+            log_hit(st, tags, cooled_list[0].reasons, "cooldown", anchor=cooled_list[0].anchor, explore=cooled_list[0].explore)
         return
 
     annotated = encode_jpeg(draw(image, dets, header_text(ratio, dets), zones=zones_for(sid), anchor=anchor_of(sid)))
     frames = [base64.b64encode(raw).decode("ascii") for raw in list(st.ring)[-4:]]
     frames.append(base64.b64encode(annotated).decode("ascii"))
     for suspect in triggered:
-        st.cooldown[suspect.key] = now + cfg.cooldown
+        st.cooldown[suspect.key] = now + (max(cfg.cooldown, EXPLORE_COOLDOWN) if suspect.explore else cfg.cooldown)
         RT.stats.tier2_triggered += 1
         event = {
             "id": uuid.uuid4().hex[:12],
@@ -1061,9 +1146,11 @@ def scan_stream(sid: str) -> None:
             "status": "pending",
             "summary": "",
             "alertId": None,
+            "explore": suspect.explore,
+            "hint": suspect.hint,
         }
         RT.events.appendleft(event)
-        log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"], anchor=suspect.anchor)
+        log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"], anchor=suspect.anchor, explore=suspect.explore)
         PUSH_POOL.submit(push_event, event, frames)
     for key in [k for k, until in st.cooldown.items() if until < now - 60]:
         del st.cooldown[key]
@@ -1158,6 +1245,7 @@ def health() -> dict[str, Any]:
                 "policy": item.get("policy", POLICY_DUAL),
                 "tags": item.get("tagCount", 0),
                 "anchor": bool(item.get("anchor")),
+                "phase": "mature" if item.get("anchor") else "cold",
             }
             for sid, item in RT.cfg.learning.items()
         },

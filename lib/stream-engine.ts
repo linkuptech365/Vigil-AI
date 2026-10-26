@@ -4,6 +4,7 @@ import path from "node:path"
 
 import { resolveFfmpegPath } from "@/lib/ops/server/frame-extractor"
 import { dataDir } from "@/lib/storage/rules-store"
+import { visionStreamOnline } from "@/lib/vision-engine"
 import { findDemoVideo, loadStreams } from "@/lib/storage/streams-store"
 import {
   DEMO_STREAM_ID,
@@ -523,7 +524,15 @@ export async function getStreamViews(): Promise<StreamsResponse> {
   const streams: StreamView[] = metas.map((meta) => {
     const entry = live[meta.id]
     const connected = entry?.producers?.some((producer) => (producer.medias?.length ?? 0) > 0 || (producer.recv ?? 0) > 0) ?? false
-    const status = engine.engineStatus !== "running" ? "offline" : connected ? "online" : probes.get(meta.id) === false ? "offline" : "idle"
+    const visionLive = visionStreamOnline(meta.id)
+  const status =
+    engine.engineStatus !== "running"
+      ? "offline"
+      : connected || visionLive
+        ? "online"
+        : probes.get(meta.id) === false
+          ? "offline"
+          : "idle"
     return {
       id: meta.id,
       name: meta.name,

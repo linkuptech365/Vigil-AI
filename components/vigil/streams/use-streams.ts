@@ -45,7 +45,7 @@ export function useStreams() {
     keepPreviousData: true,
   })
   const { data: alertData, mutate: mutateAlerts } = useSWR<StreamAlertsResponse>(STREAM_ALERTS_ENDPOINT, getJson, {
-    refreshInterval: 8000,
+    refreshInterval: 3000,
     keepPreviousData: true,
   })
 

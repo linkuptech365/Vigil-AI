@@ -1,10 +1,25 @@
 import { NextResponse } from "next/server"
 
-import { analyzeStream, StreamAnalysisError } from "@/lib/ops/server/stream-analysis"
+import { analyzeStream, StreamAnalysisError, type ExploreHint } from "@/lib/ops/server/stream-analysis"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const maxDuration = 120
+
+function parseExploreHint(body: Record<string, unknown> | null): ExploreHint | undefined {
+  if (!body?.explore) return undefined
+  const hint = body.hint as Record<string, unknown> | null | undefined
+  const center = Array.isArray(hint?.center) ? hint.center : []
+  const x = Number(center[0])
+  const y = Number(center[1])
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { center: [500, 500], radius: 150, subjectLabel: "目标" }
+  const radius = Number(hint?.radius)
+  return {
+    center: [Math.min(1000, Math.max(0, x)), Math.min(1000, Math.max(0, y))],
+    radius: Number.isFinite(radius) ? Math.min(1000, Math.max(20, radius)) : 150,
+    subjectLabel: typeof hint?.subjectLabel === "string" ? hint.subjectLabel.slice(0, 40) : "目标",
+  }
+}
 
 /** 边缘 AI 触发二次研判：边缘端发现疑似目标（trackId + 置信度），网关抓帧后交给 VLM 复核。 */
 export async function POST(request: Request) {
@@ -33,6 +48,7 @@ export async function POST(request: Request) {
       providedFrames: keyframes.length ? keyframes : undefined,
       modelProfileId: typeof body?.modelProfileId === "string" ? body.modelProfileId : undefined,
       edge: { trackId, edgeConfidence, label: typeof body?.label === "string" ? body.label.slice(0, 60) : undefined },
+      explore: parseExploreHint(body),
       requestHost: request.headers.get("host"),
       signal: request.signal,
     })

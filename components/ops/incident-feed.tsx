@@ -54,6 +54,7 @@ function EventCard({ alert }: { alert: AlertEvent }) {
   const { openAlert, setAlertStatus, locateIncident } = useOps()
   const critical = alert.severity === "CRITICAL"
   const resolved = isResolved(alert.status)
+  const fresh = !resolved && alert.minutesAgo < 2
 
   return (
     <li>
@@ -61,6 +62,7 @@ function EventCard({ alert }: { alert: AlertEvent }) {
         className={cn(
           "group relative flex flex-col gap-3 rounded-lg border bg-card p-3 transition-colors hover:bg-secondary/60",
           critical && !resolved ? "border-destructive/50" : "border-border",
+          fresh && "ring-2 ring-signal/60",
           resolved && "opacity-70"
         )}
       >
@@ -85,6 +87,7 @@ function EventCard({ alert }: { alert: AlertEvent }) {
                 {alert.severity}
               </Badge>
               <span className="text-sm font-semibold">{alert.type}</span>
+              {fresh && <Badge className="bg-signal text-[10px] text-black">新</Badge>}
               {resolved && (
                 <Badge variant="outline" className="text-[10px]">
                   {STATUS_LABEL[alert.status]}
@@ -155,7 +158,9 @@ export function IncidentFeed({ className }: { className?: string }) {
   const { alerts } = useOps()
   const [filter, setFilter] = React.useState<"all" | "open">("all")
 
-  const visible = alerts.filter((a) => (filter === "open" ? a.status === "open" : true))
+  const visible = alerts
+    .filter((a) => (filter === "open" ? a.status === "open" : true))
+    .toSorted((a, b) => a.minutesAgo - b.minutesAgo)
   const groups = visible.reduce<{ label: string; items: AlertEvent[] }[]>((acc, alert) => {
     const label = groupLabel(alert.minutesAgo)
     const found = acc.find((g) => g.label === label)
@@ -200,8 +205,6 @@ export function IncidentFeed({ className }: { className?: string }) {
       </div>
 
       <div className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-3 max-lg:max-h-[640px]">
-        <LibraryAlerts />
-        <StreamRecords />
         {groups.length === 0 ? (
           <Empty className="py-12">
             <EmptyHeader>
@@ -230,6 +233,8 @@ export function IncidentFeed({ className }: { className?: string }) {
             ))}
           </div>
         )}
+        <StreamRecords />
+        <LibraryAlerts />
       </div>
     </aside>
   )
