@@ -11,7 +11,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ stre
   if (!getStream(streamId)) {
     return NextResponse.json({ status: "error", message: `通道 ${streamId} 不存在`, error: "STREAM_NOT_FOUND" }, { status: 404 })
   }
-  await ensureEngine({ waitMs: 3_000 })
+  await ensureEngine({ waitMs: 8_000 })
   try {
     const frame = await grabFrame(streamId, { width: 960, timeoutMs: 15_000, signal: request.signal })
     return new Response(new Uint8Array(frame.buffer), {

@@ -53,8 +53,23 @@ interface EngineState {
   stderrTail: string[]
   hooked: boolean
   installing: Promise<{ ok: boolean; output: string }> | null
-  probes: Map<string, boolean>
+  probes: Map<string, ProbeRecord>
+  lastLive: { at: number; data: Record<string, RawStreamEntry> } | null
 }
+
+/** 单次探活失败只累计，不直接判离线：连续失败达到次数且持续足够久才算离线。 */
+interface ProbeRecord {
+  fails: number
+  lastOkAt: number
+  firstFailAt: number
+}
+
+const PROBE_FAIL_THRESHOLD = 3
+const PROBE_OFFLINE_AFTER_MS = 12_000
+/** 引擎 /api/streams 暂时没响应时，沿用最近一次成功结果的最长时间 */
+const LIVE_CACHE_TTL_MS = 20_000
+/** 引擎请求默认超时：容忍摄像机关键帧延迟 */
+const ENGINE_TIMEOUT_MS = 8_000
 
 const globalStore = globalThis as typeof globalThis & { __vigilStreamEngine?: EngineState }
 
@@ -75,6 +90,7 @@ function state(): EngineState {
       hooked: false,
       installing: null,
       probes: new Map(),
+      lastLive: null,
     }
   }
   return globalStore.__vigilStreamEngine
@@ -158,7 +174,7 @@ interface FetchOptions {
 
 export async function engineFetch(pathname: string, options: FetchOptions = {}) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), options.timeoutMs ?? 8_000)
+  const timer = setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), options.timeoutMs ?? ENGINE_TIMEOUT_MS)
   const onAbort = () => controller.abort(options.signal?.reason)
   if (options.signal?.aborted) onAbort()
   else options.signal?.addEventListener("abort", onAbort, { once: true })
@@ -172,7 +188,7 @@ export async function engineFetch(pathname: string, options: FetchOptions = {}) 
 
 async function probeHealth(): Promise<{ ok: boolean; version?: string }> {
   try {
-    const response = await engineFetch("/api", { timeoutMs: 2_000 })
+    const response = await engineFetch("/api", { timeoutMs: 5_000 })
     if (!response.ok) return { ok: false }
     const body = (await response.json().catch(() => ({}))) as { version?: string }
     return { ok: true, version: body.version }
@@ -203,10 +219,11 @@ export async function grabFrame(streamId: string, options: { timeoutMs?: number;
     }
     const buffer = Buffer.from(await response.arrayBuffer())
     if (buffer.length < 500 || buffer[0] !== 0xff || buffer[1] !== 0xd8) throw new Error("引擎返回的不是有效的 JPEG 画面")
-    state().probes.set(streamId, true)
+    markProbe(streamId, true)
     return { buffer, latencyMs: Date.now() - started } satisfies GrabbedFrame
   } catch (error) {
-    state().probes.set(streamId, false)
+    // 调用方主动取消（浏览器切换布局、关闭标签）不是通道故障，不计入失败
+    if (!options.signal?.aborted) markProbe(streamId, false)
     if (controller.signal.aborted && !options.signal?.aborted) throw new Error("等待画面超时，请检查摄像头/NVR 地址与网络连通性")
     throw error instanceof Error ? error : new Error("抓帧失败")
   } finally {
@@ -216,7 +233,24 @@ export async function grabFrame(streamId: string, options: { timeoutMs?: number;
 }
 
 export function markProbe(streamId: string, ok: boolean) {
-  state().probes.set(streamId, ok)
+  const { probes } = state()
+  const now = Date.now()
+  if (ok) {
+    probes.set(streamId, { fails: 0, lastOkAt: now, firstFailAt: 0 })
+    return
+  }
+  const prev = probes.get(streamId)
+  probes.set(streamId, {
+    fails: (prev?.fails ?? 0) + 1,
+    lastOkAt: prev?.lastOkAt ?? 0,
+    firstFailAt: prev && prev.fails > 0 ? prev.firstFailAt : now,
+  })
+}
+
+function probeIndicatesOffline(record: ProbeRecord | undefined) {
+  if (!record || record.fails < PROBE_FAIL_THRESHOLD) return false
+  const silentSince = record.lastOkAt || record.firstFailAt
+  return Date.now() - silentSince >= PROBE_OFFLINE_AFTER_MS
 }
 
 /* --------------------------------- 进程生命周期 --------------------------------- */
@@ -512,11 +546,15 @@ export async function getStreamViews(): Promise<StreamsResponse> {
 
   let live: Record<string, RawStreamEntry> = {}
   if (engine.engineStatus === "running") {
+    const s = state()
     try {
-      const response = await engineFetch("/api/streams", { timeoutMs: 3_000 })
-      if (response.ok) live = (await response.json()) as Record<string, RawStreamEntry>
+      const response = await engineFetch("/api/streams", { timeoutMs: ENGINE_TIMEOUT_MS })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      live = (await response.json()) as Record<string, RawStreamEntry>
+      s.lastLive = { at: Date.now(), data: live }
     } catch {
-      live = {}
+      // 引擎瞬时繁忙：沿用最近一次结果，避免把仍在推流的通道误判为未连接
+      live = s.lastLive && Date.now() - s.lastLive.at < LIVE_CACHE_TTL_MS ? s.lastLive.data : {}
     }
   }
 
@@ -525,14 +563,14 @@ export async function getStreamViews(): Promise<StreamsResponse> {
     const entry = live[meta.id]
     const connected = entry?.producers?.some((producer) => (producer.medias?.length ?? 0) > 0 || (producer.recv ?? 0) > 0) ?? false
     const visionLive = visionStreamOnline(meta.id)
-  const status =
-    engine.engineStatus !== "running"
-      ? "offline"
-      : connected || visionLive
-        ? "online"
-        : probes.get(meta.id) === false
-          ? "offline"
-          : "idle"
+    const status =
+      engine.engineStatus !== "running"
+        ? "offline"
+        : connected || visionLive
+          ? "online"
+          : probeIndicatesOffline(probes.get(meta.id))
+            ? "offline"
+            : "idle"
     return {
       id: meta.id,
       name: meta.name,

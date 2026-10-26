@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Toggle } from "@/components/ui/toggle"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { LiveFeed, useVisible } from "@/components/vigil/streams/live-wall"
+import { useStableStreams } from "@/components/vigil/streams/use-stable-streams"
 import { useStreams } from "@/components/vigil/streams/use-streams"
 import { useVision } from "@/components/vigil/streams/use-vision"
 import { useVigil } from "@/components/vigil/vigil-provider"
@@ -54,7 +55,8 @@ export function MonitorGrid() {
   const { layout, setLayout, focusId, focusCamera, showOverlays, toggleOverlays, visibleStreamIds, setVisibleStreamIds } =
     useOps()
   const { setActiveTab } = useVigil()
-  const { streams, loading, loadError } = useStreams()
+  const { streams: rawStreams, loading, loadError } = useStreams()
+  const { streams, reconnectingIds } = useStableStreams(rawStreams)
   const { engine: vision } = useVision()
   const visionAvailable = vision?.status === "ready" || vision?.status === "degraded"
   const annotated = showOverlays && visionAvailable
@@ -82,6 +84,7 @@ export function MonitorGrid() {
       live={liveIds.has(stream.id)}
       annotated={annotated}
       size={size}
+      reconnecting={reconnectingIds.has(stream.id)}
       className={className}
       onFocus={layout === "focus" && stream.id !== focused?.id ? () => focusCamera(stream.id) : undefined}
       onMaximize={layout !== "single" ? () => focusCamera(stream.id, { single: true }) : undefined}

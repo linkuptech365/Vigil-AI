@@ -12,9 +12,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ stre
   if (!getStream(streamId)) {
     return NextResponse.json({ status: "error", message: `通道 ${streamId} 不存在`, error: "STREAM_NOT_FOUND" }, { status: 404 })
   }
-  await ensureEngine({ waitMs: 3_000 })
+  await ensureEngine({ waitMs: 8_000 })
 
   try {
+    // 只限制“等到响应头”的时间；摄像机关键帧间隔可达数秒，首帧给足 20 秒，响应头之后不再设读取超时
     const upstream = await engineFetch(`/api/stream.mjpeg?${new URLSearchParams({ src: streamId })}`, {
       signal: request.signal,
       timeoutMs: 20_000,
@@ -29,8 +30,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ stre
       },
     })
   } catch (error) {
-    markProbe(streamId, false)
     const aborted = request.signal.aborted
+    if (!aborted) markProbe(streamId, false)
     return NextResponse.json(
       { status: "error", message: error instanceof Error ? error.message : "视频流不可用", error: "STREAM_OFFLINE" },
       { status: aborted ? 499 : 503 }

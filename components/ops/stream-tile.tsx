@@ -20,6 +20,8 @@ interface StreamTileProps {
   /** 显示视觉服务绘制了检测框的标注画面 */
   annotated: boolean
   size: "lg" | "sm"
+  /** 服务端报告离线但仍在容错期：保持画面，仅提示“连接重试中” */
+  reconnecting?: boolean
   className?: string
   onFocus?: () => void
   onMaximize?: () => void
@@ -65,14 +67,26 @@ async function downloadSnapshot(stream: StreamView) {
   }
 }
 
-export function StreamTile({ stream, live, annotated, size, className, onFocus, onMaximize, onHide }: StreamTileProps) {
+export function StreamTile({
+  stream,
+  live,
+  annotated,
+  size,
+  reconnecting = false,
+  className,
+  onFocus,
+  onMaximize,
+  onHide,
+}: StreamTileProps) {
   const [ref, visible] = useVisible<HTMLDivElement>()
   const [overlayReady, setOverlayReady] = React.useState(false)
   const online = stream.status === "online"
   const alerting = stream.lastAnalysis?.status === "alert"
   const isLarge = size === "lg"
   const showOverlay = annotated && visible
-  const statusText = online
+  const statusText = reconnecting
+    ? "连接重试中"
+    : online
     ? annotated && overlayReady
       ? "AI 标注"
       : live
@@ -132,13 +146,19 @@ export function StreamTile({ stream, live, annotated, size, className, onFocus, 
           ) : null}
           <span className="flex items-center gap-1.5 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
             <span className="relative flex size-2">
-              {online ? (
+              {online && !reconnecting ? (
                 <span className="absolute inline-flex size-full animate-ping rounded-full bg-destructive opacity-75" />
               ) : null}
               <span
                 className={cn(
                   "relative inline-flex size-2 rounded-full",
-                  online ? "bg-destructive" : stream.status === "idle" ? "bg-warning" : "bg-muted-foreground"
+                  reconnecting
+                    ? "bg-warning"
+                    : online
+                      ? "bg-destructive"
+                      : stream.status === "idle"
+                        ? "bg-warning"
+                        : "bg-muted-foreground"
                 )}
               />
             </span>
