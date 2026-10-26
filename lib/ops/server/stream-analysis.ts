@@ -4,7 +4,7 @@ import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops
 import type { VlmFinalResult, VlmKeyframeInput, VlmMetrics, VlmPromptRule, VlmVerdict } from "@/lib/ops/vlm-api-types"
 import { MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
-import { feedbackFromAnalysis, tier1ExistingForSource } from "@/lib/ops/server/tier1-feedback"
+import { feedbackFromAnalysis, learnedRuleTuning, tier1ExistingForSource } from "@/lib/ops/server/tier1-feedback"
 import { runAnalysis } from "@/lib/ops/server/vlm-engine"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadProfiles } from "@/lib/storage/model-store"
@@ -160,13 +160,15 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
 
   const profile = resolveProfile(options.modelProfileId)
 
+  const tuning = learnedRuleTuning(meta.id)
   const promptRules: VlmPromptRule[] = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id }).map((rule) => ({
     id: rule.id,
     name: rule.name,
     description: ruleDescription(rule),
-    sensitivity: ruleSensitivity(rule),
+    sensitivity: Math.min(0.98, Math.round((ruleSensitivity(rule) + (tuning.sensitivityBoost[rule.id] ?? 0)) * 100) / 100),
     severity: rule.severity,
     cooldownSeconds: rule.cooldownSeconds,
+    exclusions: [...new Set([...(rule.exclusions ?? []), ...tuning.exclusions])],
   }))
   if (promptRules.length === 0) {
     throw new StreamAnalysisError("该通道没有生效的稽查规则，请在规则库中把规则绑定到「全部视频源」", 409, "NO_RULES")
@@ -251,6 +253,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       model: metrics.model,
       engineSource: metrics.source,
       edge: options.edge,
+      fine: result.fine,
     }
     saveAlert(created, frames)
     alert = created
@@ -272,17 +275,22 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     streamId: meta.id,
     streamName: meta.name,
     source: options.source,
-    outcome: alert ? "alert" : hit ? "folded" : "safe",
+    outcome: alert ? "alert" : hit ? "folded" : verdict.excluded ? "blocked" : verdict.shadowReview ? "shadow" : "safe",
     ruleName: hit ? result.ruleTriggered : undefined,
     confidence: result.confidence,
     summary: result.summary,
+    fine: result.fine,
     reason: alert
       ? undefined
       : hit
         ? `防抖冷却窗口（${verdict.suppression?.windowSeconds ?? "-"} 秒）内重复触发，已折叠进既有事件证据链，不重复发告警`
-        : verdict.belowThreshold
-          ? "命中规则但置信度低于规则灵敏度阈值，未触发告警"
-          : "大模型复核后判定画面无违规",
+        : verdict.excluded
+          ? `二级复核命中排他反例：${verdict.excluded.reason}${verdict.excluded.action ? `（动作：${verdict.excluded.action}）` : ""}，已拦截`
+          : verdict.shadowReview
+            ? "置信度处于边缘区间或交互介质辨识不足，记为存疑审计，未产生正式告警"
+            : verdict.belowThreshold
+              ? "命中规则但置信度低于规则灵敏度阈值，未触发告警"
+              : "大模型复核后判定画面无违规",
     alertId: alert?.id,
     edge: options.edge,
     hardSample: edgeRejected && (options.edge?.edgeConfidence ?? 0) >= 0.8 ? true : undefined,

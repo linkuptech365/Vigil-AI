@@ -17,6 +17,25 @@ export interface LearnedTag {
   learnedAt: string
 }
 
+export type HotspotKind = "target" | "exclusion"
+
+/** 带语义标签的微锚点：target 为规则关联目标点位，exclusion 为易混淆的相邻点位（如饮水点）。 */
+export interface LearnedMicroHotspot {
+  /** 形如 hotspot_food_tray */
+  id: string
+  kind: HotspotKind
+  center: [number, number]
+  radius: number
+  description: string
+  learnedAt: string
+}
+
+export const MAX_MICRO_HOTSPOTS = 6
+export const MAX_EXCLUSIONS = 8
+/** 误报反馈累计上调单条规则置信度门槛的上限 */
+export const MAX_SENSITIVITY_BOOST = 0.2
+const SENSITIVITY_STEP = 0.05
+
 export interface LearnedAnchor {
   /** 归一化坐标 0~1000 */
   center: [number, number]
@@ -31,6 +50,12 @@ export interface Tier1LearningState {
   updatedAt: string
   tags: LearnedTag[]
   anchor: LearnedAnchor | null
+  /** 语义微锚点（旧数据缺省） */
+  microHotspots?: LearnedMicroHotspot[]
+  /** 误报反馈沉淀的负条件（排除场景），随每次二级研判注入提示词（旧数据缺省） */
+  exclusions?: string[]
+  /** 按规则累计的置信度门槛上调值（旧数据缺省） */
+  sensitivityBoost?: Record<string, number>
   policy: Tier1TriggerPolicy
   /** 本次变更的简述，便于在界面上展示与回滚时识别 */
   note: string
@@ -49,7 +74,10 @@ export interface Tier1MergeResult {
   skippedByCap: number
   anchorUpdated: boolean
   policyChanged: boolean
+  hotspotsChanged?: boolean
 }
+
+const HOTSPOT_ID = /^hotspot_[a-z0-9_]{2,32}$/
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -99,11 +127,34 @@ export function sanitizeTier1Feedback(input: unknown): Tier1Feedback | undefined
     }
   }
 
+  if (Array.isArray(input.micro_hotspots)) {
+    const seen = new Set<string>()
+    const spots: NonNullable<Tier1Feedback["micro_hotspots"]> = []
+    for (const raw of input.micro_hotspots) {
+      if (!isRecord(raw) || spots.length >= MAX_MICRO_HOTSPOTS) continue
+      const id = text(raw.id, 40).toLowerCase()
+      const kind = raw.kind === "exclusion" ? "exclusion" : raw.kind === "target" ? "target" : null
+      if (!kind || !HOTSPOT_ID.test(id) || seen.has(id) || !Array.isArray(raw.center) || raw.center.length !== 2) continue
+      const [x, y] = raw.center.map(Number)
+      const radius = Number(raw.radius)
+      if (![x, y, radius].every(Number.isFinite)) continue
+      seen.add(id)
+      spots.push({
+        id,
+        kind,
+        center: [Math.round(clamp(x, 0, 1000)), Math.round(clamp(y, 0, 1000))],
+        radius: Math.round(clamp(radius, 20, 1000)),
+        description: text(raw.description, 40) || id,
+      })
+    }
+    if (spots.length > 0) feedback.micro_hotspots = spots
+  }
+
   if (input.trigger_policy === "DUAL_INTERACTION" || input.trigger_policy === "ANCHOR_PROXIMITY") {
     feedback.trigger_policy = input.trigger_policy
   }
 
-  return feedback.recommended_tags || feedback.spatial_hotspot || feedback.trigger_policy ? feedback : undefined
+  return feedback.recommended_tags || feedback.spatial_hotspot || feedback.trigger_policy || feedback.micro_hotspots ? feedback : undefined
 }
 
 export function emptyLearning(streamId: string, now = new Date()): Tier1Learning {
@@ -113,6 +164,9 @@ export function emptyLearning(streamId: string, now = new Date()): Tier1Learning
     updatedAt: now.toISOString(),
     tags: [],
     anchor: null,
+    microHotspots: [],
+    exclusions: [],
+    sensitivityBoost: {},
     policy: "DUAL_INTERACTION",
     note: "初始词表",
     history: [],
@@ -120,12 +174,25 @@ export function emptyLearning(streamId: string, now = new Date()): Tier1Learning
 }
 
 export function learningIsActive(learning: Tier1Learning | null | undefined) {
-  return Boolean(learning && (learning.tags.length > 0 || learning.anchor))
+  return Boolean(
+    learning &&
+      (learning.tags.length > 0 ||
+        learning.anchor ||
+        (learning.microHotspots?.length ?? 0) > 0 ||
+        (learning.exclusions?.length ?? 0) > 0)
+  )
 }
 
 function snapshot(learning: Tier1Learning): Tier1LearningState {
   const { streamId: _streamId, history: _history, ...state } = learning
-  return { ...state, tags: state.tags.map((tag) => ({ ...tag })), anchor: state.anchor ? { ...state.anchor } : null }
+  return {
+    ...state,
+    tags: state.tags.map((tag) => ({ ...tag })),
+    anchor: state.anchor ? { ...state.anchor } : null,
+    microHotspots: (state.microHotspots ?? []).map((spot) => ({ ...spot })),
+    exclusions: [...(state.exclusions ?? [])],
+    sensitivityBoost: { ...(state.sensitivityBoost ?? {}) },
+  }
 }
 
 function pushHistory(learning: Tier1Learning): Tier1LearningState[] {
@@ -188,6 +255,28 @@ export function mergeTier1Feedback(
     }
   }
 
+  const microHotspots = (base.microHotspots ?? []).map((spot) => ({ ...spot }))
+  let hotspotsChanged = false
+  for (const item of feedback.micro_hotspots ?? []) {
+    const next: LearnedMicroHotspot = { ...item, learnedAt: now.toISOString() }
+    const index = microHotspots.findIndex((spot) => spot.id === item.id)
+    if (index >= 0) {
+      const old = microHotspots[index]
+      const same =
+        old.kind === next.kind &&
+        Math.abs(old.center[0] - next.center[0]) <= 8 &&
+        Math.abs(old.center[1] - next.center[1]) <= 8 &&
+        Math.abs(old.radius - next.radius) <= 12
+      if (!same) {
+        microHotspots[index] = next
+        hotspotsChanged = true
+      }
+    } else if (microHotspots.length < MAX_MICRO_HOTSPOTS) {
+      microHotspots.push(next)
+      hotspotsChanged = true
+    }
+  }
+
   let policy = base.policy
   if (feedback.trigger_policy && feedback.trigger_policy !== policy) {
     // 没有锚点就无法按锚点触发，忽略这种无法执行的策略建议
@@ -195,12 +284,13 @@ export function mergeTier1Feedback(
   }
   const policyChanged = policy !== base.policy
 
-  const changed = addedTags.length > 0 || anchorUpdated || policyChanged
-  if (!changed) return { learning: base, changed, addedTags, skippedDuplicate, skippedByCap, anchorUpdated, policyChanged }
+  const changed = addedTags.length > 0 || anchorUpdated || policyChanged || hotspotsChanged
+  if (!changed) return { learning: base, changed, addedTags, skippedDuplicate, skippedByCap, anchorUpdated, policyChanged, hotspotsChanged }
 
   const parts: string[] = []
   if (addedTags.length > 0) parts.push(`新增 ${addedTags.map((tag) => tag.labelZh).join("、")}`)
   if (anchorUpdated && anchor) parts.push(`记忆热点「${anchor.description}」`)
+  if (hotspotsChanged) parts.push(`微锚点 ${(feedback.micro_hotspots ?? []).map((spot) => spot.id).join("、")}`)
   if (policyChanged) parts.push(policy === "ANCHOR_PROXIMITY" ? "策略切换为锚点靠近触发" : "策略恢复为双目标重叠")
 
   return {
@@ -210,6 +300,9 @@ export function mergeTier1Feedback(
       updatedAt: now.toISOString(),
       tags,
       anchor,
+      microHotspots,
+      exclusions: [...(base.exclusions ?? [])],
+      sensitivityBoost: { ...(base.sensitivityBoost ?? {}) },
       policy,
       note: parts.join("；"),
       history: pushHistory(base),
@@ -220,21 +313,25 @@ export function mergeTier1Feedback(
     skippedByCap,
     anchorUpdated,
     policyChanged,
+    hotspotsChanged,
   }
 }
 
 /** 清空学习内容，恢复初始词表；本次清空本身也会进入历史，可被回滚。 */
 export function resetLearning(current: Tier1Learning | null, streamId: string, now = new Date()): Tier1Learning {
   const base = current ?? emptyLearning(streamId, now)
-  if (!learningIsActive(base) && base.policy === "DUAL_INTERACTION") return base
+  if (!learningIsActive(base) && base.policy === "DUAL_INTERACTION" && Object.keys(base.sensitivityBoost ?? {}).length === 0) return base
   return {
     streamId,
     version: base.version + 1,
     updatedAt: now.toISOString(),
     tags: [],
     anchor: null,
+    microHotspots: [],
+    exclusions: [],
+    sensitivityBoost: {},
     policy: "DUAL_INTERACTION",
-    note: "已恢复初始词表并清除记忆锚点",
+    note: "已恢复初始词表并清除记忆锚点与误报负条件",
     history: pushHistory(base),
   }
 }
@@ -249,6 +346,9 @@ export function rollbackLearning(current: Tier1Learning | null, streamId: string
     updatedAt: now.toISOString(),
     tags: previous.tags.map((tag) => ({ ...tag })),
     anchor: previous.anchor ? { ...previous.anchor } : null,
+    microHotspots: (previous.microHotspots ?? []).map((spot) => ({ ...spot })),
+    exclusions: [...(previous.exclusions ?? [])],
+    sensitivityBoost: { ...(previous.sensitivityBoost ?? {}) },
     policy: previous.policy,
     note: `已回滚至 v${previous.version}`,
     history: current.history.slice(0, -1),
@@ -261,6 +361,7 @@ export interface WorkerLearning {
   policy: Tier1TriggerPolicy
   tags: Array<{ promptEn: string; labelZh: string; role: LearnedRole; confidence: number }>
   anchor: { center: [number, number]; radius: number; description: string } | null
+  hotspots: Array<{ id: string; kind: HotspotKind; center: [number, number]; radius: number; description: string }>
 }
 
 export function toWorkerLearning(learning: Tier1Learning): WorkerLearning {
@@ -269,6 +370,94 @@ export function toWorkerLearning(learning: Tier1Learning): WorkerLearning {
     policy: learning.policy,
     tags: learning.tags.map(({ promptEn, labelZh, role, confidence }) => ({ promptEn, labelZh, role, confidence })),
     anchor: learning.anchor ? { center: learning.anchor.center, radius: learning.anchor.radius, description: learning.anchor.description } : null,
+    hotspots: (learning.microHotspots ?? []).map(({ id, kind, center, radius, description }) => ({ id, kind, center, radius, description })),
+  }
+}
+
+export interface FalsePositiveInput {
+  ruleId?: string
+  /** 误报的具体原因（如"猫在喝水而非进食"），会沉淀为该通道的负条件 */
+  exclusion?: string
+  /** 误报发生位置（0~1000），可选；提供时记为一个 exclusion 微锚点 */
+  at?: { center: [number, number]; radius: number; description?: string }
+}
+
+export interface FalsePositiveMerge {
+  learning: Tier1Learning
+  changed: boolean
+  exclusionAdded: boolean
+  boostedTo: number | null
+}
+
+/**
+ * 用户在告警面板标记误报后，把"负条件"沉淀到该通道：
+ * 排除场景进入后续所有二级研判提示词，对应规则的置信度门槛小幅上调，误报位置记为排除微锚点。
+ */
+export function applyFalsePositive(current: Tier1Learning | null, streamId: string, input: FalsePositiveInput, now = new Date()): FalsePositiveMerge {
+  const base = current ?? emptyLearning(streamId, now)
+  const exclusions = [...(base.exclusions ?? [])]
+  const sensitivityBoost = { ...(base.sensitivityBoost ?? {}) }
+  const microHotspots = (base.microHotspots ?? []).map((spot) => ({ ...spot }))
+  const parts: string[] = []
+
+  const exclusion = text(input.exclusion, 80)
+  let exclusionAdded = false
+  if (exclusion && !exclusions.some((item) => item.toLowerCase() === exclusion.toLowerCase())) {
+    exclusions.push(exclusion)
+    if (exclusions.length > MAX_EXCLUSIONS) exclusions.shift()
+    exclusionAdded = true
+    parts.push(`负条件「${exclusion}」`)
+  }
+
+  let boostedTo: number | null = null
+  if (input.ruleId) {
+    const previous = sensitivityBoost[input.ruleId] ?? 0
+    const next = Math.round(Math.min(MAX_SENSITIVITY_BOOST, previous + SENSITIVITY_STEP) * 100) / 100
+    if (next !== previous) {
+      sensitivityBoost[input.ruleId] = next
+      boostedTo = next
+      parts.push(`规则门槛 +${Math.round(next * 100)}%`)
+    }
+  }
+
+  let hotspotAdded = false
+  if (input.at && Number.isFinite(input.at.center[0]) && Number.isFinite(input.at.center[1])) {
+    const center: [number, number] = [Math.round(clamp(input.at.center[0], 0, 1000)), Math.round(clamp(input.at.center[1], 0, 1000))]
+    const duplicate = microHotspots.some(
+      (spot) => spot.kind === "exclusion" && Math.abs(spot.center[0] - center[0]) <= 40 && Math.abs(spot.center[1] - center[1]) <= 40
+    )
+    if (!duplicate && microHotspots.length < MAX_MICRO_HOTSPOTS) {
+      microHotspots.push({
+        id: `hotspot_fp_${microHotspots.length + 1}`,
+        kind: "exclusion",
+        center,
+        radius: Math.round(clamp(input.at.radius, 20, 400)),
+        description: text(input.at.description, 40) || "误报点位",
+        learnedAt: now.toISOString(),
+      })
+      hotspotAdded = true
+      parts.push("误报点位")
+    }
+  }
+
+  if (!exclusionAdded && boostedTo === null && !hotspotAdded) return { learning: base, changed: false, exclusionAdded, boostedTo }
+  return {
+    learning: {
+      streamId,
+      version: base.version + 1,
+      updatedAt: now.toISOString(),
+      tags: base.tags.map((tag) => ({ ...tag })),
+      anchor: base.anchor ? { ...base.anchor } : null,
+      microHotspots,
+      exclusions,
+      sensitivityBoost,
+      policy: base.policy,
+      note: `误报反馈：${parts.join("；")}`,
+      history: pushHistory(base),
+    },
+    changed: true,
+    exclusionAdded,
+    boostedTo,
   }
 }
 

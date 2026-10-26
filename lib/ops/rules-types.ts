@@ -18,6 +18,8 @@ export interface InspectionRule {
   /** Only present on rules created through the natural language creator. */
   custom?: boolean
   sensitivity?: number
+  /** 规则自带的明确排除场景（如"猫在喝水"），二级研判必须逐条比对 */
+  exclusions?: string[]
   actions?: Record<RuleActionKey, boolean>
 }
 

@@ -143,4 +143,31 @@ export interface Tier1Feedback {
     description: string
   }
   trigger_policy?: Tier1TriggerPolicy
+  /** 带语义标签的微锚点：target 表示规则关联的目标点位，exclusion 表示易混淆的相邻点位（如饮水点） */
+  micro_hotspots?: Array<{
+    /** 形如 hotspot_food_tray */
+    id: string
+    kind: "target" | "exclusion"
+    center: [number, number]
+    radius: number
+    description: string
+  }>
+}
+
+/** 二级研判的四要素解耦判决：动作、交互介质、排他性反例、置信度分别独立断言。 */
+export interface FineGrainedVerdict {
+  is_alarm: boolean
+  /** 识别出的具体动作，如 eating_kibble / drinking_water / gowning_touch */
+  primary_action: string
+  interaction_target: {
+    /** 交互介质与物体，如 dry_food_tray / water_dispenser / cleanroom_zone_a */
+    category: string
+    confidence: number
+  }
+  /** 是否命中了规则的排他性反例 */
+  exclusion_matched: boolean
+  exclusion_reason?: string
+  confidence: number
+  /** 置信度处于边缘区间（0.5~0.75）或存在遮挡时的存疑审计标记，不产生正式告警 */
+  shadow_review?: boolean
 }

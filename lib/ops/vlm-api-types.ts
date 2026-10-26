@@ -1,5 +1,5 @@
 import type { RuleSeverity } from "./rules-types"
-import type { Tier1Feedback } from "./types"
+import type { FineGrainedVerdict, Tier1Feedback } from "./types"
 import type { VlmSeverity } from "./vlm-types"
 
 export type VlmProtocol = "openai" | "ollama" | "dashscope"
@@ -25,6 +25,8 @@ export interface VlmPromptRule {
   sensitivity: number
   severity: RuleSeverity
   cooldownSeconds: number
+  /** 明确排除场景（负条件矩阵）：命中任一项即不得报警，来源于规则自带排除项与误报反馈沉淀 */
+  exclusions?: string[]
 }
 
 /** 仅离线兜底引擎使用：指定要命中的规则与置信度，真实远端模型会忽略它。 */
@@ -81,6 +83,8 @@ export interface VlmFinalResult {
   evidenceKeyframes: number[]
   /** 判定成立时，模型回写给一级初筛的补充词 / 记忆锚点 / 触发策略建议（仅实时通道会被采纳） */
   tier1Feedback?: Tier1Feedback
+  /** 四要素解耦判决；模型未按协议输出时缺省 */
+  fine?: FineGrainedVerdict
 }
 
 /** 模型原始判定经阈值校验、防抖聚合后的最终裁决 */
@@ -92,6 +96,10 @@ export interface VlmVerdict {
   threshold: number | null
   /** 模型判定命中，但置信度低于规则阈值，已降级为安全 */
   belowThreshold: boolean
+  /** 命中排他性反例（如判定为喝水而非进食），已被拦截 */
+  excluded?: { reason: string; action?: string }
+  /** 置信度处于边缘区间或存在遮挡，记为存疑审计单，不产生正式告警 */
+  shadowReview?: boolean
   /** 命中规则的防抖状态；未触发时为空 */
   suppression?: VlmSuppression
 }

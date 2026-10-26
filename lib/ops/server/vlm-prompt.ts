@@ -5,6 +5,7 @@ import type { NormalizedInput } from "./vlm-shared"
 const NO_RULE_ID = "NONE"
 
 function formatRule(rule: VlmPromptRule, index: number) {
+  const exclusions = rule.exclusions?.filter(Boolean) ?? []
   return [
     `[规则序号 ${index + 1}]`,
     `- 规则编号: ${rule.id}`,
@@ -12,6 +13,9 @@ function formatRule(rule: VlmPromptRule, index: number) {
     `- 语义判定依据: ${rule.description}`,
     `- 置信度阈值要求: ≥ ${rule.sensitivity}`,
     `- 告警等级: ${rule.severity}`,
+    exclusions.length
+      ? `- 明确排除场景（命中任一项即 exclusion_matched=true，严禁报警）: ${exclusions.map((item, i) => `(${i + 1}) ${item}`).join("；")}`
+      : "- 明确排除场景: （未配置；仍须按原则 7 自行排查外观相似的非目标动作）",
   ].join("\n")
 }
 
@@ -54,7 +58,13 @@ ${buildRulesBlock(rules)}
 2. 逐一比对上述规则中的「语义判定依据」。若画面中明确出现了符合某条规则描述的现象、动作、违规或物体，且置信度达到或超过该规则设定的「置信度阈值要求」，判定为违规并返回该规则编号。
 3. 若画面一切正常，未触发上述任一规则的判定依据，或置信度低于阈值，则判定为安全 (SAFE)。
 4. 同时命中多条规则时，只返回告警等级最高的一条。
-5. 判定违规时必须给出证据锚点：指出违规最清晰的那一张采样帧（frame_index）及其时间点（timestamp_offset）。违规跨越多帧时，选最能体现违规的一帧。两者必须来自用户消息里的采样帧清单，不得编造。${feedbackBlock.rules}
+5. 判定违规时必须给出证据锚点：指出违规最清晰的那一张采样帧（frame_index）及其时间点（timestamp_offset）。违规跨越多帧时，选最能体现违规的一帧。两者必须来自用户消息里的采样帧清单，不得编造。
+7. 【目标介质与动作解耦】严禁仅凭主体姿态做粗粒度断言（例如仅因动物低头就判定为进食、仅因手部靠近就判定为违规触碰）。必须分别独立回答四个要素并写入 verdict_detail：
+   - primary_action：画面中实际发生的具体动作（英文蛇形命名，如 eating_kibble / drinking_water / gowning_touch / idle）；
+   - interaction_target：主体正在交互的介质或物体（category，如 dry_food_tray / water_dispenser / cleanroom_zone_a）及其辨识置信度；
+   - exclusion_matched：逐条比对规则的「明确排除场景」，并主动排查外观姿态高度相似的非目标动作（如水面反光、舔舐水面、正常操作）；命中任一项必须为 true，并在 exclusion_reason 中说明依据；
+   - confidence：对整体判定的置信度。
+8. 【防御性判定】只有 primary_action 完全符合目标规则的语义、interaction_target 与规则要求的介质一致，且 exclusion_matched 为 false 时，才允许 triggered=true 且 verdict_detail.is_alarm=true；否则一律判定为安全。画面存在遮挡、动作模糊或置信度落在 0.5~0.75 时，将 verdict_detail.shadow_review 置为 true（记为存疑审计，不产生正式告警）。${feedbackBlock.rules}
 
 输出必须严格遵循以下 JSON 结构，只输出一个 \`\`\`json 代码块，不要包含任何多余解释：
 {
@@ -67,7 +77,16 @@ ${buildRulesBlock(rules)}
   "frame_index": 触发违规的采样帧编号，即帧清单里「帧 #N」的 N，整数（未触发或无法确定填 null）,
   "bbox": [ymin, xmin, ymax, xmax] 或 null,
   "reasoning": "客观详实的研判论据，阐述画面中何时、何处、观察到什么具体情况导致匹配该规则",
-  "advice": "针对该违规项的标准处置指引"${feedbackBlock.schema}
+  "advice": "针对该违规项的标准处置指引",
+  "verdict_detail": {
+    "is_alarm": true 或 false,
+    "primary_action": "eating_kibble",
+    "interaction_target": { "category": "dry_food_tray", "confidence": 0.9 },
+    "exclusion_matched": false,
+    "exclusion_reason": "命中排除场景时填写依据，否则省略",
+    "confidence": 0.88,
+    "shadow_review": 存疑时为 true，否则省略
+  }${feedbackBlock.schema}
 }
 其中 bbox 的四个数值为归一化到 0~1000 的整数坐标，无法定位时填 null；severity 取值必须与命中规则的告警等级一致。`
 }

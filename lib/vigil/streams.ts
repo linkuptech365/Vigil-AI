@@ -1,3 +1,5 @@
+import type { FineGrainedVerdict } from "@/lib/ops/types"
+
 export const STREAM_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,47}$/i
 export const RESERVED_STREAM_IDS: readonly string[] = ["engine"]
 export const DEMO_STREAM_ID = "cleanroom_demo_loop"
@@ -156,7 +158,7 @@ export interface EvidenceIntegrity {
   recordMatches: boolean
 }
 
-export type AnalysisOutcome = "alert" | "safe" | "folded" | "error"
+export type AnalysisOutcome = "alert" | "safe" | "folded" | "error" | "blocked" | "shadow"
 
 /** 每一次研判都会落一条记录：命中、否决、被冷却折叠、失败都有迹可循。 */
 export interface StreamAnalysisRecord {
@@ -173,6 +175,8 @@ export interface StreamAnalysisRecord {
   reason?: string
   alertId?: string
   edge?: { trackId: string; edgeConfidence: number; label?: string }
+  /** 二级四要素解耦判决（动作 / 介质 / 排他 / 置信度） */
+  fine?: FineGrainedVerdict
   /** 边缘高置信但被大模型否决，值得回流为困难样本 */
   hardSample?: boolean
   /** 同一失败原因在短时间内重复出现的次数 */
@@ -198,6 +202,8 @@ export interface StreamAlert {
   model: string
   engineSource: "remote" | "fallback"
   edge?: { trackId: string; edgeConfidence: number; label?: string }
+  /** 二级四要素解耦判决（动作 / 介质 / 排他 / 置信度） */
+  fine?: FineGrainedVerdict
   case?: AlertCase
   seal?: EvidenceSeal
 }

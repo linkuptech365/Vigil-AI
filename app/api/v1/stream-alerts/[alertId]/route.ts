@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import { fireLinkage } from "@/lib/ops/server/alert-linkage"
+import { applyTier1FalsePositive } from "@/lib/ops/server/tier1-feedback"
 import { appendCaseAction, getAlert, verifyEvidence } from "@/lib/storage/streams-store"
 import { CASE_STATUS_LABEL, type CaseStatus, type FalsePositiveReasonCode } from "@/lib/vigil/streams"
 
@@ -83,7 +84,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ al
     }
     case "false_positive": {
       const reason = body?.reason as FalsePositiveReasonCode
-      if (!(reason in FALSE_POSITIVE_LABEL)) return fail("请选择误报原因", "BAD_BODY", 400)
+      if (!(reason in FALSE_POSITIVE_LABEL)) return fail("请��择误报原因", "BAD_BODY", 400)
       const explanation = typeof body?.explanation === "string" ? body.explanation.trim().slice(0, 300) : ""
       appendCaseAction(
         alertId,
@@ -94,6 +95,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ al
         },
         { status: "FALSE_POSITIVE", closedAt: now, falsePositive: { reason, explanation, submittedAt: now } }
       )
+      const exclusion = (typeof body?.exclusion === "string" ? body.exclusion.trim() : explanation).slice(0, 80)
+      const learned = await applyTier1FalsePositive(alert.streamId, { ruleId: alert.ruleId, exclusion: exclusion || undefined }).catch(
+        () => null
+      )
+      if (learned?.changed) {
+        appendCaseAction(
+          alertId,
+          { operator: "一级感知学习", actionType: "误报反哺", notes: `${learned.note ?? "已更新负条件与规则门槛"}（学习版本 v${learned.version}）` },
+          {}
+        )
+      }
       break
     }
     default:

@@ -145,6 +145,22 @@ function CaseDetail({ alert, onLocate }: { alert: StreamAlert; onLocate: (channe
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">{alert.reasoning || alert.summary}</p>
         {alert.advice && <p className="text-sm leading-relaxed">处置建议：{alert.advice}</p>}
+        {alert.fine && (
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-md border bg-muted/40 p-2 font-mono text-[11px] text-muted-foreground md:grid-cols-4">
+            <div><dt className="inline">动作 </dt><dd className="inline text-foreground">{alert.fine.primary_action || "—"}</dd></div>
+            <div>
+              <dt className="inline">交互介质 </dt>
+              <dd className="inline text-foreground">
+                {alert.fine.interaction_target.category || "—"}（{Math.round(alert.fine.interaction_target.confidence * 100)}%）
+              </dd>
+            </div>
+            <div>
+              <dt className="inline">排他校验 </dt>
+              <dd className="inline text-foreground">{alert.fine.exclusion_matched ? `命中：${alert.fine.exclusion_reason ?? "反例"}` : "未命中反例"}</dd>
+            </div>
+            <div><dt className="inline">置信度 </dt><dd className="inline text-foreground">{Math.round(alert.fine.confidence * 100)}%</dd></div>
+          </dl>
+        )}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground md:grid-cols-4">
           <div><dt className="inline">案卷 </dt><dd className="inline text-foreground">{caseInfo?.caseId ?? "—"}</dd></div>
           <div><dt className="inline">通道 </dt><dd className="inline text-foreground">{alert.streamName}</dd></div>

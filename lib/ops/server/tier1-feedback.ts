@@ -4,6 +4,8 @@ import { loadAllLearning, loadLearning, saveLearning } from "@/lib/storage/tier1
 import { getStream } from "@/lib/storage/streams-store"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import {
+  applyFalsePositive,
+  type FalsePositiveInput,
   mergeTier1Feedback,
   resetLearning,
   rollbackLearning,
@@ -55,6 +57,30 @@ export function feedbackFromAnalysis(
   void applyTier1Feedback(sourceKey, result.tier1Feedback).catch((error) =>
     console.error("[tier1-feedback] 回写一级初筛失败：", error)
   )
+}
+
+/** 该通道由误报反馈沉淀的负条件与规则门槛上调值，每次二级研判前读取。 */
+export function learnedRuleTuning(streamId: string): { exclusions: string[]; sensitivityBoost: Record<string, number> } {
+  const learning = loadLearning(streamId)
+  return { exclusions: learning?.exclusions ?? [], sensitivityBoost: learning?.sensitivityBoost ?? {} }
+}
+
+export interface FalsePositiveApplied {
+  changed: boolean
+  version: number | null
+  note: string | null
+  reload: PushResult | null
+}
+
+/** 用户标记误报后调用：负条件进入后续研判提示词，规则门槛上调，误报点位记为排除锚点并热更新。 */
+export async function applyTier1FalsePositive(streamId: string, input: FalsePositiveInput): Promise<FalsePositiveApplied> {
+  const merge = applyFalsePositive(loadLearning(streamId), streamId, input)
+  if (!merge.changed) return { changed: false, version: merge.learning.version || null, note: null, reload: null }
+  saveLearning(merge.learning)
+  const hasHotspot = (merge.learning.microHotspots ?? []).length > 0
+  const reload = hasHotspot ? await pushConfig(true) : null
+  console.log(`[tier1-feedback] ${streamId} 误报反馈 → v${merge.learning.version}：${merge.learning.note}`)
+  return { changed: true, version: merge.learning.version, note: merge.learning.note, reload }
 }
 
 export async function resetTier1Learning(streamId: string): Promise<{ learning: Tier1Learning; reload: PushResult | null }> {

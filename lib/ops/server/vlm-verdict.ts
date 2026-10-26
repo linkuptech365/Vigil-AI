@@ -24,9 +24,44 @@ export function applyVerdict(
   const rule = raw.triggered && raw.ruleId ? input.rules.find((r) => r.id === raw.ruleId) : undefined
 
   if (!rule) {
+    const fine = raw.fine
+    const excluded =
+      fine?.exclusion_matched === true
+        ? { reason: fine.exclusion_reason || "命中规则的排他性反例", action: fine.primary_action }
+        : undefined
     return {
       result: raw,
-      verdict: { triggered: false, ruleId: null, ruleName: null, threshold: null, belowThreshold: false },
+      verdict: { triggered: false, ruleId: null, ruleName: null, threshold: null, belowThreshold: false, ...(excluded ? { excluded } : {}) },
+    }
+  }
+
+  // 存疑审计：模型自标或"边缘置信 + 介质辨识不足"，只记审计单，不进入正式告警与防抖
+  const fine = raw.fine
+  const doubtful =
+    fine?.shadow_review === true || (fine !== undefined && raw.confidence < 0.75 && fine.interaction_target.confidence < 0.6)
+  if (doubtful && raw.confidence >= 0.5) {
+    const note = `置信度 ${percent(raw.confidence)} 处于边缘区间或交互介质辨识不足，记为存疑审计，未产生正式告警。`
+    return {
+      result: {
+        ...raw,
+        triggered: false,
+        ruleId: null,
+        ruleTriggered: "无",
+        severity: "SAFE",
+        bbox: null,
+        evidenceKeyframes: [],
+        timestampOffset: "00:00.000",
+        summary: note,
+        reasoning: `${raw.reasoning}\n\n${note}`,
+      },
+      verdict: {
+        triggered: false,
+        ruleId: rule.id,
+        ruleName: rule.name,
+        threshold: rule.sensitivity,
+        belowThreshold: false,
+        shadowReview: true,
+      },
     }
   }
 

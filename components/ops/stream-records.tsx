@@ -14,6 +14,8 @@ const OUTCOME: Record<AnalysisOutcome, { label: string; className: string }> = {
   safe: { label: "合规", className: "bg-success/15 text-success" },
   folded: { label: "已折叠", className: "bg-warning/15 text-warning" },
   error: { label: "失败", className: "bg-muted text-muted-foreground" },
+  blocked: { label: "排他拦截", className: "bg-primary/15 text-primary" },
+  shadow: { label: "存疑审计", className: "bg-warning/15 text-warning" },
 }
 
 function clock(iso: string) {

@@ -1,4 +1,5 @@
 import type { VlmBbox, VlmFinalResult, VlmPromptRule } from "../vlm-api-types"
+import type { FineGrainedVerdict } from "../types"
 import type { VlmSeverity } from "../vlm-types"
 import { sanitizeTier1Feedback } from "@/lib/vigil/tier1-learning"
 
@@ -60,6 +61,33 @@ function parseBbox(value: unknown): VlmBbox | null {
   return [ymin, xmin, ymax, xmax]
 }
 
+function unit(value: unknown, fallback: number) {
+  let n = typeof value === "number" && Number.isFinite(value) ? value : fallback
+  if (n > 1 && n <= 100) n /= 100
+  return Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000
+}
+
+/** 解析 verdict_detail；缺失关键字段（动作与介质）时视为模型未按协议输出，返回 undefined。 */
+export function parseFineVerdict(raw: unknown): FineGrainedVerdict | undefined {
+  const record = asRecord(raw)
+  if (!record) return undefined
+  const action = text(record.primary_action ?? record.primaryAction).slice(0, 48)
+  const target = asRecord(record.interaction_target ?? record.interactionTarget)
+  const category = text(target?.category).slice(0, 48)
+  if (!action && !category) return undefined
+  const exclusionReason = text(record.exclusion_reason ?? record.exclusionReason).slice(0, 160)
+  const confidence = unit(record.confidence, 0.5)
+  return {
+    is_alarm: record.is_alarm === true || record.isAlarm === true,
+    primary_action: action || "unknown",
+    interaction_target: { category: category || "unknown", confidence: unit(target?.confidence, confidence) },
+    exclusion_matched: record.exclusion_matched === true || record.exclusionMatched === true,
+    ...(exclusionReason ? { exclusion_reason: exclusionReason } : {}),
+    confidence,
+    ...(record.shadow_review === true || record.shadowReview === true ? { shadow_review: true } : {}),
+  }
+}
+
 function leadingSentence(reasoning: string) {
   const first = reasoning.split(/(?<=[。！？!?；;])/)[0]?.trim() ?? ""
   return (first || reasoning).slice(0, 80)
@@ -96,7 +124,13 @@ function coerceResult(
     ? undefined
     : rules.find((rule) => rule.id.toLowerCase() === ruleIdRaw.toLowerCase())
   // 模型必须引用规则库里真实存在的编号，否则视为未命中，防止幻觉出不存在的规则
-  const triggered = (triggeredFlag ?? severityRaw !== "SAFE") && matched !== undefined
+  const fine = parseFineVerdict(record.verdict_detail ?? record.verdictDetail)
+  // 防御性判定：模型自己声明非告警，或命中了排他反例，一律不得报警
+  const triggered =
+    (triggeredFlag ?? severityRaw !== "SAFE") &&
+    matched !== undefined &&
+    fine?.is_alarm !== false &&
+    fine?.exclusion_matched !== true
 
   let confidence = typeof record.confidence === "number" && Number.isFinite(record.confidence) ? record.confidence : 0.5
   if (confidence > 1 && confidence <= 100) confidence /= 100
@@ -129,6 +163,7 @@ function coerceResult(
     advice: text(record.advice ?? record.actionAdvice),
     summary: leadingSentence(reasoning) || (triggered ? matched.name : "未触发任何生效规则"),
     evidenceKeyframes: evidenceFrame === null ? [] : [evidenceFrame],
+    ...(fine ? { fine } : {}),
     ...(triggered ? tier1FeedbackField(record.tier1_feedback ?? record.tier1Feedback) : {}),
   }
 }
