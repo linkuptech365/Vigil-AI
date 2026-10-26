@@ -141,7 +141,13 @@ docker compose up -d
 | `/tmp/vigil-test` | 命名卷 `vigil_storage` | GMP 基准算例写入目录，容器重建后保留 |
 | `/app/data` | 命名卷 `vigil_data` | 规则库 `rules.json`，新建、修改、删除规则均写入此处，容器重建后保留 |
 
-镜像采用三阶段构建（deps、builder、runner），运行时使用非 root 用户 `nextjs:nodejs`，并通过 `HEALTHCHECK` 探测 `/api/v1/health`。
+镜像采用四阶段构建（deps、builder、vision、runner），运行时使用非 root 用户 `nextjs:nodejs`，并通过 `HEALTHCHECK` 探测 `/api/v1/health`。
+
+**视觉环境随镜像固化（0 秒冷启动）**：`vision` 阶段在构建期装好 Python 3.11 虚拟环境（`/opt/vigil-vision/venv`，含 `torch`、`torchvision`、`ultralytics`、`opencv-python-headless` 等全部依赖与 CLIP 文本编码器），并预下载、预热 `yolov8s-worldv2.pt` 权重（`/opt/vigil-vision/models`）。该阶段只依赖 `services/vision-worker/requirements.txt`，业务代码改动不会使其缓存失效，重新部署无需再安装依赖或下载模型。容器启动时不执行任何 `pip install` 或建 venv，镜像内 `VIGIL_PREBAKED_VISION=1` 会同时禁止控制台触发运行时安装。
+
+- 默认构建 CPU 版 PyTorch；GPU 主机可用 `docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 .` 构建 CUDA 版。
+- 构建需要能访问 `download.pytorch.org`、`pypi.org` 与 `github.com`（CLIP 与权重）；构建末尾有自检，缺依赖或缺权重会直接让构建失败。
+- 旧版本留在 `vigil_data` 卷里的 `/app/data/vision` 目录不再使用，可手动删除以回收空间。
 
 ---
 
@@ -151,7 +157,7 @@ docker compose up -d
 | --- | --- | --- |
 | `PORT` | `3000` | 网关监听端口，Docker 镜像内固定为 3000 |
 | `VIGIL_ALLOWED_ROOTS` | `/data/videos:/tmp:/tmp/vigil-test` | 扫描与抽帧允许访问的目录白名单，Linux 以 `:` 分隔；项目目录与系统临时目录始终允许 |
-| `VIGIL_DATA_DIR` | `<cwd>/data` | 规则库持久化目录，规则保存为其中的 `rules.json`；Docker 内为 `/app/data`，以命名卷 `vigil_data` 挂载，容器重建后保留 |
+| `VIGIL_DATA_DIR` | `<cwd>/data` | 规则库持久化目录，规则保存为其中的 `rules.json`��Docker 内为 `/app/data`，以命名卷 `vigil_data` 挂载，容器重建后保留 |
 | `VIGIL_SCAN_DIR` | 空 | 可选。视频流接口按文件名/相对路径寻址时额外查找的根目录，同时自动加入白名单 |
 | `NEXT_PUBLIC_DEFAULT_VLM_MODEL` | `qwen2.5-vl-72b` | 默认二级研判模型标识 |
 | `VLM_API_URL` | `http://localhost:8000/api/v1/analyze` | VLM 推理网关地址 |

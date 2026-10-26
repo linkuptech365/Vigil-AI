@@ -171,6 +171,10 @@ async function downloadWeights() {
 }
 
 async function main() {
+  if (process.env.VIGIL_PREBAKED_VISION === "1" && !args.has("--force")) {
+    say("当前镜像已在构建阶段固化视觉环境（Python 3.11 + 依赖 + 权重），无需也不允许在运行时安装；如确需强制执行请加 --force。")
+    return
+  }
   say(
     `模式：${
       light

@@ -16,6 +16,7 @@ services/vision-worker/__pycache__
 .python
 .venv
 models
+*.pt
 data
 user_read_only_context
 v0_memories

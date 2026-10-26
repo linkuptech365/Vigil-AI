@@ -350,6 +350,13 @@ export async function restartVisionEngine() {
 export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?: boolean } = {}): { started: boolean; message: string } {
   const s = state()
   if (s.installing) return { started: false, message: "安装已在进行中" }
+  if (process.env.VIGIL_PREBAKED_VISION === "1") {
+    return {
+      started: false,
+      message:
+        "当前镜像已内置视觉环境（Python 3.11 + 全部依赖 + YOLO-World 权重），不会在运行时安装。若视觉服务未就绪，请查看引擎状态中的错误信息；依赖或权重缺失说明镜像构建不完整，需重新构建镜像",
+    }
+  }
   const script = path.join(process.cwd(), "scripts", "setup-vision.mjs")
   if (!fs.existsSync(script)) return { started: false, message: "找不到 scripts/setup-vision.mjs，请确认部署包包含 scripts 目录" }
 
