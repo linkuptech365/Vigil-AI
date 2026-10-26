@@ -1,6 +1,7 @@
 "use client"
 
 import { VisionCard } from "@/components/vigil/config/vision-card"
+import { ChannelPerceptionCard } from "./channel-perception-card"
 import { EscalationQueue } from "./escalation-queue"
 import { FilterMetrics } from "./filter-metrics"
 import { HitLog } from "./hit-log"
@@ -32,9 +33,10 @@ export function PerceptionTab() {
             一级初筛规则录入
           </h3>
           <p className="text-xs text-muted-foreground">
-            用中文描述稽查要求并编译为检测词表，或手动添加词条；保存后立即热更新到视觉服务，对所有实时通道生效。
+            先在下方为当前通道配置专属提示词与词表（仅对该通道生效）；未单独配置的通道沿用最底部的全局默认词表。
           </p>
         </div>
+        <ChannelPerceptionCard />
         <VisionCard />
       </section>
       <EscalationQueue />

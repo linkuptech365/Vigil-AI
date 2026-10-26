@@ -122,6 +122,7 @@ class ReloadRequest(BaseModel):
     cooldownSeconds: float = 30.0
     staticRecheckSec: float = 10.0
     vocabulary: list[VocabItem] = Field(default_factory=list)
+    channelVocabulary: dict[str, list[VocabItem]] = Field(default_factory=dict)
     zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
     learning: dict[str, LearningItem] = Field(default_factory=dict)
@@ -246,13 +247,18 @@ class Runtime:
         self.model_state = "loading"  # loading | ready | degraded
         self.reason = "正在加载 YOLO-World 模型…"
         self.versions: dict[str, str] = {"python": sys.version.split()[0], "opencv": cv2.__version__}
+        # 当前已写入 YOLO-World 的词表（模型一次只能加载一套，按通道切换）
         self.classes_applied: list[str] = []
-        self.pending_prompts: list[str] = []
-        self.role_map: dict[str, str] = {}
-        self.label_map: dict[str, str] = {}
-        self.learned_owner: dict[str, set[str]] = {}
+        # 默认词表：没有专属词表的通道使用
+        self.default_prompts: list[str] = []
+        self.default_roles: dict[str, str] = {}
+        self.default_labels: dict[str, str] = {}
+        # 通道独立词表上下文：channel_id -> 该通道专属的英文词表（含该通道自己的二级反哺词条）
+        self.channel_model_contexts: dict[str, list[str]] = {}
+        self.channel_roles: dict[str, dict[str, str]] = {}
+        self.channel_labels: dict[str, dict[str, str]] = {}
+        self.channel_source: dict[str, str] = {}
         self.learned_conf: dict[tuple[str, str], float] = {}
-        self.vocab: list[VocabItem] = []
         self.streams: dict[str, StreamState] = {}
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.hitlog: deque = deque(maxlen=MAX_HIT_LOG)
@@ -414,7 +420,6 @@ def degrade(reason: str) -> None:
 def apply_classes(prompts: list[str]) -> tuple[bool, str]:
     """把词表写入 YOLO-World（内存热切换，不重启进程，也不重置 ByteTrack 轨迹）。"""
     if RT.model is None:
-        RT.pending_prompts = prompts
         return False, RT.reason
     if not prompts:
         RT.classes_applied = []
@@ -467,13 +472,11 @@ def load_model() -> None:
     except Exception as error:  # noqa: BLE001
         degrade(f"模型权重加载失败：{str(error)[:200]}")
         return
-    with RT.cfg_lock:
-        prompts = list(RT.pending_prompts)
-    if prompts:
-        apply_classes(prompts)
-    else:
-        RT.model_state = "ready"
-        RT.reason = ""
+    RT.model_state = "ready"
+    RT.reason = ""
+    first = first_context()
+    if first:
+        apply_classes(first)
 
 
 # --------------------------------------------------------------------------- #
@@ -507,10 +510,40 @@ def motion_ratio(prev: np.ndarray | None, image: np.ndarray) -> tuple[float | No
 # --------------------------------------------------------------------------- #
 # Tier-1：检测、门控
 # --------------------------------------------------------------------------- #
-def allowed(sid: str, prompt: str) -> bool:
-    """VLM 反哺的词条只对沉淀它的通道生效，避免污染其他通道。"""
-    owners = RT.learned_owner.get(prompt)
-    return owners is None or not sid or sid in owners
+def prompts_of(sid: str) -> list[str]:
+    """该通道专属的检测词表；未单独配置的通道回落到默认词表。"""
+    return RT.channel_model_contexts.get(sid, RT.default_prompts)
+
+
+def roles_of(sid: str) -> dict[str, str]:
+    return RT.channel_roles.get(sid, RT.default_roles)
+
+
+def labels_of(sid: str) -> dict[str, str]:
+    return RT.channel_labels.get(sid, RT.default_labels)
+
+
+def distinct_contexts() -> list[list[str]]:
+    seen: list[list[str]] = []
+    for prompts in [RT.default_prompts, *RT.channel_model_contexts.values()]:
+        if prompts and prompts not in seen:
+            seen.append(prompts)
+    return seen
+
+
+def first_context() -> list[str]:
+    contexts = distinct_contexts()
+    return contexts[0] if contexts else []
+
+
+def display_prompts() -> list[str]:
+    """仅用于展示：所有通道词表的并集（推理时绝不合并）。"""
+    merged: list[str] = []
+    for prompts in distinct_contexts():
+        for prompt in prompts:
+            if prompt not in merged:
+                merged.append(prompt)
+    return merged
 
 
 def passes(det: Det, low: float) -> bool:
@@ -520,7 +553,15 @@ def passes(det: Det, low: float) -> bool:
 def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     low = RT.cfg.low
     conf_floor = max(0.05, min(0.25, low))
+    prompts = prompts_of(sid)
+    roles = roles_of(sid)
+    if not prompts:
+        return []
+    # 同一把锁内切换词表并推理，保证本帧只用本通道的词表做文本-图像内积
     with RT.model_lock:
+        ok, _ = apply_classes(prompts)
+        if not ok:
+            return []
         result = RT.model.predict(image, conf=conf_floor, imgsz=640, device=RT.device, verbose=False)[0]
     names = result.names
     dets: list[Det] = []
@@ -531,8 +572,8 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         classes = boxes.cls.cpu().numpy().astype(int)
         for k in range(len(boxes)):
             prompt = str(names.get(int(classes[k]), ""))
-            role = RT.role_map.get(prompt)
-            if role is None or not allowed(sid, prompt):
+            role = roles.get(prompt)
+            if role is None:
                 continue
             floor = RT.learned_conf.get((sid, prompt))
             if floor is not None and float(confs[k]) < floor:
@@ -554,14 +595,14 @@ def inside(inner: Det, outer: Det) -> bool:
     return x1 - pad_x <= cx <= x2 + pad_x and y1 - pad_y <= cy <= y2 + pad_y
 
 
-def label_of(prompt: str) -> str:
-    return RT.label_map.get(prompt) or prompt
+def label_of(prompt: str, sid: str = "") -> str:
+    return labels_of(sid).get(prompt) or prompt
 
 
 def evaluate(dets: list[Det], sid: str = "") -> tuple[list[Suspect], int, int]:
     """三阶门控：返回（疑似目标列表, 合规放行人数, 画面中人数）。"""
     low, high = RT.cfg.low, RT.cfg.high
-    required = [p for p, r in RT.role_map.items() if r == ROLE_PPE and p in RT.classes_applied]
+    required = [p for p, r in roles_of(sid).items() if r == ROLE_PPE and p in prompts_of(sid)]
     persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= low]
     ppe = [d for d in dets if d.role == ROLE_PPE and d.conf >= low]
     hazards = [d for d in dets if d.role == ROLE_HAZARD and d.conf >= low]
@@ -578,11 +619,11 @@ def evaluate(dets: list[Det], sid: str = "") -> tuple[list[Suspect], int, int]:
             if hit:
                 confs.append(max(d.conf for d in hit))
             else:
-                reasons.append(f"缺失必需劳保：{label_of(prompt)}")
+                reasons.append(f"缺失必需劳保：{label_of(prompt, sid)}")
                 suspect_conf = max(suspect_conf, person.conf)
         for hid, hazard in enumerate(hazards):
             if inside(hazard, person) or iou(hazard.box, person.box) > 0:
-                reasons.append(f"命中违规目标：{label_of(hazard.prompt)}（{hazard.conf:.2f}）")
+                reasons.append(f"命中违规目标：{label_of(hazard.prompt, sid)}（{hazard.conf:.2f}）")
                 suspect_conf = max(suspect_conf, hazard.conf)
                 used.add(hid)
         if not reasons and min(confs) < high:
@@ -600,7 +641,7 @@ def evaluate(dets: list[Det], sid: str = "") -> tuple[list[Suspect], int, int]:
                 key=f"scene:{hazard.prompt}",
                 track_id=None,
                 conf=round(hazard.conf, 3),
-                reasons=[f"画面中检出违规目标：{label_of(hazard.prompt)}（{hazard.conf:.2f}）"],
+                reasons=[f"画面中检出违规目标：{label_of(hazard.prompt, sid)}（{hazard.conf:.2f}）"],
             )
         )
     suspects.extend(relation_suspects(dets, sid))
@@ -628,16 +669,14 @@ def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
     if not subjects:
         return []
     contexts = [d for d in dets if d.role == ROLE_CONTEXT and passes(d, low)]
-    context_configured = any(
-        r == ROLE_CONTEXT and p in RT.classes_applied and allowed(sid, p) for p, r in RT.role_map.items()
-    )
+    context_configured = any(r == ROLE_CONTEXT and p in prompts_of(sid) for p, r in roles_of(sid).items())
     best: dict[str, Suspect] = {}
     for subject in subjects:
         key = f"rel:{subject.prompt}"
         if not context_configured:
             candidate = Suspect(
                 key=key, track_id=None, conf=round(subject.conf, 3),
-                reasons=[f"画面中检出行为主体：{label_of(subject.prompt)}（{subject.conf:.2f}）"],
+                reasons=[f"画面中检出行为主体：{label_of(subject.prompt, sid)}（{subject.conf:.2f}）"],
             )
         else:
             candidate = None
@@ -651,7 +690,7 @@ def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
                 relation = f"重叠（IOU {score:.2f}）" if score > 0 else "靠近"
                 candidate = Suspect(
                     key=key, track_id=None, conf=round(conf, 3),
-                    reasons=[f"{label_of(subject.prompt)} 与 {label_of(other.prompt)} 空间{relation}"],
+                    reasons=[f"{label_of(subject.prompt, sid)} 与 {label_of(other.prompt, sid)} 空间{relation}"],
                 )
             if candidate is None:
                 continue
@@ -697,13 +736,13 @@ def explore_suspects(
         if current is None or det.conf > current.conf:
             best[key] = Suspect(
                 key=key, track_id=None, conf=round(det.conf, 3),
-                reasons=[f"冷启动探索：{label_of(det.prompt)} 在同一区域停留，未检出伴生物体"],
+                reasons=[f"冷启动探索：{label_of(det.prompt, sid)} 在同一区域停留，未检出伴生物体"],
                 min_frames=EXPLORE_MIN_FRAMES, explore=True,
                 hint={
                     "center": [round(ref[0], 1), round(ref[1], 1)],
                     "radius": EXPLORE_RADIUS,
                     "subject": det.prompt,
-                    "subjectLabel": label_of(det.prompt),
+                    "subjectLabel": label_of(det.prompt, sid),
                 },
             )
     for key in [k for k in st.explore_ref if k not in seen]:
@@ -740,7 +779,7 @@ def anchor_suspects(sid: str, dets: list[Det], shape: tuple[int, int]) -> list[S
         if current is None or det.conf > current.conf:
             best[key] = Suspect(
                 key=key, track_id=None, conf=round(det.conf, 3),
-                reasons=[f"{label_of(det.prompt)} 靠近记忆锚点「{desc}」（距离 {dist:.0f}/{radius:.0f}）"],
+                reasons=[f"{label_of(det.prompt, sid)} 靠近记忆锚点「{desc}」（距离 {dist:.0f}/{radius:.0f}）"],
                 min_frames=ANCHOR_MIN_FRAMES, anchor=True,
             )
     return list(best.values())
@@ -800,7 +839,7 @@ def zone_suspects(
                             key=f"zone:{zone['id']}:s{index}",
                             track_id=None,
                             conf=round(subject.conf, 3),
-                            reasons=[f"{label_of(subject.prompt)} 进入电子围栏：{zone.get('name') or zone['id']}"],
+                            reasons=[f"{label_of(subject.prompt, sid)} 进��电子围栏：{zone.get('name') or zone['id']}"],
                         )
                     )
         if "person" not in targets:
@@ -974,7 +1013,7 @@ def push_event(event: dict[str, Any], frames: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 # 初筛命中日志
 # --------------------------------------------------------------------------- #
-def hit_tags(dets: list[Det]) -> list[dict[str, Any]]:
+def hit_tags(dets: list[Det], sid: str = "") -> list[dict[str, Any]]:
     low = RT.cfg.low
     seen: set[str] = set()
     tags: list[dict[str, Any]] = []
@@ -982,7 +1021,7 @@ def hit_tags(dets: list[Det]) -> list[dict[str, Any]]:
         if not passes(d, low) or d.prompt in seen:
             continue
         seen.add(d.prompt)
-        tags.append({"label": label_of(d.prompt), "prompt": d.prompt, "role": d.role, "confidence": round(d.conf, 3)})
+        tags.append({"label": label_of(d.prompt, sid), "prompt": d.prompt, "role": d.role, "confidence": round(d.conf, 3)})
     return tags[:6]
 
 
@@ -1048,7 +1087,7 @@ def scan_stream(sid: str) -> None:
     st.last_motion_pct = ratio
     moving = ratio is None or ratio >= cfg.motion_pct
 
-    if RT.model_state != "ready" or RT.model is None or not RT.classes_applied:
+    if RT.model_state != "ready" or RT.model is None or not prompts_of(sid):
         if moving:
             RT.stats.motion_only += 1
         else:
@@ -1080,7 +1119,7 @@ def scan_stream(sid: str) -> None:
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
 
-    tags = hit_tags(dets)
+    tags = hit_tags(dets, sid)
 
     if not suspects:
         RT.stats.tier1_passed += 1
@@ -1193,10 +1232,24 @@ app = FastAPI(title="Vigil-AI vision-worker", lifespan=lifespan)
 
 
 def classes_view() -> list[dict[str, str]]:
+    """默认词表视图（兼容旧字段）；各通道独立词表见 /health 的 channelContexts。"""
     return [
-        {"promptEn": prompt, "labelZh": RT.label_map.get(prompt, ""), "role": RT.role_map.get(prompt, "")}
-        for prompt in (RT.classes_applied or RT.pending_prompts)
+        {"promptEn": prompt, "labelZh": RT.default_labels.get(prompt, ""), "role": RT.default_roles.get(prompt, "")}
+        for prompt in RT.default_prompts
     ]
+
+
+def channel_contexts_view() -> dict[str, Any]:
+    return {
+        sid: {
+            "source": RT.channel_source.get(sid, "default"),
+            "tags": [
+                {"promptEn": p, "labelZh": RT.channel_labels.get(sid, {}).get(p, ""), "role": RT.channel_roles.get(sid, {}).get(p, "")}
+                for p in prompts
+            ],
+        }
+        for sid, prompts in RT.channel_model_contexts.items()
+    }
 
 
 @app.get("/health")
@@ -1233,7 +1286,8 @@ def health() -> dict[str, Any]:
         "weightsPath": str(WEIGHTS_PATH),
         "weightsPresent": WEIGHTS_PATH.exists(),
         "classes": classes_view(),
-        "vocabulary": list(RT.classes_applied or RT.pending_prompts),
+        "vocabulary": display_prompts(),
+        "channelContexts": channel_contexts_view(),
         "trackerKind": RT.tracker_kind,
         "stats": RT.stats.as_dict(),
         "streams": streams,
@@ -1293,31 +1347,46 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
             if z.type in ("polygon", "tripwire") and z.cameraId
         ],
     )
-    prompts: list[str] = []
-    role_map: dict[str, str] = {}
-    label_map: dict[str, str] = {}
-    for item in req.vocabulary:
-        prompt = " ".join(item.promptEn.split())
-        if not item.enabled or not prompt or item.role not in ROLES or prompt in role_map:
-            continue
-        prompts.append(prompt)
-        role_map[prompt] = item.role
-        label_map[prompt] = item.labelZh
-    learned_owner: dict[str, set[str]] = {}
+    def build_context(items: list[VocabItem]) -> tuple[list[str], dict[str, str], dict[str, str]]:
+        prompts: list[str] = []
+        roles: dict[str, str] = {}
+        labels: dict[str, str] = {}
+        for item in items:
+            prompt = " ".join(item.promptEn.split())
+            if not item.enabled or not prompt or item.role not in ROLES or prompt in roles:
+                continue
+            prompts.append(prompt)
+            roles[prompt] = item.role
+            labels[prompt] = item.labelZh
+        return prompts, roles, labels
+
+    default_prompts, default_roles, default_labels = build_context(req.vocabulary)
+    channel_contexts: dict[str, list[str]] = {}
+    channel_roles: dict[str, dict[str, str]] = {}
+    channel_labels: dict[str, dict[str, str]] = {}
+    channel_source: dict[str, str] = {}
+    # 每路通道各自一份词表上下文：专属词表（没有则用默认词表）+ 该通道自己的二级反哺词条，互不串味
+    for sid in dict.fromkeys([*cfg.stream_ids, *req.channelVocabulary.keys(), *req.learning.keys()]):
+        own = req.channelVocabulary.get(sid)
+        if own:
+            prompts, roles, labels = build_context(own)
+            channel_source[sid] = "channel"
+        else:
+            prompts, roles, labels = list(default_prompts), dict(default_roles), dict(default_labels)
+            channel_source[sid] = "default"
+        channel_contexts[sid], channel_roles[sid], channel_labels[sid] = prompts, roles, labels
     learned_conf: dict[tuple[str, str], float] = {}
     for sid, item in req.learning.items():
         tag_count = 0
+        prompts, roles, labels = channel_contexts[sid], channel_roles[sid], channel_labels[sid]
         for tag in item.tags[:MAX_LEARNED_TAGS]:
             prompt = " ".join(tag.promptEn.split())
             if not prompt or tag.role not in (ROLE_SUBJECT, ROLE_CONTEXT):
                 continue
-            if prompt in role_map and prompt not in learned_owner:
-                continue  # 与基础词表重复，沿用基础词条，不做通道隔离
-            if prompt not in role_map:
+            if prompt not in roles:
                 prompts.append(prompt)
-                role_map[prompt] = tag.role
-                label_map[prompt] = tag.labelZh or prompt
-            learned_owner.setdefault(prompt, set()).add(sid)
+                roles[prompt] = tag.role
+                labels[prompt] = tag.labelZh or prompt
             learned_conf[(sid, prompt)] = min(0.95, max(0.1, tag.confidence))
             tag_count += 1
         anchor = None
@@ -1331,18 +1400,29 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
         cfg.learning[sid] = {"version": item.version, "policy": policy, "anchor": anchor, "tagCount": tag_count}
     with RT.cfg_lock:
         RT.cfg = cfg
-        RT.learned_owner = learned_owner
         RT.learned_conf = learned_conf
-        RT.role_map = role_map
-        RT.label_map = label_map
-        RT.vocab = list(req.vocabulary)
-        RT.pending_prompts = prompts
+        RT.default_prompts = default_prompts
+        RT.default_roles = default_roles
+        RT.default_labels = default_labels
+        RT.channel_model_contexts = channel_contexts
+        RT.channel_roles = channel_roles
+        RT.channel_labels = channel_labels
+        RT.channel_source = channel_source
         for sid in list(RT.streams):
             if sid not in cfg.stream_ids:
                 del RT.streams[sid]
-    ok, message = apply_classes(prompts)
+    first = first_context()
+    if first:
+        with RT.model_lock:
+            ok, message = apply_classes(first)
+    else:
+        with RT.model_lock:
+            ok, message = apply_classes([])
     RT.last_reload_ms = round((time.perf_counter() - started) * 1000, 1)
-    log(f"配置已热更新（{RT.last_reload_ms}ms）：{len(prompts)} 个词条 · {len(cfg.stream_ids)} 路通道 · {message}")
+    log(
+        f"配置已热更新（{RT.last_reload_ms}ms）：默认词表 {len(default_prompts)} 条 · "
+        f"{len(channel_contexts)} 路独立词表上下文 · {len(cfg.stream_ids)} 路通道 · {message}"
+    )
     return {
         "ok": ok,
         "reloadMs": RT.last_reload_ms,
@@ -1366,7 +1446,7 @@ def fresh_view(sid: str, force: bool = False) -> dict[str, Any]:
     ratio, gray, mask = motion_ratio(st.preview_gray, image)
     st.preview_gray = gray
     dets: list[Det] = []
-    if RT.model_state == "ready" and RT.model is not None and RT.classes_applied:
+    if RT.model_state == "ready" and RT.model is not None and prompts_of(sid):
         if st.preview_tracker is None:
             st.preview_tracker = make_tracker()
         dets = detect(image, st.preview_tracker, sid)
@@ -1418,7 +1498,7 @@ def inspect_once(stream_id: str) -> dict[str, Any]:
         "detections": [
             {
                 "prompt": d.prompt,
-                "labelZh": RT.label_map.get(d.prompt, ""),
+                "labelZh": labels_of(stream_id).get(d.prompt, ""),
                 "role": d.role,
                 "confidence": round(d.conf, 3),
                 "trackId": d.track_id,

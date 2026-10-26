@@ -4,6 +4,7 @@ import fs from "node:fs"
 import path from "node:path"
 
 import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/python-runtime.mjs"
+import { channelVocabularies } from "@/lib/ops/server/channel-perception"
 import { loadZones } from "@/lib/storage/roi-store"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
@@ -432,10 +433,11 @@ function buildPayload(config: VisionConfig) {
     minConsecutiveFrames: config.minConsecutiveFrames,
     cooldownSeconds: config.cooldownSeconds,
     staticRecheckSec: config.staticRecheckSeconds,
-  vocabulary: config.vocabulary,
-  zones: workerZones(),
-  streamIds: monitoredStreamIds(),
-  learning: workerLearning(),
+    vocabulary: config.vocabulary,
+    channelVocabulary: channelVocabularies(),
+    zones: workerZones(),
+    streamIds: monitoredStreamIds(),
+    learning: workerLearning(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),
   }
@@ -472,7 +474,7 @@ export async function pushConfig(force = false, config: VisionConfig = loadVisio
 
 /* ----------------------------------- 状态 ----------------------------------- */
 
-/** 巡检循环用：视觉漏斗是否已接管自动巡检（模型就绪才接管，否则回落到定时整段研判）。 */
+/** 巡检循环用：视觉漏斗是否已接���自动巡检（模型就绪才接管，否则回落到定时整段研判）。 */
 export async function visionHandlesPatrol(): Promise<Set<string>> {
   if (disabled()) return new Set()
   await ensureVisionEngine()

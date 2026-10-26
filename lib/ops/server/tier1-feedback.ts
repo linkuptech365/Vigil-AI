@@ -2,7 +2,7 @@ import type { Tier1Feedback } from "@/lib/ops/types"
 import type { VlmFinalResult, VlmSourceType, VlmVerdict } from "@/lib/ops/vlm-api-types"
 import { loadAllLearning, loadLearning, saveLearning } from "@/lib/storage/tier1-learning-store"
 import { getStream } from "@/lib/storage/streams-store"
-import { loadVisionConfig } from "@/lib/storage/vision-store"
+import { effectiveVocabulary } from "@/lib/ops/server/channel-perception"
 import {
   applyFalsePositive,
   type FalsePositiveInput,
@@ -16,7 +16,7 @@ import { pushConfig, type PushResult } from "@/lib/vision-engine"
 
 /** 通道一级初筛当前已用的英文检测词（基础词表 + 已沉淀词），提示给 VLM 避免重复推荐。 */
 export function tier1ExistingTags(streamId: string): string[] {
-  const base = loadVisionConfig().vocabulary.map((item) => item.promptEn)
+  const base = effectiveVocabulary(streamId).tags.map((item) => item.promptEn)
   const learned = loadLearning(streamId)?.tags.map((tag) => tag.promptEn) ?? []
   return [...new Set([...base, ...learned])]
 }
@@ -34,7 +34,7 @@ export interface Tier1ApplyOutcome {
 
 /** 合并、持久化并热更新到视觉工作进程；无实质变化时不写盘也不重载。 */
 export async function applyTier1Feedback(streamId: string, feedback: Tier1Feedback): Promise<Tier1ApplyOutcome> {
-  const merge = mergeTier1Feedback(loadLearning(streamId), streamId, feedback, loadVisionConfig().vocabulary)
+  const merge = mergeTier1Feedback(loadLearning(streamId), streamId, feedback, effectiveVocabulary(streamId).tags)
   if (!merge.changed) return { merge, reload: null }
   saveLearning(merge.learning)
   const reload = await pushConfig(true)
