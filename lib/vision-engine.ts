@@ -452,7 +452,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?
     void ensureVisionEngine({ waitMs: 8_000 })
   }
   child.once("error", (error) => finish(`安装进程启动失败：${error.message}`))
-  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败（退出码 ${code}），请查看上方日志`))
+  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败���退出码 ${code}），请查看上方日志`))
   return { started: true, message: "已开始安装视觉环境，首次需要下载 PyTorch 与模型权重，可能需要数分钟到数十分钟" }
 }
 
@@ -639,6 +639,34 @@ export async function getVisionInfo(): Promise<VisionInfo> {
     lastReloadMs: health?.lastReloadMs ?? 0,
     restarts: s.restarts,
     installOutput: s.installing || s.installOutput ? s.installOutput : undefined,
+  }
+}
+
+export type GateTrace = {
+  at: string
+  streamId: string
+  ruleId: string
+  ruleName: string
+  gate: string
+  verdict: "pass" | "block" | "info"
+  detail: string
+}
+
+/** 规则管道门禁逐级诊断（Worker 内存环形缓冲）；Worker 不在线时返回空列表。 */
+export async function getGateTraces(
+  filter: { streamId?: string; ruleId?: string; limit?: number } = {},
+): Promise<{ online: boolean; count: number; traces: GateTrace[] }> {
+  const query = new URLSearchParams()
+  if (filter.streamId) query.set("streamId", filter.streamId)
+  if (filter.ruleId) query.set("ruleId", filter.ruleId)
+  if (filter.limit) query.set("limit", String(filter.limit))
+  try {
+    const response = await visionFetch(`/gate-traces?${query.toString()}`, { timeoutMs: 2_500 })
+    if (!response.ok) return { online: false, count: 0, traces: [] }
+    const body = (await response.json()) as { count: number; traces: GateTrace[] }
+    return { online: true, count: body.count, traces: body.traces }
+  } catch {
+    return { online: false, count: 0, traces: [] }
   }
 }
 

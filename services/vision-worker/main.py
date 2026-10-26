@@ -73,6 +73,12 @@ FRESH_SECONDS = 2.5
 MAX_EVENTS = 30
 MAX_HIT_LOG = 80
 HIT_DEDUPE_SECONDS = 8.0
+MAX_GATE_TRACES = 300
+GATE_TRACE_REPEAT_SECONDS = 3.0  # 同一门禁同一结论的重复追踪合并窗口，避免 2~3 FPS 下刷屏
+WAIST_RATIO = 0.55  # HAND_ELEVATED：手中心高于人员框「框顶 + 55% 高度」视为抬起
+SMOKING_KEYWORDS = ("吸烟", "抽烟", "smok", "cigarette")
+# 吸烟类规则的冷却上限（秒）：排查"无命中无告警"期间避免冷却锁吞掉真实事件；设为 0 关闭该上限
+SMOKING_COOLDOWN_CAP = max(0.0, float(os.environ.get("VIGIL_SMOKING_COOLDOWN_CAP", "30") or 0))
 
 
 # --------------------------------------------------------------------------- #
@@ -304,6 +310,9 @@ class Runtime:
         self.streams: dict[str, StreamState] = {}
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.hitlog: deque = deque(maxlen=MAX_HIT_LOG)
+        # 规则管道门禁逐级诊断：环形缓冲 + 同一 (通道, 规则, 门禁, 结论) 的节流时间戳
+        self.gate_traces: deque = deque(maxlen=MAX_GATE_TRACES)
+        self.gate_trace_last: dict[str, float] = {}
         self.tracker_kind = "bytetrack"
         self.last_reload_ms = 0.0
         self.model_lock = threading.RLock()
@@ -338,6 +347,33 @@ def now_iso() -> str:
 
 def log(message: str) -> None:
     print(f"[vision-worker] {message}", flush=True)
+
+
+def gate_trace(sid: str, rule_id: str, rule_name: str, gate: str, verdict: str, detail: str) -> None:
+    """门禁诊断：写控制台 + 内存环形缓冲（/gate-traces）。verdict: pass | block | info。"""
+    now = time.time()
+    signature = f"{sid}|{rule_id}|{gate}|{verdict}"
+    last = RT.gate_trace_last.get(signature)
+    if last is not None and now - last < GATE_TRACE_REPEAT_SECONDS:
+        return
+    RT.gate_trace_last[signature] = now
+    if len(RT.gate_trace_last) > 600:
+        cutoff = now - 60
+        for key in [k for k, ts in RT.gate_trace_last.items() if ts < cutoff]:
+            del RT.gate_trace_last[key]
+    RT.gate_traces.appendleft(
+        {
+            "at": now_iso(),
+            "streamId": sid,
+            "ruleId": rule_id,
+            "ruleName": rule_name,
+            "gate": gate,
+            "verdict": verdict,
+            "detail": detail,
+        }
+    )
+    tag = {"pass": "PASS", "block": "BLOCK"}.get(verdict, "INFO")
+    log(f"{gate} {tag} stream={sid or '-'} rule={rule_name or rule_id} {detail}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1041,6 +1077,15 @@ def norm_class(text: str) -> str:
     return " ".join(str(text).split()).lower()
 
 
+def effective_cooldown(rule_id: str, name: str, classes: list[str], configured: float) -> float:
+    """吸烟类规则冷却不超过 SMOKING_COOLDOWN_CAP，避免长冷却吞掉真实事件；其余规则保持配置值。"""
+    haystack = " ".join([name or "", *classes]).lower()
+    if SMOKING_COOLDOWN_CAP > 0 and any(k in haystack for k in SMOKING_KEYWORDS) and configured > SMOKING_COOLDOWN_CAP:
+        log(f"规则 {name or rule_id} 为吸烟类，冷却 {configured:.0f}s 限制为 {SMOKING_COOLDOWN_CAP:.0f}s")
+        return SMOKING_COOLDOWN_CAP
+    return configured
+
+
 def pipelines_for(sid: str) -> list[dict[str, Any]]:
     return [p for p in RT.cfg.pipelines if "ALL" in p["channels"] or sid in p["channels"]]
 
@@ -1076,15 +1121,39 @@ def box_hits_polygon(det: Det, polygon: list[list[float]], shape: tuple[int, int
     return any(x1 <= vx <= x2 and y1 <= vy <= y2 for vx, vy in polygon)
 
 
-def hand_elevated(hand: Det, dets: list[Det]) -> bool:
-    """手部抬起/探出的几何近似：手中心高于最近人员框的腰线（框顶 + 55% 高度）；画面无人员则不放行。"""
+def is_person(det: Det) -> bool:
+    return det.role == ROLE_ANCHOR or norm_class(det.prompt) == "person"
+
+
+def is_hand(det: Det) -> bool:
+    return "hand" in norm_class(det.prompt)
+
+
+def fmt_box(det: Det) -> str:
+    return f"({int(det.box[0])},{int(det.box[1])},{int(det.box[2])},{int(det.box[3])})"
+
+
+def seen_summary(dets: list[Det], limit: int = 8) -> str:
+    if not dets:
+        return "无任何检出"
+    ordered = sorted(dets, key=lambda d: -d.conf)[:limit]
+    return ", ".join(f"{d.prompt}:{d.conf:.2f}" for d in ordered)
+
+
+def hand_pose_check(hand: Det, live: list[Det]) -> tuple[bool | None, str]:
+    """手部抬起/探出的几何近似：手中心高于最近人员框的腰线（框顶 + 55% 高度）。
+    返回 (结论, 诊断文本)；结论为 None 表示画面无人员框，无法判定。"""
     hx, hy = (hand.box[0] + hand.box[2]) / 2, (hand.box[1] + hand.box[3]) / 2
-    persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= RT.cfg.low]
+    persons = [d for d in live if is_person(d)]
     if not persons:
-        return False
+        return None, f"手部框{fmt_box(hand)} 中心y={hy:.0f}，但画面无人员框，无法计算腰线"
     nearest = min(persons, key=lambda p: math.hypot((p.box[0] + p.box[2]) / 2 - hx, (p.box[1] + p.box[3]) / 2 - hy))
-    waist = nearest.box[1] + 0.55 * (nearest.box[3] - nearest.box[1])
-    return hy <= waist
+    waist = nearest.box[1] + WAIST_RATIO * (nearest.box[3] - nearest.box[1])
+    elevated = hy <= waist
+    return elevated, (
+        f"手部框{fmt_box(hand)} 中心y={hy:.0f} · 人体框{fmt_box(nearest)} 腰线y={waist:.0f}"
+        f"（y_top+{WAIST_RATIO}*h）→ {'手部高于腰线，放行' if elevated else '手部低于腰线，阻断'}"
+    )
 
 
 def pipeline_track_key(rule_id: str, subject: Det, shape: tuple[int, int], index: int) -> str:
@@ -1104,18 +1173,58 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
     result: list[Suspect] = []
     for pipe in pipelines:
         rule_id, name = pipe["id"], pipe["name"] or pipe["id"]
+        def trace(gate: str, verdict: str, detail: str, _sid: str = sid, _rid: str = rule_id, _name: str = name) -> None:
+            gate_trace(_sid, _rid, _name, gate, verdict, detail)
+
+        pose_on = pipe["hand_pose_filter"] == "HAND_ELEVATED"
+        wants_hand = any("hand" in norm_class(c) for c in pipe["subject_classes"])
         # 阶段 1：主体检查
         subjects = [d for d in live if matches_class(d, pipe["subject_classes"])]
+        degraded = False
+        if not subjects and pose_on and wants_hand:
+            # 小模型在中远景常检不出独立手部框：退化为人员框放行，细节交二级 VLM 裁定
+            persons = [d for d in live if is_person(d)]
+            if persons:
+                subjects = persons
+                degraded = True
+                trace(
+                    "[Gate 1 - Subject]", "pass",
+                    f"未独立检出手部框，退化使用 {len(persons)} 个 person 框作为主体（{seen_summary(persons, 3)}），交 VLM 裁定手部细节",
+                )
         if not subjects:
+            trace(
+                "[Gate 1 - Subject]", "block",
+                f"要求主体 {pipe['subject_classes']}，本帧检出（阈值≥{low:.2f}）：{seen_summary(live)}",
+            )
             continue
+        if not degraded:
+            trace("[Gate 1 - Subject]", "pass", f"检出主体 {len(subjects)} 个：{seen_summary(subjects, 4)}")
         # 阶段 1：手部姿态（仅作用于手部类主体，其余主体不受影响）
-        if pipe["hand_pose_filter"] == "HAND_ELEVATED":
-            subjects = [
-                d for d in subjects
-                if not ("hand" in norm_class(d.prompt)) or hand_elevated(d, dets)
-            ]
-            if not subjects:
-                continue
+        if pose_on:
+            if degraded:
+                trace("[Gate 2 - Pose]", "pass", "无独立手部框，姿态判定退化放行（不因漏检手部而短路），由 VLM 复核")
+            else:
+                kept: list[Det] = []
+                notes: list[str] = []
+                for d in subjects:
+                    if not is_hand(d):
+                        kept.append(d)
+                        notes.append(f"{d.prompt}{fmt_box(d)} 非手部框，无需姿态判定，放行")
+                        continue
+                    verdict, note = hand_pose_check(d, live)
+                    notes.append(note)
+                    if verdict:
+                        kept.append(d)
+                    elif verdict is None and any(is_person(p) for p in live) is False:
+                        # 无人员框无法算腰线：宁可放行交 VLM，也不静默丢弃
+                        kept.append(d)
+                        notes[-1] += "；无腰线参照，退化放行"
+                subjects = kept
+                trace("[Gate 2 - Pose]", "pass" if subjects else "block", " | ".join(notes[:3]))
+                if not subjects:
+                    continue
+        else:
+            trace("[Gate 2 - Pose]", "info", "规则未开启 HAND_ELEVATED，跳过")
         # 阶段 1：空间相交
         zone_note = ""
         if pipe["require_roi"]:
@@ -1124,36 +1233,65 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
                 z for z in zones_for(sid)
                 if z.get("type") == "polygon" and len(z.get("coordinates") or []) >= 3 and (not bound or z["id"] in bound)
             ]
-            hit_subjects: list[Det] = []
-            for subject in subjects:
-                for zone in polygons:
-                    if box_hits_polygon(subject, zone["coordinates"], shape):
+            if not polygons:
+                trace(
+                    "[Gate 3 - ROI]", "pass",
+                    f"规则要求围栏，但通道 {sid} 无可用多边形围栏（绑定 {sorted(bound) or '全部'}），退化为全画面监测",
+                )
+            else:
+                hit_subjects: list[Det] = []
+                probes: list[str] = []
+                for subject in subjects:
+                    hit_name = ""
+                    for zone in polygons:
+                        if box_hits_polygon(subject, zone["coordinates"], shape):
+                            hit_name = str(zone.get("name") or zone["id"])
+                            break
+                    probes.append(f"{subject.prompt}{fmt_box(subject)}→{'相交「' + hit_name + '」' if hit_name else '未相交'}")
+                    if hit_name:
                         hit_subjects.append(subject)
-                        zone_note = f"进入围栏「{zone.get('name') or zone['id']}」"
-                        break
-            subjects = hit_subjects
-            if not subjects:
-                continue
+                        zone_note = f"进入围栏「{hit_name}」"
+                trace(
+                    "[Gate 3 - ROI]", "pass" if hit_subjects else "block",
+                    f"{len(polygons)} 个围栏：" + "；".join(probes[:3]),
+                )
+                subjects = hit_subjects
+                if not subjects:
+                    continue
+        else:
+            trace("[Gate 3 - ROI]", "info", "规则未要求围栏，全画面监测")
         # 阶段 2：伴生物体与接触判定
         contexts: list[Det] = []
         if pipe["require_context_object"]:
             context_roles = (ROLE_PIPE, ROLE_CONTEXT, ROLE_SUBJECT, ROLE_HAZARD)
             contexts = [d for d in live if d.role in context_roles and matches_class(d, pipe["context_classes"])]
             if not contexts:
+                trace(
+                    "[Gate 4 - Context]", "block",
+                    f"要求伴随介质 {pipe['context_classes']}，本帧未检出；当前检出：{seen_summary(live)}",
+                )
                 continue
+        else:
+            trace("[Gate 4 - Context]", "info", "规则未要求伴随介质，跳过")
+        gate4_blocks: list[str] = []
+        gate4_passes: list[str] = []
+        gate5_blocks: list[str] = []
+        gate5_passes: list[str] = []
         for index, subject in enumerate(subjects):
             pair_conf = subject.conf
             pair_note = ""
             if pipe["require_context_object"]:
                 limit = pipe["max_interaction_distance"]
                 best: tuple[Det, float] | None = None
+                nearest_dist: float | None = None
                 scx, scy = box_center_norm(subject, shape)
                 for other in contexts:
                     if other is subject:
                         continue
+                    ocx, ocy = box_center_norm(other, shape)
+                    dist = math.hypot(scx - ocx, scy - ocy)
+                    nearest_dist = dist if nearest_dist is None else min(nearest_dist, dist)
                     if limit is not None:
-                        ocx, ocy = box_center_norm(other, shape)
-                        dist = math.hypot(scx - ocx, scy - ocy)
                         if dist > limit and iou(subject.box, other.box) <= 0:
                             continue
                     elif proximity(subject, other) is None:
@@ -1161,15 +1299,24 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
                     if best is None or other.conf > best[0].conf:
                         best = (other, other.conf)
                 if best is None:
+                    limit_text = f"上限 {limit:.0f}" if limit is not None else "需框相交或靠近"
+                    gate4_blocks.append(
+                        f"{subject.prompt}{fmt_box(subject)} 与伴随介质最近距离 "
+                        f"{'-' if nearest_dist is None else format(nearest_dist, '.0f')}（千分比坐标，{limit_text}）"
+                    )
                     continue
                 pair_conf = min(subject.conf, best[1])
                 pair_note = f" 与 {label_of(best[0].prompt, sid)} 接触"
+                gate4_passes.append(f"{subject.prompt} 与 {best[0].prompt}:{best[0].conf:.2f} 接触")
             # 阶段 4：同一主体冷却抑制（先于切片截取与送审）
             key = pipeline_track_key(rule_id, subject, shape, index)
-            if st.cooldown.get(key, 0.0) > now:
+            remaining = st.cooldown.get(key, 0.0) - now
+            if remaining > 0:
                 RT.stats.cooldown_suppressed += 1
+                gate5_blocks.append(f"{key.split(':', 2)[-1]} 冷却剩余 {remaining:.0f}s")
                 continue
             shadow = bool(pipe["enable_shadow_review"]) and pair_conf < RT.cfg.high
+            gate5_passes.append(f"{key.split(':', 2)[-1]} 无冷却")
             result.append(
                 Suspect(
                     key=key,
@@ -1181,6 +1328,15 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
                     shadow=shadow,
                 )
             )
+        if pipe["require_context_object"]:
+            if gate4_passes:
+                trace("[Gate 4 - Context]", "pass", "；".join(gate4_passes[:3]))
+            if gate4_blocks and not gate4_passes:
+                trace("[Gate 4 - Context]", "block", "；".join(gate4_blocks[:3]))
+        if gate5_blocks and not gate5_passes:
+            trace("[Gate 5 - Cooldown]", "block", "；".join(gate5_blocks[:3]) + f"（规则冷却 {pipe['track_cooldown_seconds']:.0f}s）")
+        elif gate5_passes:
+            trace("[Gate 5 - Cooldown]", "pass", "；".join(gate5_passes[:3]) + "，进入连续帧确认与切片送审")
     return result
 
 
@@ -1496,6 +1652,11 @@ def scan_stream(sid: str) -> None:
         st.tracks[suspect.key] = TrackState(hits=hits, last_conf=suspect.conf, reasons=suspect.reasons)
         if hits < (suspect.min_frames or cfg.min_frames):
             pending_list.append((suspect, hits))
+            if suspect.rule_id:
+                gate_trace(
+                    sid, suspect.rule_id, suspect.rule_id, "[Gate 6 - Debounce]", "block",
+                    f"连续帧确认中 {hits}/{suspect.min_frames or cfg.min_frames}（目标 {suspect.key}），尚未升级",
+                )
             continue
         if st.cooldown.get(suspect.key, 0.0) > now:
             RT.stats.cooldown_suppressed += 1
@@ -1542,6 +1703,11 @@ def scan_stream(sid: str) -> None:
             "shadow": suspect.shadow,
         }
         RT.events.appendleft(event)
+        if suspect.rule_id:
+            gate_trace(
+                sid, suspect.rule_id, suspect.rule_id, "[Gate 6 - Escalate]", "pass",
+                f"目标 {suspect.key} 已升级抓帧送审，事件 {event['id']}，冷却 {suspect.cooldown or cfg.cooldown:.0f}s",
+            )
         log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"], anchor=suspect.anchor, explore=suspect.explore)
         PUSH_POOL.submit(push_event, event, frames)
     for key in [k for k, until in st.cooldown.items() if until < now - 60]:
@@ -1675,6 +1841,17 @@ async def health() -> dict[str, Any]:
     }
 
 
+@app.get("/gate-traces")
+def gate_traces(streamId: str = "", ruleId: str = "", limit: int = 100) -> dict[str, Any]:
+    """规则管道门禁逐级诊断（环形缓冲，新→旧）。只读内存，不取锁，随时即时返回。"""
+    items = list(RT.gate_traces)
+    if streamId:
+        items = [t for t in items if t["streamId"] == streamId]
+    if ruleId:
+        items = [t for t in items if t["ruleId"] == ruleId]
+    return {"count": len(items), "traces": items[: max(1, min(MAX_GATE_TRACES, limit))]}
+
+
 @app.post("/stats/reset")
 def reset_stats() -> dict[str, Any]:
     RT.stats.reset()
@@ -1727,7 +1904,12 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
                     if p.interaction_gate.max_interaction_distance is not None
                     else None
                 ),
-                "track_cooldown_seconds": min(3600.0, max(0.0, p.throttling.track_cooldown_seconds)),
+                "track_cooldown_seconds": effective_cooldown(
+                    p.id,
+                    p.name,
+                    [*p.perception_gate.subject_classes, *p.interaction_gate.context_classes],
+                    min(3600.0, max(0.0, p.throttling.track_cooldown_seconds)),
+                ),
                 "enable_shadow_review": p.throttling.enable_shadow_review,
             }
             for p in req.rulePipelines
@@ -1765,6 +1947,9 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
     # 管道用到的主体/伴生类别并入对应通道词表（角色 ROLE_PIPE，不触发既有判定）；词表里已有的类别不重复添加
     for pipe in cfg.pipelines:
         wanted = [c for c in [*pipe["subject_classes"], *pipe["context_classes"]] if c and c != WILDCARD]
+        if pipe["hand_pose_filter"] == "HAND_ELEVATED" and "person" not in wanted:
+            # 手部姿态需要人体框算腰线，也是手部漏检时退化放行的依据
+            wanted.append("person")
         targets = cfg.stream_ids if "ALL" in pipe["channels"] else [s for s in pipe["channels"] if s in channel_contexts]
         for sid in targets:
             if sid not in channel_contexts:
