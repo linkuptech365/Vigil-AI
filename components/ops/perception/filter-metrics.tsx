@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { formatDuration } from "@/lib/ops/local-source"
 import { DAILY_SAVING_USD } from "@/lib/ops/perception-data"
 import type { SeriesPoint } from "@/lib/ops/perception-types"
+import { formatPercentValue, formatUsd, safeDivide, safePercent } from "@/lib/ops/safe-format"
 import { resolveTier1Config, tier1BadgeText } from "@/lib/vigil/sensitivity"
 import type { VideoItem } from "@/lib/vigil/types"
 import { usePerception } from "./perception-provider"
@@ -50,11 +51,14 @@ const CHART_W = 300
 const CHART_H = 100
 
 function toPoints(values: number[], max: number) {
-  return values.map((v, i) => [(i / (values.length - 1)) * CHART_W, CHART_H - (v / max) * (CHART_H - 6) - 3] as const)
+  const lastIndex = Math.max(values.length - 1, 1)
+  return values.map(
+    (v, i) => [(i / lastIndex) * CHART_W, CHART_H - safeDivide(v, max) * (CHART_H - 6) - 3] as const,
+  )
 }
 
 function FrameTrendChart({ series }: { series: SeriesPoint[] }) {
-  const max = Math.max(...series.map((p) => p.ingested)) * 1.1
+  const max = Math.max(1, ...series.map((p) => p.ingested)) * 1.1
   const ingested = toPoints(series.map((p) => p.ingested), max)
   const escalated = toPoints(series.map((p) => p.escalated), max)
   const line = (pts: (readonly [number, number])[]) => pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")
@@ -217,10 +221,11 @@ export function FilterMetrics() {
 
 function LiveFilterMetrics() {
   const { metrics, series } = usePerception()
-  const escalatedRatio = metrics.escalatedFrames / metrics.ingested
-  const filteredRate = (1 - escalatedRatio) * 100
-  const saving = Math.round((filteredRate / 88.4) * DAILY_SAVING_USD)
-  const perMinute = series[series.length - 1]
+  const hasFrames = metrics.ingested > 0
+  const escalatedRate = safePercent(metrics.escalatedFrames, metrics.ingested)
+  const filteredRate = hasFrames ? Math.max(0, 100 - escalatedRate) : 0
+  const saving = safeDivide(filteredRate, 88.4) * DAILY_SAVING_USD
+  const perMinute = series[series.length - 1] ?? { ingested: 0, escalated: 0 }
 
   return (
     <section aria-label="一级初筛效率概览" className="grid grid-cols-1 gap-3 xl:grid-cols-12">
@@ -234,7 +239,7 @@ function LiveFilterMetrics() {
         />
         <MetricCard
           label="边缘轻量初筛拦截率 (Filtered Rate)"
-          value={filteredRate.toFixed(1)}
+          value={formatPercentValue(filteredRate)}
           unit="%"
           badge="静止/空场景自动滤除"
           hint="YOLO + ByteTrack 边缘初筛"
@@ -242,16 +247,16 @@ function LiveFilterMetrics() {
         />
         <MetricCard
           label="触发送检 VLM 事件数 (Escalated to VLM)"
-          value={(escalatedRatio * 100).toFixed(1)}
+          value={formatPercentValue(escalatedRate)}
           unit="%"
           hint={`${Math.round(metrics.escalatedFrames).toLocaleString("en-US")} 帧 / ${metrics.clips} 个候选切片`}
           icon={Send}
         />
         <MetricCard
           label="预估节省推理算力/成本 (Cost & Token Saved)"
-          value={filteredRate.toFixed(1)}
+          value={formatPercentValue(filteredRate)}
           unit="% Token 节省"
-          hint={`~$${saving}/日节省`}
+          hint={`~${formatUsd(saving)}/日节省`}
           icon={Coins}
         />
       </div>
