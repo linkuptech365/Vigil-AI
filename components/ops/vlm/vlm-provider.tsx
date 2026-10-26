@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { toast } from "sonner"
+import useSWR from "swr"
 
 import { useModelProfiles } from "@/components/vigil/config/use-model-profiles"
 import { useVigil } from "@/components/vigil/vigil-provider"
@@ -10,7 +11,7 @@ import {
   toLocalReasoningResult,
   type LocalSlice,
 } from "@/lib/ops/local-slice"
-import type { EscalationClip } from "@/lib/ops/perception-types"
+import type { VlmCandidate } from "@/lib/ops/rag-types"
 import type {
   VlmAnalyzeRequest,
   VlmFinalResult,
@@ -21,18 +22,21 @@ import type {
 import type { ChunkFrame } from "@/lib/vigil/types"
 import { toRequestVideoPath } from "@/lib/vigil/video-path"
 import { getVideoSrc } from "@/lib/vigil/video-source"
-import { streamVlmAnalyze } from "@/lib/ops/vlm-client"
-import {
-  FRAME_COUNT,
-  SCENARIOS,
-  eventIdOf,
-  frameMark,
-  frameSeconds,
-  frameTag,
-} from "@/lib/ops/vlm-data"
-import type { VlmModelConfig, VlmPhase, VlmReasoningResult, VlmScenario } from "@/lib/ops/vlm-types"
+import { streamAlertAnalyze, streamVlmAnalyze } from "@/lib/ops/vlm-client"
+import { FRAME_COUNT } from "@/lib/ops/vlm-data"
+import type { VlmModelConfig, VlmPhase, VlmReasoningResult } from "@/lib/ops/vlm-types"
 import { MODEL_PROVIDERS, profileReadiness } from "@/lib/vigil/model-registry"
-import { usePerception } from "../perception/perception-provider"
+
+interface CandidatesResponse {
+  status: "success"
+  candidates: VlmCandidate[]
+}
+
+async function fetchCandidates(url: string): Promise<CandidatesResponse> {
+  const response = await fetch(url, { cache: "no-store" })
+  if (!response.ok) throw new Error(`候选列表加载失败（HTTP ${response.status}）`)
+  return (await response.json()) as CandidatesResponse
+}
 
 const NO_MODEL: VlmModelConfig = {
   id: "",
@@ -49,9 +53,12 @@ interface VlmContextValue {
   models: VlmModelConfig[]
   model: VlmModelConfig
   setModelId: (id: string) => void
-  candidates: EscalationClip[]
-  activeClip: EscalationClip | null
-  /** 实时通道候选 ID，或本地切片 ID（slice:*） */
+  /** 一级初筛真实命中并落库的告警（含留存证据帧） */
+  candidates: VlmCandidate[]
+  candidatesLoading: boolean
+  candidatesError: string | null
+  activeCandidate: VlmCandidate | null
+  /** 告警 ID，或本地切片 ID（slice:*） */
   setClipId: (id: string) => void
   /** 下拉框当前选中项 */
   selectionId: string | null
@@ -62,7 +69,6 @@ interface VlmContextValue {
   localFrames: ChunkFrame[]
   localFramesLoading: boolean
   localFramesError: string | null
-  scenario: VlmScenario | null
   phase: VlmPhase
   thinkingMessage: string
   streamText: string
@@ -87,16 +93,9 @@ function estimateOutputTokens(text: string) {
   return Math.round(text.length / 1.6)
 }
 
-function buildKeyframes(): VlmKeyframeInput[] {
-  return Array.from({ length: FRAME_COUNT }, (_, i) => ({
-    index: i + 1,
-    timestampSec: frameSeconds(i),
-    timecode: frameMark(i),
-  }))
-}
-
-function toZeroBased(frames: number[]) {
-  return Array.from(new Set(frames.map((f) => f - 1).filter((f) => f >= 0 && f < FRAME_COUNT)))
+/** 告警证据帧下标从 1 起，转为界面使用的 0 起下标并过滤越界。 */
+function toZeroBased(frames: number[], count: number) {
+  return Array.from(new Set(frames.map((f) => f - 1).filter((f) => Number.isInteger(f) && f >= 0 && f < count)))
 }
 
 /** 本地切片的关键帧下标本来就是从 0 起，只做越界过滤。 */
@@ -126,26 +125,26 @@ function deriveChain(reasoning: string, intent: string) {
     .filter(Boolean)
 }
 
-function toReasoningResult(
-  clip: EscalationClip,
-  model: VlmModelConfig,
-  scenario: VlmScenario,
+function toCandidateResult(
+  candidate: VlmCandidate,
+  modelName: string,
   final: VlmFinalResult,
   metrics: VlmMetrics,
-  reasoning: string
+  reasoning: string,
+  chain?: string[]
 ): VlmReasoningResult {
-  const eventId = eventIdOf(clip)
-  const evidence = toZeroBased(final.evidenceKeyframes)
+  const eventId = candidate.caseId ?? candidate.alertId
+  const evidence = toZeroBased(final.evidenceKeyframes, candidate.frameCount)
   const confidence = Math.round(final.confidence * 1000) / 10
 
   return {
     eventId,
-    channelId: clip.cameraId,
-    modelUsed: model.name,
+    channelId: candidate.channelId,
+    modelUsed: modelName,
     confidence,
     severity: final.severity,
     summary: final.summary,
-    reasoningChain: deriveChain(reasoning, final.reasoning),
+    reasoningChain: chain && chain.length > 0 ? chain : deriveChain(reasoning, final.reasoning),
     evidenceKeyframes: evidence,
     violationClauses: final.triggered ? [final.ruleTriggered] : [],
     actionAdvice: final.advice,
@@ -153,26 +152,23 @@ function toReasoningResult(
     rawJson: {
       schema_version: "vigil.vlm.v1",
       event_id: eventId,
-      channel_id: clip.cameraId,
-      source_clip: clip.id,
-      model: model.name,
+      alert_id: candidate.alertId,
+      channel_id: candidate.channelId,
+      model: modelName,
       engine: metrics.source,
       ...(metrics.fallbackReason ? { fallback_reason: metrics.fallbackReason } : {}),
       severity: final.severity,
       confidence: final.confidence,
       summary: final.summary,
-      behavior: { type: scenario.title, intent: final.reasoning },
+      behavior: { type: candidate.ruleName, intent: final.reasoning },
       rule_triggered: final.ruleTriggered,
       timestamp_offset: final.timestampOffset,
       bbox: final.bbox,
-      evidence_keyframes: evidence.map((i) => ({
-        index: i + 1,
-        offset: frameTag(i),
-        timestamp: frameMark(i),
-      })),
+      evidence_keyframes: evidence.map((i) => ({ index: i + 1 })),
       violated_clauses: final.triggered ? [final.ruleTriggered] : [],
       recommended_action: final.advice,
-      tier1_trigger: clip.reason,
+      tier1_rule: candidate.ruleName,
+      tier1_summary: candidate.tier1Summary,
       token_usage: { prompt: metrics.promptTokens, completion: metrics.outputTokens },
       first_token_ms: metrics.firstTokenMs,
       latency_ms: metrics.rttMs,
@@ -182,7 +178,11 @@ function toReasoningResult(
 }
 
 export function VlmProvider({ children }: { children: React.ReactNode }) {
-  const { clips } = usePerception()
+  const { data: candidateData, error: candidateFetchError, isLoading: candidatesLoading, mutate: refreshCandidates } = useSWR(
+    "/api/v1/vlm/candidates",
+    fetchCandidates,
+    { refreshInterval: 15_000, revalidateOnFocus: true }
+  )
   const { queue, updateChunk, recaptureChunkFrames, getLocalPromptRules } = useVigil()
   const [localFramesLoading, setLocalFramesLoading] = React.useState(false)
   const [localFramesError, setLocalFramesError] = React.useState<string | null>(null)
@@ -218,20 +218,17 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
     models.find((m) => m.id === defaultProfile?.id) ??
     models[0] ??
     NO_MODEL
-  const candidates = React.useMemo(() => clips.filter((clip) => clip.status !== "blocked"), [clips])
+  const candidates = React.useMemo(() => candidateData?.candidates ?? [], [candidateData])
+  const candidatesError = candidateFetchError instanceof Error ? candidateFetchError.message : null
   const localSlices = React.useMemo(() => buildLocalSlices(queue), [queue])
   const activeLocal = React.useMemo(
     () => (clipId ? (localSlices.find((slice) => slice.id === clipId) ?? null) : null),
     [localSlices, clipId]
   )
-  const activeClip = activeLocal
+  const activeCandidate = activeLocal
     ? null
-    : (candidates.find((clip) => clip.id === clipId) ??
-      candidates.find((clip) => clip.reason === "fall_suspect") ??
-      candidates[0] ??
-      null)
-  const scenario = activeClip ? SCENARIOS[activeClip.reason] : null
-  const selectionId = activeLocal?.id ?? activeClip?.id ?? null
+    : (candidates.find((item) => item.alertId === clipId) ?? candidates[0] ?? null)
+  const selectionId = activeLocal?.id ?? activeCandidate?.alertId ?? null
 
   const localFrames = React.useMemo(() => activeLocal?.chunk.frames ?? [], [activeLocal])
   const activeLocalId = activeLocal?.id ?? null
@@ -260,6 +257,21 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
   }, [activeLocalId, needsRecapture])
 
   const stored = React.useMemo(() => {
+    const saved = activeCandidate?.vlm
+    if (activeCandidate && saved) {
+      return {
+        reasoning: saved.reasoning,
+        metrics: saved.metrics,
+        result: toCandidateResult(
+          activeCandidate,
+          saved.metrics.model || "VLM",
+          saved.result,
+          saved.metrics,
+          saved.reasoning,
+          saved.reasoningChain
+        ),
+      }
+    }
     const report = activeLocal?.chunk.report
     if (!activeLocal || !report) return null
     const count = activeLocal.chunk.frames.length
@@ -275,7 +287,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
         count
       ),
     }
-  }, [activeLocal])
+  }, [activeLocal, activeCandidate])
 
   const resetRun = React.useCallback(() => {
     abortRef.current?.abort()
@@ -336,9 +348,11 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
         toast.error("没有适用于本地视频的规则", { description: "请先在规则中心启用并绑定「本地视频」或「全部视频源」。" })
         return
       }
-    } else if (!activeClip || !scenario) {
+    } else if (!activeCandidate) {
+      toast.error("没有可研判的候选", { description: "一级初筛尚未产生已落库的命中告警。" })
       return
     }
+    const candidate = activeCandidate
 
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -375,7 +389,9 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           setCompletionTokens(estimateOutputTokens(text))
           break
         case "evidence":
-          setEvidenceFrames(local ? clampZeroBased(chunk.frames, localKeyframes.length) : toZeroBased(chunk.frames))
+          setEvidenceFrames(
+            local ? clampZeroBased(chunk.frames, localKeyframes.length) : toZeroBased(chunk.frames, candidate?.frameCount ?? 0)
+          )
           break
         case "done": {
           finished = true
@@ -399,7 +415,8 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
               analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
             })
           } else {
-            reasoningResult = toReasoningResult(activeClip!, model, scenario!, chunk.result, chunk.metrics, text)
+            reasoningResult = toCandidateResult(candidate!, chunk.metrics.model || model.name, chunk.result, chunk.metrics, text)
+            void refreshCandidates()
           }
           setResult(reasoningResult)
           setMetrics(chunk.metrics)
@@ -418,7 +435,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    const request: VlmAnalyzeRequest = local
+    const request: VlmAnalyzeRequest | null = local
       ? {
           videoPath: toRequestVideoPath(local.video),
           name: local.video.name,
@@ -429,26 +446,13 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           rules: localRules,
           simulation: { ruleId: local.chunk.ruleId ?? null, confidence: local.chunk.confidence },
         }
-      : {
-          videoPath: `${activeClip!.cameraId}/${activeClip!.id}`,
-          keyframes: buildKeyframes(),
-          modelProfileId: profile.id,
-          sourceType: "channel",
-          sourceKey: activeClip!.cameraId,
-          rules: [
-            {
-              id: `SCN-${activeClip!.reason}`,
-              name: scenario!.title,
-              description: `${scenario!.title}。一级初筛观察：${scenario!.cvSaw}`,
-              sensitivity: 0.6,
-              severity: scenario!.severity === "SAFE" ? "INFO" : scenario!.severity,
-              cooldownSeconds: 60,
-            },
-          ],
-          simulation: { ruleId: `SCN-${activeClip!.reason}`, confidence: scenario!.baseConfidence / 100 },
-        }
+      : null
 
-    streamVlmAnalyze(request, handleChunk, controller.signal)
+    const streaming = request
+      ? streamVlmAnalyze(request, handleChunk, controller.signal)
+      : streamAlertAnalyze(candidate!.alertId, profile.id, handleChunk, controller.signal)
+
+    streaming
       .then(() => {
         if (!finished && !controller.signal.aborted) throw new Error("推理流意外中断，未收到最终结果")
       })
@@ -460,7 +464,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           description: error instanceof Error ? error.message : "未知错误",
         })
       })
-  }, [activeClip, activeLocal, scenario, model, profiles, getLocalPromptRules, updateChunk, localFramesError])
+  }, [activeCandidate, activeLocal, model, profiles, getLocalPromptRules, updateChunk, localFramesError, refreshCandidates])
 
   const showStored = phase === "idle" && !result && !!stored
   const shownResult = result ?? (showStored ? stored.result : null)
@@ -476,7 +480,9 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       model,
       setModelId,
       candidates,
-      activeClip,
+      candidatesLoading,
+      candidatesError,
+      activeCandidate,
       setClipId,
       selectionId,
       localSlices,
@@ -484,7 +490,6 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       localFrames,
       localFramesLoading,
       localFramesError,
-      scenario,
       phase: shownPhase,
       thinkingMessage,
       streamText: shownText,
@@ -499,7 +504,9 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       model,
       setModelId,
       candidates,
-      activeClip,
+      candidatesLoading,
+      candidatesError,
+      activeCandidate,
       setClipId,
       selectionId,
       localSlices,
@@ -507,7 +514,6 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       localFrames,
       localFramesLoading,
       localFramesError,
-      scenario,
       shownPhase,
       thinkingMessage,
       shownText,

@@ -1,7 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { Database, MapPin, SearchX, Search, Sparkles } from "lucide-react"
+import useSWR from "swr"
+import { Archive, Database, MapPin, Search, SearchX, Sparkles } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -9,19 +10,10 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group"
 import { Progress } from "@/components/ui/progress"
-import { RAG_INDEX, RAG_PRESETS, RAG_THRESHOLD, searchCorpus } from "@/lib/ops/vlm-data"
+import { Spinner } from "@/components/ui/spinner"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
+import type { RagHit, RagIndexStatus, RagSearchResponse } from "@/lib/ops/rag-types"
 import type { LocateOptions } from "@/lib/ops/types"
-import { defaultIncidentSec, isChannelId } from "@/lib/ops/video-scenarios"
-import type { RagSearchResult } from "@/lib/ops/vlm-types"
-
-type SearchPhase = "idle" | "searching" | "done"
-
-const SEARCH_STAGES = [
-  { until: 30, label: "正在将检索语句编码为 1024 维语义向量..." },
-  { until: 85, label: "正在执行多模态余弦相似度计算..." },
-  { until: 101, label: "正在对 Top-K 候选切片重排序..." },
-]
 
 type LocateHandler = (channelId: string, opts?: LocateOptions) => void
 
@@ -29,83 +21,114 @@ interface RagStudioProps {
   onLocate: LocateHandler
 }
 
-function IndexStatus() {
-  const stats = [
-    { label: "已索引视频切片", value: `${RAG_INDEX.clips.toLocaleString("en-US")} 切片` },
-    { label: "向量维度", value: `${RAG_INDEX.dimensions} (${RAG_INDEX.embedding})` },
-    { label: "向量库", value: RAG_INDEX.store },
-  ]
+const SEVERITY_LABEL: Record<RagHit["severity"], string> = {
+  CRITICAL: "严重",
+  WARNING: "预警",
+  INFO: "提示",
+}
+
+const SUGGESTED_QUERIES = ["1楼 吸烟", "未佩戴安全帽的人员", "跌倒 倒地", "夜间 越界闯入"]
+
+async function fetchIndexStatus(url: string): Promise<{ index: RagIndexStatus }> {
+  const response = await fetch(url, { cache: "no-store" })
+  if (!response.ok) throw new Error(`索引状态获取失败（HTTP ${response.status}）`)
+  return (await response.json()) as { index: RagIndexStatus }
+}
+
+function IndexStatus({ status, error, loading }: { status?: RagIndexStatus; error?: Error; loading: boolean }) {
+  const stats = status
+    ? [
+        { label: "已索引案卷", value: `${status.docs.toLocaleString("en-US")} 条（含二级研判 ${status.vlmDocs}，已归档 ${status.archivedDocs}）` },
+        { label: "检索引擎", value: status.engine },
+        { label: "最近入库", value: status.lastIndexedAt ?? "尚无入库记录" },
+      ]
+    : [
+        { label: "已索引案卷", value: loading ? "加载中…" : (error?.message ?? "--") },
+        { label: "检索引擎", value: "--" },
+        { label: "最近入库", value: "--" },
+      ]
 
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-      {stats.map((stat) => (
-        <div key={stat.label} className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
-          <Database className="mt-0.5 size-4 shrink-0 text-signal" aria-hidden="true" />
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="text-xs text-muted-foreground">{stat.label}</span>
-            <span className="text-sm font-medium break-words">{stat.value}</span>
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {stats.map((stat) => (
+          <div key={stat.label} className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
+            <Database className="mt-0.5 size-4 shrink-0 text-signal" aria-hidden="true" />
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{stat.label}</span>
+              <span className="text-sm font-medium break-words">{stat.value}</span>
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      {status && (
+        <p className="font-mono text-xs text-muted-foreground">索引文件：{status.storagePath}</p>
+      )}
     </div>
   )
 }
 
-function ResultCard({
-  result,
-  rank,
-  onLocate,
-}: {
-  result: RagSearchResult
-  rank: number
-  onLocate: LocateHandler
-}) {
+function ResultCard({ hit, rank, onLocate }: { hit: RagHit; rank: number; onLocate: LocateHandler }) {
   return (
     <article className="flex flex-col overflow-hidden rounded-lg border border-border bg-background">
       <div className="relative aspect-video overflow-hidden bg-black">
         <img
-          src={hasMediaSrc(result.thumbnail) ? result.thumbnail : PLACEHOLDER_IMAGE}
-          alt={`${result.channelName} 检索命中关键帧`}
+          src={hit.thumbnailUrl && hasMediaSrc(hit.thumbnailUrl) ? hit.thumbnailUrl : PLACEHOLDER_IMAGE}
+          alt={`${hit.channelName} 检索命中证据帧`}
           className="size-full object-cover"
           onError={handleImageError}
         />
-        <div className="cctv-scanlines pointer-events-none absolute inset-0" aria-hidden="true" />
         <span className="absolute top-2 left-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-xs text-white">
           #{rank}
         </span>
         <Badge className="absolute top-2 right-2 bg-signal font-mono text-black hover:bg-signal">
-          {result.similarityScore.toFixed(1)}% 相似度匹配
+          相关度 {hit.score.toFixed(0)}
         </Badge>
         <span className="absolute right-2 bottom-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[11px] text-white tabular-nums">
-          {result.timeRange}
+          {hit.triggeredAt}
         </span>
       </div>
       <div className="flex flex-1 flex-col gap-3 p-3">
         <div className="flex flex-col gap-0.5">
-          <span className="truncate font-mono text-xs font-medium" title={result.id}>
-            {result.id}
+          <span className="truncate font-mono text-xs font-medium" title={hit.caseId ?? hit.alertId}>
+            {hit.caseId ?? hit.alertId}
           </span>
           <span className="text-xs text-muted-foreground">
-            {result.channelId} · {result.channelName}
+            {hit.channelName}
+            {hit.zone ? ` · ${hit.zone}` : ""} · {hit.ruleName}
           </span>
         </div>
-        <Progress value={result.similarityScore} aria-label={`余弦相似度 ${result.similarityScore.toFixed(1)}%`} />
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="outline">{SEVERITY_LABEL[hit.severity]}</Badge>
+          {hit.hasVlm && (
+            <Badge variant="outline" className="border-signal/50 text-signal">
+              已二级研判
+            </Badge>
+          )}
+          {hit.archived && (
+            <Badge variant="outline" className="gap-1">
+              <Archive className="size-3" aria-hidden="true" />
+              已归档
+            </Badge>
+          )}
+        </div>
+        <Progress value={hit.score} aria-label={`相关度 ${hit.score.toFixed(0)}`} />
         <div className="flex gap-2 rounded-md bg-signal/10 p-2.5 text-xs leading-relaxed">
           <Sparkles className="mt-0.5 size-3.5 shrink-0 text-signal" aria-hidden="true" />
           <p>
-            <span className="font-medium text-signal">匹配原因：</span>
-            {result.matchedText}
+            <span className="font-medium text-signal">匹配内容：</span>
+            {hit.matchedText}
+            {hit.matchedTerms.length > 0 && (
+              <span className="mt-1 block font-mono text-muted-foreground">命中词：{hit.matchedTerms.join("、")}</span>
+            )}
           </p>
         </div>
-        <Button variant="outline" size="sm" className="mt-auto w-full" onClick={() =>
-            onLocate(result.channelId, {
-              timestampSec: defaultIncidentSec(
-                isChannelId(result.channelId) ? result.channelId : "CAM-01",
-                result.matchedText
-              ),
-              label: result.matchedText,
-            })
-          }>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-auto w-full"
+          onClick={() => onLocate(hit.channelId, { label: hit.matchedText })}
+        >
           <MapPin data-icon="inline-start" />
           跳转至监控矩阵定位 (Locate in Monitor)
         </Button>
@@ -116,61 +139,69 @@ function ResultCard({
 
 export function VideoRagStudio({ onLocate }: RagStudioProps) {
   const [query, setQuery] = React.useState("")
-  const [phase, setPhase] = React.useState<SearchPhase>("idle")
-  const [progress, setProgress] = React.useState(0)
-  const [results, setResults] = React.useState<RagSearchResult[]>([])
   const [searched, setSearched] = React.useState("")
-  const timer = React.useRef<ReturnType<typeof setInterval> | null>(null)
+  const [searching, setSearching] = React.useState(false)
+  const [response, setResponse] = React.useState<RagSearchResponse | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const abortRef = React.useRef<AbortController | null>(null)
 
-  React.useEffect(
-    () => () => {
-      if (timer.current) clearInterval(timer.current)
-    },
-    []
+  const { data: statusData, error: statusError, isLoading: statusLoading, mutate: refreshStatus } = useSWR(
+    "/api/v1/rag/search",
+    fetchIndexStatus,
+    { refreshInterval: 30_000 }
   )
 
-  const runSearch = (text: string) => {
+  React.useEffect(() => () => abortRef.current?.abort(), [])
+
+  const runSearch = async (text: string) => {
     const value = text.trim()
-    if (!value || phase === "searching") return
-    if (timer.current) clearInterval(timer.current)
+    if (!value || searching) return
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
 
     setQuery(value)
     setSearched(value)
-    setResults([])
-    setProgress(0)
-    setPhase("searching")
-
-    let current = 0
-    timer.current = setInterval(() => {
-      current = Math.min(100, current + 4 + Math.random() * 4)
-      setProgress(current)
-      if (current >= 100) {
-        if (timer.current) clearInterval(timer.current)
-        timer.current = null
-        setResults(searchCorpus(value))
-        setPhase("done")
-      }
-    }, 70)
+    setSearching(true)
+    setError(null)
+    try {
+      const res = await fetch("/api/v1/rag/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: value, topK: 12 }),
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error(`检索失败（HTTP ${res.status}）`)
+      setResponse((await res.json()) as RagSearchResponse)
+      void refreshStatus()
+    } catch (err) {
+      if (controller.signal.aborted) return
+      setResponse(null)
+      setError(err instanceof Error ? err.message : "检索失败")
+    } finally {
+      if (!controller.signal.aborted) setSearching(false)
+    }
   }
 
-  const stage = SEARCH_STAGES.find((s) => progress < s.until) ?? SEARCH_STAGES[SEARCH_STAGES.length - 1]
+  const hits = response?.hits ?? []
+  const indexEmpty = (statusData?.index.docs ?? 0) === 0
 
   return (
     <Card className="gap-0 py-0">
       <CardHeader className="gap-1 border-b px-4 py-3">
-        <CardTitle className="text-sm">Video-RAG 语义向量检索 (Video-RAG & Semantic Vector Search)</CardTitle>
+        <CardTitle className="text-sm">Video-RAG 案卷检索 (Video-RAG Case Retrieval)</CardTitle>
         <CardDescription className="text-xs">
-          切片经多模态编码后写入向量库，用自然语言即可跨通道、跨时段检索历史视频，无需依赖预设标签。
+          一级初筛命中的告警与二级研判结论会自动合成可检索文本并入库；支持按通道、主体类别和自然语言关键词跨时段检索历史案卷。
         </CardDescription>
       </CardHeader>
       <div className="flex flex-col gap-4 p-4">
-        <IndexStatus />
+        <IndexStatus status={statusData?.index} error={statusError} loading={statusLoading} />
 
         <form
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault()
-            runSearch(query)
+            void runSearch(query)
           }}
         >
           <div className="flex flex-col gap-2 sm:flex-row">
@@ -181,26 +212,26 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
               <InputGroupInput
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="用自然语言描述要找的画面，例如：穿黄色反光衣骑叉车的人"
-                aria-label="自然语言视频检索"
-                disabled={phase === "searching"}
+                placeholder="描述要找的事件，例如：1楼 吸烟、未戴安全帽、跌倒"
+                aria-label="案卷检索"
+                disabled={searching}
               />
             </InputGroup>
-            <Button type="submit" disabled={!query.trim() || phase === "searching"}>
-              <Search data-icon="inline-start" />
-              语义检索
+            <Button type="submit" disabled={!query.trim() || searching}>
+              {searching ? <Spinner data-icon="inline-start" /> : <Search data-icon="inline-start" />}
+              检索
             </Button>
           </div>
-          <div className="flex flex-wrap gap-2" role="group" aria-label="预置检索语句">
-            {RAG_PRESETS.map((preset) => (
+          <div className="flex flex-wrap gap-2" role="group" aria-label="检索示例">
+            {SUGGESTED_QUERIES.map((preset) => (
               <Button
                 key={preset}
                 type="button"
                 variant="outline"
                 size="sm"
                 className="h-auto py-1 text-xs whitespace-normal"
-                onClick={() => runSearch(preset)}
-                disabled={phase === "searching"}
+                onClick={() => void runSearch(preset)}
+                disabled={searching}
               >
                 {preset}
               </Button>
@@ -208,38 +239,51 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
           </div>
         </form>
 
-        {phase === "searching" && (
-          <div className="flex flex-col gap-2 rounded-md border border-border bg-background p-3" role="status">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="font-mono text-signal">{stage.label}</span>
-              <span className="font-mono text-muted-foreground tabular-nums">{Math.round(progress)}%</span>
-            </div>
-            <Progress value={progress} aria-label="向量检索进度" />
-          </div>
+        {error && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive" role="alert">
+            {error}
+          </p>
         )}
 
-        {phase === "done" && results.length > 0 && (
+        {response && hits.length > 0 && (
           <div className="flex flex-col gap-3">
             <p className="text-xs text-muted-foreground">
-              针对「{searched}」，在 {RAG_INDEX.clips.toLocaleString("en-US")} 个切片中命中 {results.length} 条，按余弦相似度降序排列。
+              针对「{searched}」，在 {response.index.docs.toLocaleString("en-US")} 条案卷中命中 {response.total} 条，按相关度降序排列
+              {response.filters.channelNames.length > 0 ? `，已限定通道：${response.filters.channelNames.join("、")}` : ""}。
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
-              {results.map((result, index) => (
-                <ResultCard key={result.id} result={result} rank={index + 1} onLocate={onLocate} />
+              {hits.map((hit, index) => (
+                <ResultCard key={hit.id} hit={hit} rank={index + 1} onLocate={onLocate} />
               ))}
             </div>
           </div>
         )}
 
-        {phase === "done" && results.length === 0 && (
+        {response && hits.length === 0 && (
           <Empty className="border border-dashed">
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <SearchX />
               </EmptyMedia>
-              <EmptyTitle>未检索到相似片段</EmptyTitle>
+              <EmptyTitle>未检索到相关案卷</EmptyTitle>
               <EmptyDescription>
-                没有切片的相似度高于 {RAG_THRESHOLD}% 阈值，请尝试换一种描述，或点击上方的预置语句。
+                {indexEmpty
+                  ? "索引中还没有案卷。一级初筛产生命中告警后会自动入库，也可以先在上方对候选告警执行二级研判。"
+                  : "没有案卷与该描述相关，请换用规则名称、通道名称或行为关键词重试。"}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+
+        {!response && !error && !searching && indexEmpty && !statusLoading && (
+          <Empty className="border border-dashed">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Database />
+              </EmptyMedia>
+              <EmptyTitle>语料库暂无案卷</EmptyTitle>
+              <EmptyDescription>
+                一级初筛命中并落库的告警会自动写入索引，二级研判完成后会补充研判结论。当前尚无可检索内容。
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

@@ -54,9 +54,9 @@ function LocalScreeningPanel() {
 }
 
 function CvLimitationPanel() {
-  const { scenario, activeClip, activeLocal } = useVlm()
+  const { activeCandidate, activeLocal } = useVlm()
   if (activeLocal) return <LocalScreeningPanel />
-  if (!scenario || !activeClip) return null
+  if (!activeCandidate) return null
 
   return (
     <section
@@ -66,15 +66,21 @@ function CvLimitationPanel() {
       <div className="flex items-center justify-between gap-2">
         <h3 id="cv-limit-title" className="flex items-center gap-2 text-sm font-medium">
           <EyeOff className="size-4 text-muted-foreground" aria-hidden="true" />
-          传统 CV 识别局限
+          一级初筛送检来源
         </h3>
-        <Badge variant="outline" className="border-warning/40 text-warning">
-          语义模糊 (Ambiguous)
+        <Badge variant="outline" className="border-primary/40 text-primary">
+          {activeCandidate.ruleName}
         </Badge>
       </div>
-      <p className="text-xs text-muted-foreground">Tier-1 看到了什么 (What Tier-1 Saw)</p>
-      <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs leading-relaxed">{scenario.cvSaw}</p>
-      <p className="text-xs leading-relaxed text-muted-foreground">{scenario.cvNote}</p>
+      <p className="text-xs text-muted-foreground">Tier-1 命中结论 (What Tier-1 Saw)</p>
+      <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs leading-relaxed">
+        {activeCandidate.tier1Summary || "一级初筛未留存结论文本"}
+      </p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {activeCandidate.channelName}
+        {activeCandidate.zone ? ` · ${activeCandidate.zone}` : ""} · {activeCandidate.triggeredAt} · 留存 {activeCandidate.frameCount} 帧证据
+        {activeCandidate.edge ? ` · 边缘轨迹 ${activeCandidate.edge.trackId}（置信度 ${(activeCandidate.edge.edgeConfidence * 100).toFixed(0)}%）` : ""}
+      </p>
     </section>
   )
 }

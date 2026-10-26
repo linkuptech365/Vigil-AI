@@ -31,20 +31,6 @@ export interface VlmReasoningResult {
   tokenUsage: VlmTokenUsage
 }
 
-export interface RagSearchResult {
-  id: string
-  channelId: string
-  channelName: string
-  timeRange: string
-  similarityScore: number
-  thumbnail: string
-  matchedText: string
-}
-
-export interface RagCorpusEntry extends Omit<RagSearchResult, "similarityScore"> {
-  keywords: string[]
-}
-
 export interface VlmScenario {
   title: string
   cvSaw: string

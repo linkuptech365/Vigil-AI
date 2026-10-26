@@ -165,7 +165,7 @@ function stableStringify(value: unknown): string {
 
 /** 研判事实部分的哈希：不含处置过程与封存信息，处置动作不会使它失效。 */
 export function alertRecordHash(alert: StreamAlert) {
-  const { case: _case, seal: _seal, ...facts } = alert
+  const { case: _case, seal: _seal, vlm: _vlm, ...facts } = alert
   return sha256(stableStringify(facts))
 }
 

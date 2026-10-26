@@ -1,4 +1,5 @@
 import type { FineGrainedVerdict } from "@/lib/ops/types"
+import type { VlmFinalResult, VlmMetrics, VlmVerdict } from "@/lib/ops/vlm-api-types"
 
 export const STREAM_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,47}$/i
 export const RESERVED_STREAM_IDS: readonly string[] = ["engine"]
@@ -183,6 +184,23 @@ export interface StreamAnalysisRecord {
   count?: number
 }
 
+/** 二级多模态研判结论（追加写入告警记录，不参与证据封存哈希）。 */
+export interface AlertVlmAnalysis {
+  analyzedAt: string
+  frameCount: number
+  /** 研判所依据的规则来源：规则库当前定义，或告警当时留存的快照 */
+  ruleSource: "rule_library" | "alert_snapshot"
+  result: VlmFinalResult
+  metrics: VlmMetrics
+  verdict: VlmVerdict
+  reasoning: string
+  reasoningChain: string[]
+  /** 二级四要素：动作 / 介质 / 排他结论 */
+  action?: string
+  medium?: string
+  exclusion?: { reason: string; action?: string } | null
+}
+
 export interface StreamAlert {
   id: string
   source: StreamAlertSource
@@ -206,6 +224,8 @@ export interface StreamAlert {
   tags?: string[]
   /** 二级四要素解耦判决（动作 / 介质 / 排他 / 置信度） */
   fine?: FineGrainedVerdict
+  /** 最近一次二级多模态研判结论；刷新页面后仍可回显 */
+  vlm?: AlertVlmAnalysis
   case?: AlertCase
   seal?: EvidenceSeal
 }

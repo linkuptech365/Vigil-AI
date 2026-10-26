@@ -17,10 +17,7 @@ import {
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
-import { CAMERAS } from "@/lib/ops/data"
 import { localSliceLabel } from "@/lib/ops/local-slice"
-import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
-import { FRAME_COUNT, candidateLabel, frameMark, frameTag } from "@/lib/ops/vlm-data"
 import { cn } from "@/lib/utils"
 import { useVlm } from "./vlm-provider"
 
@@ -159,27 +156,34 @@ function StreamOutput() {
   )
 }
 
-function FrameStrip() {
-  const { activeClip, scenario, phase, evidenceFrames } = useVlm()
+function AlertFrameStrip() {
+  const { activeCandidate, phase, evidenceFrames } = useVlm()
   const [selected, setSelected] = React.useState(0)
-  const camera = CAMERAS.find((c) => c.id === activeClip?.cameraId)
 
-  React.useEffect(() => {
-    if (scenario) setSelected(scenario.evidence[0] ?? 0)
-  }, [scenario])
-
-  if (!activeClip || !scenario || !camera) return null
+  if (!activeCandidate) return null
+  if (activeCandidate.frameCount === 0) {
+    return (
+      <div
+        className="flex min-h-24 items-center justify-center rounded-md border border-dashed border-border px-3 py-4 text-xs text-muted-foreground"
+        role="status"
+      >
+        该告警未留存证据帧，二级研判将仅基于一级初筛的规则与结论文本（元数据推理）。
+      </div>
+    )
+  }
 
   const evidence = evidenceFrames ?? []
   const showEvidence = evidence.length > 0
+  const frameUrl = (index: number) =>
+    `/api/v1/stream-alerts/${encodeURIComponent(activeCandidate.alertId)}/frames/${index + 1}`
 
   return (
     <div className="flex flex-col gap-2">
       <ol
         className="grid grid-cols-4 gap-2 md:grid-cols-8"
-        aria-label="送入模型的 8 帧时序关键帧"
+        aria-label={`送入模型的 ${activeCandidate.frameCount} 帧一级初筛留存证据帧`}
       >
-        {Array.from({ length: FRAME_COUNT }, (_, index) => {
+        {Array.from({ length: activeCandidate.frameCount }, (_, index) => {
           const isEvidence = showEvidence && evidence.includes(index)
           const isSelected = selected === index
           return (
@@ -188,9 +192,9 @@ function FrameStrip() {
                 type="button"
                 onClick={() => setSelected(index)}
                 aria-pressed={isSelected}
-                aria-label={`第 ${index + 1} 帧，${frameTag(index)}，${frameMark(index)}${isEvidence ? "，模型引用的关键证据帧" : ""}`}
+                aria-label={`第 ${index + 1} 帧${isEvidence ? "，模型引用的关键证据帧" : ""}`}
                 className={cn(
-                  "group relative block w-full overflow-hidden rounded-md border bg-black text-left outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring",
+                  "relative block w-full overflow-hidden rounded-md border bg-black text-left outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring",
                   isEvidence ? "border-signal ring-2 ring-signal/60" : "border-border",
                   isSelected && !isEvidence && "border-primary",
                   phase === "thinking" && "animate-pulse",
@@ -199,28 +203,15 @@ function FrameStrip() {
                 style={phase === "thinking" ? { animationDelay: `${index * 120}ms` } : undefined}
               >
                 <div className="relative aspect-video overflow-hidden">
-                  <img
-                    src={hasMediaSrc(camera.image) ? camera.image : PLACEHOLDER_IMAGE}
-                    alt=""
-                    onError={handleImageError}
-                    className="size-full object-cover"
-                    style={{
-                      transform: `scale(${1.05 + index * 0.04})`,
-                      transformOrigin: `${28 + index * 6}% 62%`,
-                    }}
-                  />
-                  <div className="cctv-scanlines pointer-events-none absolute inset-0" aria-hidden="true" />
+                  <img src={frameUrl(index)} alt="" loading="lazy" className="size-full object-cover" />
                   <span className="absolute top-1 left-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">
-                    {frameTag(index)}
+                    #{index + 1}
                   </span>
                   {isEvidence && (
                     <span className="absolute top-1 right-1 rounded bg-signal px-1 text-[10px] font-medium text-black">
                       证据
                     </span>
                   )}
-                  <span className="absolute right-1 bottom-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white tabular-nums">
-                    {frameMark(index)}
-                  </span>
                 </div>
               </button>
             </li>
@@ -229,9 +220,11 @@ function FrameStrip() {
       </ol>
       <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
         <span className="font-mono text-foreground">
-          #{selected + 1} · {frameTag(selected)} · {frameMark(selected)}
+          #{selected + 1} / {activeCandidate.frameCount}
         </span>
-        <span>{scenario.captions[selected]}</span>
+        <span>
+          {activeCandidate.caseId ?? activeCandidate.alertId} · {activeCandidate.channelName} · {activeCandidate.ruleName}
+        </span>
         {showEvidence && evidence.includes(selected) && (
           <Badge variant="outline" className="border-signal/50 text-signal">
             模型引用的关键证据
@@ -245,11 +238,6 @@ function FrameStrip() {
 function LocalFrameStrip() {
   const { activeLocal, localFrames, localFramesLoading, localFramesError, phase, evidenceFrames } = useVlm()
   const [selected, setSelected] = React.useState(0)
-  const sliceId = activeLocal?.id
-
-  React.useEffect(() => {
-    setSelected(0)
-  }, [sliceId])
 
   if (!activeLocal) return null
 
@@ -345,7 +333,9 @@ export function VlmInferenceRunner() {
     model,
     setModelId,
     candidates,
-    activeClip,
+    candidatesLoading,
+    candidatesError,
+    activeCandidate,
     setClipId,
     selectionId,
     localSlices,
@@ -355,7 +345,7 @@ export function VlmInferenceRunner() {
     run,
   } = useVlm()
   const busy = phase === "thinking" || phase === "streaming"
-  const hasSelection = !!activeClip || !!activeLocal
+  const hasSelection = !!activeCandidate || !!activeLocal
 
   return (
     <Card className="gap-0 py-0">
@@ -365,7 +355,7 @@ export function VlmInferenceRunner() {
           多模态推理跑道 (VLM Inference Runway)
         </CardTitle>
         <CardDescription className="text-xs">
-          从实时通道候选或本地视频切片中选取一项，按时序抽取关键帧连同初筛元数据送入多模态大模型。
+          从一级初筛真实命中的告警（含留存证据帧）或本地视频切片中选取一项，连同命中规则与初筛结论送入多模态大模型；研判结论会写回案卷并入库检索索引。
         </CardDescription>
       </CardHeader>
       <div className="flex flex-col gap-4 p-4">
@@ -386,15 +376,21 @@ export function VlmInferenceRunner() {
           </Select>
           <Select value={selectionId ?? ""} onValueChange={setClipId} disabled={busy}>
             <SelectTrigger size="sm" className="w-full min-w-0 xl:flex-1" aria-label="选择待研判的候选切片">
-              <SelectValue placeholder="暂无可研判的候选切片" />
+              <SelectValue
+                placeholder={
+                  candidatesLoading
+                    ? "正在加载一级初筛命中告警…"
+                    : (candidatesError ?? "暂无候选：一级初筛尚未产生已落库的命中告警")
+                }
+              />
             </SelectTrigger>
             <SelectContent>
               {candidates.length > 0 && (
                 <SelectGroup>
-                  <SelectLabel>实时通道候选</SelectLabel>
-                  {candidates.map((clip) => (
-                    <SelectItem key={clip.id} value={clip.id}>
-                      {candidateLabel(clip)}
+                  <SelectLabel>一级初筛命中告警（实时通道）</SelectLabel>
+                  {candidates.map((item) => (
+                    <SelectItem key={item.alertId} value={item.alertId}>
+                      {`${item.caseId ?? item.alertId}: ${item.channelName} · ${item.ruleName}${item.vlm ? "（已研判）" : ""}`}
                     </SelectItem>
                   ))}
                 </SelectGroup>
@@ -419,7 +415,11 @@ export function VlmInferenceRunner() {
           </p>
         </div>
 
-        {activeLocal ? <LocalFrameStrip /> : <FrameStrip />}
+        {activeLocal ? (
+          <LocalFrameStrip key={activeLocal.id} />
+        ) : (
+          <AlertFrameStrip key={activeCandidate?.alertId ?? "none"} />
+        )}
 
         <div className="flex items-center gap-3">
           <Button onClick={run} disabled={busy || !hasSelection || localFramesLoading}>

@@ -79,15 +79,34 @@ function parseChunk(data: string): VlmStreamChunk | null {
   }
 }
 
-export async function streamVlmAnalyze(
+export function streamVlmAnalyze(
   request: VlmAnalyzeRequest,
   onChunk: (chunk: VlmStreamChunk) => void,
   signal?: AbortSignal
 ) {
-  const response = await fetch(ENDPOINT, {
+  return streamSse(ENDPOINT, { ...request, stream: true }, onChunk, signal)
+}
+
+/** 对一级初筛已落库的告警做二级研判：服务端读取留存证据帧与规则，结论写回告警并入库检索索引。 */
+export function streamAlertAnalyze(
+  alertId: string,
+  modelProfileId: string,
+  onChunk: (chunk: VlmStreamChunk) => void,
+  signal?: AbortSignal
+) {
+  return streamSse(`/api/v1/vlm/candidates/${encodeURIComponent(alertId)}/analyze`, { modelProfileId }, onChunk, signal)
+}
+
+async function streamSse(
+  endpoint: string,
+  payload: unknown,
+  onChunk: (chunk: VlmStreamChunk) => void,
+  signal?: AbortSignal
+) {
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ ...request, stream: true }),
+    body: JSON.stringify(payload),
     signal,
   })
   if (!response.ok || !response.body) throw new Error(await readErrorMessage(response))
