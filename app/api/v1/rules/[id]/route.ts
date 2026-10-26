@@ -1,5 +1,7 @@
 import type { DeleteRuleResponse, UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
+import { parsePipeline } from "@/lib/ops/rule-pipeline"
+import { pushConfig } from "@/lib/vision-engine"
 import { ALL_CHANNELS, COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
 import { deleteRule, listRules, updateRule } from "@/lib/ops/server/rule-engine"
@@ -84,6 +86,17 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     }
   }
 
+  const { pipeline } = body.value
+  if (pipeline !== undefined) {
+    if (pipeline === null) {
+      patch.pipeline = null
+    } else {
+      const parsed = parsePipeline(pipeline)
+      if (!parsed.ok) return jsonError(400, "INVALID_REQUEST", parsed.message)
+      patch.pipeline = parsed.value
+    }
+  }
+
   if (Object.keys(patch).length === 0) {
     return jsonError(400, "INVALID_REQUEST", "没有可更新的字段")
   }
@@ -95,6 +108,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     return persistFailure(error)
   }
   if (!rule) return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
+
+  // 管道、启用状态、绑定通道变化后立即热更新到视觉 Worker；内容未变化时会被去重跳过
+  if (patch.pipeline !== undefined || patch.enabled !== undefined || patch.boundChannels !== undefined) {
+    await pushConfig().catch(() => null)
+  }
 
   const response: UpdateRuleResponse = { rule, rules: listRules() }
   return jsonOk(response)

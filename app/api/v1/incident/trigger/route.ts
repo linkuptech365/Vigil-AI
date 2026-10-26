@@ -49,6 +49,8 @@ export async function POST(request: Request) {
       modelProfileId: typeof body?.modelProfileId === "string" ? body.modelProfileId : undefined,
       edge: { trackId, edgeConfidence, label: typeof body?.label === "string" ? body.label.slice(0, 60) : undefined },
       explore: parseExploreHint(body),
+      ruleId: typeof body?.ruleId === "string" && body.ruleId ? body.ruleId.slice(0, 64) : undefined,
+      shadowReview: body?.shadowReview === true,
       requestHost: request.headers.get("host"),
       signal: request.signal,
     })

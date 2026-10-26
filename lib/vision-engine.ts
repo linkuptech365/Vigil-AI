@@ -5,6 +5,8 @@ import path from "node:path"
 
 import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/python-runtime.mjs"
 import { channelVocabularies } from "@/lib/ops/server/channel-perception"
+import type { RulePipelineConfig } from "@/lib/ops/types"
+import { loadRules } from "@/lib/storage/rules-store"
 import { loadZones } from "@/lib/storage/roi-store"
 import { loadVisionConfig } from "@/lib/storage/vision-store"
 import { loadStreams } from "@/lib/storage/streams-store"
@@ -430,6 +432,18 @@ function workerLearning(): Record<string, WorkerLearning> {
   return out
 }
 
+/** 只下发启用且配置了通用管道的规则；boundChannels 决定管道在哪些通道上生效（ALL = 全部）。 */
+function workerRulePipelines() {
+  return loadRules()
+    .filter((rule) => rule.enabled && rule.pipeline)
+    .map((rule) => ({
+      ...(rule.pipeline as RulePipelineConfig),
+      id: rule.id,
+      name: rule.name,
+      boundChannels: rule.boundChannels ?? ["ALL"],
+    }))
+}
+
 function buildPayload(config: VisionConfig) {
   return {
     enabled: config.enabled,
@@ -445,6 +459,7 @@ function buildPayload(config: VisionConfig) {
     zones: workerZones(),
     streamIds: monitoredStreamIds(),
     learning: workerLearning(),
+    rulePipelines: workerRulePipelines(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),
   }

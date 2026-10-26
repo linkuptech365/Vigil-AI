@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import { pipelineVlmContext } from "@/lib/ops/rule-pipeline"
 import type { VlmFinalResult, VlmKeyframeInput, VlmMetrics, VlmPromptRule, VlmVerdict } from "@/lib/ops/vlm-api-types"
 import { MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
@@ -43,6 +44,10 @@ export interface AnalyzeStreamOptions {
   edge?: { trackId: string; edgeConfidence: number; label?: string }
   /** 冷启动探索：通道尚无 spatial_hotspot 锚点，行为主体在同一区域停留后发起的首次研判 */
   explore?: ExploreHint
+  /** 由规则管道门禁放行的事件：只用该规则研判，避免无关规则抢占结论 */
+  ruleId?: string
+  /** 管道开启「静默存疑审计」且边缘置信度不足：命中也只记审计，不发正式告警 */
+  shadowReview?: boolean
   requestHost: string | null
   signal: AbortSignal
 }
@@ -162,15 +167,23 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   const profile = resolveProfile(options.modelProfileId)
 
   const tuning = learnedRuleTuning(meta.id)
-  const promptRules: VlmPromptRule[] = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id }).map((rule) => ({
-    id: rule.id,
-    name: rule.name,
-    description: ruleDescription(rule),
-    sensitivity: Math.min(0.98, Math.round((ruleSensitivity(rule) + (tuning.sensitivityBoost[rule.id] ?? 0)) * 100) / 100),
-    severity: rule.severity,
-    cooldownSeconds: rule.cooldownSeconds,
-    exclusions: [...new Set([...(rule.exclusions ?? []), ...tuning.exclusions])],
-  }))
+  const boundRules = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id })
+  const scopedRules = options.ruleId && boundRules.some((rule) => rule.id === options.ruleId)
+    ? boundRules.filter((rule) => rule.id === options.ruleId)
+    : boundRules
+  const promptRules: VlmPromptRule[] = scopedRules.map((rule) => {
+    const vlm = pipelineVlmContext(rule.pipeline)
+    const base = ruleDescription(rule)
+    return {
+      id: rule.id,
+      name: rule.name,
+      description: vlm.intent ? `${base}\n核心违规意图：${vlm.intent}` : base,
+      sensitivity: Math.min(0.98, Math.round((ruleSensitivity(rule) + (tuning.sensitivityBoost[rule.id] ?? 0)) * 100) / 100),
+      severity: rule.severity,
+      cooldownSeconds: rule.cooldownSeconds,
+      exclusions: [...new Set([...(rule.exclusions ?? []), ...vlm.exclusions, ...tuning.exclusions])],
+    }
+  })
   if (promptRules.length === 0) {
     throw new StreamAnalysisError("该通道没有生效的稽查规则，请在规则库中把规则绑定到「全部视频源」", 409, "NO_RULES")
   }
@@ -240,8 +253,9 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   let alert: StreamAlert | null = null
   const hit = verdict.triggered && result.ruleId
   const folded = verdict.suppression?.suppressed === true
+  const shadowed = Boolean(hit) && !folded && options.shadowReview === true
 
-  if (hit && !folded) {
+  if (hit && !folded && !shadowed) {
     const created: StreamAlert = {
       id: randomUUID(),
       source: options.source,
@@ -288,14 +302,16 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     streamId: meta.id,
     streamName: meta.name,
     source: options.source,
-    outcome: alert ? "alert" : hit ? "folded" : verdict.excluded ? "blocked" : verdict.shadowReview ? "shadow" : "safe",
+    outcome: alert ? "alert" : shadowed ? "shadow" : hit ? "folded" : verdict.excluded ? "blocked" : verdict.shadowReview ? "shadow" : "safe",
     ruleName: hit ? result.ruleTriggered : undefined,
     confidence: result.confidence,
     summary,
     fine: result.fine,
     reason: alert
       ? undefined
-      : hit
+      : shadowed
+        ? "规则开启静默存疑审计，边缘置信度处于模糊区间：复核结论已留痕，未产生正式告警"
+        : hit
         ? `防抖冷却窗口（${verdict.suppression?.windowSeconds ?? "-"} 秒）内重复触发，已折叠进既有事件证据链，不重复发告警`
         : verdict.excluded
           ? `二级复核命中排他反例：${verdict.excluded.reason}${verdict.excluded.action ? `（动作：${verdict.excluded.action}）` : ""}，已拦截`

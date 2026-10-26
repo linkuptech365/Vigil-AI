@@ -1,3 +1,5 @@
+import type { RulePipelineConfig } from "./types"
+
 export type InspectionRuleType = "GEOMETRIC" | "THRESHOLD" | "PROMPT_SEMANTIC"
 export type RuleSeverity = "INFO" | "WARNING" | "CRITICAL"
 export type RuleSchedule = "24x7" | "NIGHT_ONLY" | "WORK_HOURS"
@@ -20,6 +22,8 @@ export interface InspectionRule {
   sensitivity?: number
   /** 规则自带的明确排除场景（如"猫在喝水"），二级研判必须逐条比对 */
   exclusions?: string[]
+  /** 通用 4 阶段解耦管道；存在即启用，由边缘视觉 Worker 逐级门禁、VLM 最终裁决 */
+  pipeline?: RulePipelineConfig
   actions?: Record<RuleActionKey, boolean>
 }
 

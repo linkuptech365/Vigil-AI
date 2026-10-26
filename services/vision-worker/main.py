@@ -55,6 +55,10 @@ EXPLORE_COOLDOWN = 120.0  # 冷启动探索被二级驳回后的最短重试间�
 EXPLORE_RADIUS = 150.0  # 探索确认后默认下发的锚点半径
 MAX_LEARNED_TAGS = 6
 ROLES = (ROLE_ANCHOR, ROLE_PPE, ROLE_HAZARD, ROLE_SUBJECT, ROLE_CONTEXT)
+# 规则管道专用类别：只供管道门禁匹配，不参与 PPE / 关系 / 锚点 / 围栏等既有判定，避免通用类别误触发旧逻辑
+ROLE_PIPE = "pipeline_class"
+WILDCARD = "*"
+PIPE_CELL = 250.0  # 无 track_id 的主体按 0-1000 坐标的 250 网格划分冷却单元
 
 ROLE_COLORS = {  # BGR
     ROLE_ANCHOR: (255, 140, 30),
@@ -112,6 +116,39 @@ class LearningItem(BaseModel):
     anchor: LearnAnchorItem | None = None
 
 
+class PerceptionGate(BaseModel):
+    subject_classes: list[str] = Field(default_factory=lambda: ["person"])
+    require_roi: bool = False
+    bound_roi_ids: list[str] = Field(default_factory=list)
+    hand_pose_filter: str = "NONE"
+
+
+class InteractionGate(BaseModel):
+    require_context_object: bool = False
+    context_classes: list[str] = Field(default_factory=list)
+    max_interaction_distance: float | None = None
+
+
+class VlmArbitration(BaseModel):
+    system_intent_prompt: str = ""
+    negative_exclusions: list[str] = Field(default_factory=list)
+
+
+class Throttling(BaseModel):
+    track_cooldown_seconds: float = 90.0
+    enable_shadow_review: bool = False
+
+
+class PipelineItem(BaseModel):
+    id: str
+    name: str = ""
+    boundChannels: list[str] = Field(default_factory=lambda: ["ALL"])
+    perception_gate: PerceptionGate = Field(default_factory=PerceptionGate)
+    interaction_gate: InteractionGate = Field(default_factory=InteractionGate)
+    vlm_arbitration: VlmArbitration = Field(default_factory=VlmArbitration)
+    throttling: Throttling = Field(default_factory=Throttling)
+
+
 class ReloadRequest(BaseModel):
     enabled: bool = True
     sampleFps: float = 2.0
@@ -126,6 +163,7 @@ class ReloadRequest(BaseModel):
     zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
     learning: dict[str, LearningItem] = Field(default_factory=dict)
+    rulePipelines: list[PipelineItem] = Field(default_factory=list)
     go2rtcUrl: str = "http://127.0.0.1:1984"
     triggerUrl: str = ""
 
@@ -145,6 +183,7 @@ class Config:
     trigger_url: str = ""
     zones: list[dict[str, Any]] = field(default_factory=list)
     learning: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pipelines: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -168,6 +207,9 @@ class Suspect:
     anchor: bool = False  # 由记忆锚点靠近触发
     explore: bool = False  # 冷启动探索：主体在同一区域停留，但伴生物体未检出
     hint: dict[str, Any] | None = None  # 探索时随送审附带的空间线索（center/radius/subject）
+    cooldown: float | None = None  # 覆盖全局冷却（规则管道按规则配置的 track_cooldown_seconds）
+    rule_id: str | None = None  # 规则管道放行的事件：送审时只用该规则研判
+    shadow: bool = False  # 规则管道开启静默存疑审计且置信度模糊：复核结果只留痕不告警
 
 
 @dataclass
@@ -839,7 +881,7 @@ def zone_suspects(
                             key=f"zone:{zone['id']}:s{index}",
                             track_id=None,
                             conf=round(subject.conf, 3),
-                            reasons=[f"{label_of(subject.prompt, sid)} 进����子围栏：{zone.get('name') or zone['id']}"],
+                            reasons=[f"{label_of(subject.prompt, sid)} 进�����子围栏：{zone.get('name') or zone['id']}"],
                         )
                     )
         if "person" not in targets:
@@ -882,6 +924,156 @@ def zone_suspects(
     if side_store is not None and len(side_store) > 400:
         side_store.clear()
     return suspects
+
+
+# --------------------------------------------------------------------------- #
+# 通用规则管道：门禁式逐级阻断（主体 → 空间 → 伴生物体 → 冷却 → 送审）
+# --------------------------------------------------------------------------- #
+def norm_class(text: str) -> str:
+    return " ".join(str(text).split()).lower()
+
+
+def pipelines_for(sid: str) -> list[dict[str, Any]]:
+    return [p for p in RT.cfg.pipelines if "ALL" in p["channels"] or sid in p["channels"]]
+
+
+def matches_class(det: Det, classes: list[str]) -> bool:
+    """类别匹配：词表原文（忽略大小写）命中；person 兼容人员锚点；* 匹配任意主体/人员。"""
+    prompt = norm_class(det.prompt)
+    for raw in classes:
+        wanted = norm_class(raw)
+        if wanted == WILDCARD and det.role in (ROLE_ANCHOR, ROLE_SUBJECT, ROLE_PIPE):
+            return True
+        if wanted == prompt or (wanted == "person" and det.role == ROLE_ANCHOR):
+            return True
+    return False
+
+
+def box_center_norm(det: Det, shape: tuple[int, int]) -> tuple[float, float]:
+    height, width = shape
+    return (
+        (det.box[0] + det.box[2]) / 2 / max(1, width) * 1000.0,
+        (det.box[1] + det.box[3]) / 2 / max(1, height) * 1000.0,
+    )
+
+
+def box_hits_polygon(det: Det, polygon: list[list[float]], shape: tuple[int, int]) -> bool:
+    """框中心、脚点、四角任一落入围栏，或围栏顶点落入框内，即视为相交（围栏坐标为 0-100 百分比）。"""
+    height, width = shape
+    x1, y1, x2, y2 = (det.box[0] / max(1, width) * 100.0, det.box[1] / max(1, height) * 100.0,
+                      det.box[2] / max(1, width) * 100.0, det.box[3] / max(1, height) * 100.0)
+    probes = [((x1 + x2) / 2, (y1 + y2) / 2), ((x1 + x2) / 2, y2), (x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+    if any(point_in_polygon(px, py, polygon) for px, py in probes):
+        return True
+    return any(x1 <= vx <= x2 and y1 <= vy <= y2 for vx, vy in polygon)
+
+
+def hand_elevated(hand: Det, dets: list[Det]) -> bool:
+    """手部抬起/探出的几何近似：手中心高于最近人员框的腰线（框顶 + 55% 高度）；画面无人员则不放行。"""
+    hx, hy = (hand.box[0] + hand.box[2]) / 2, (hand.box[1] + hand.box[3]) / 2
+    persons = [d for d in dets if d.role == ROLE_ANCHOR and d.conf >= RT.cfg.low]
+    if not persons:
+        return False
+    nearest = min(persons, key=lambda p: math.hypot((p.box[0] + p.box[2]) / 2 - hx, (p.box[1] + p.box[3]) / 2 - hy))
+    waist = nearest.box[1] + 0.55 * (nearest.box[3] - nearest.box[1])
+    return hy <= waist
+
+
+def pipeline_track_key(rule_id: str, subject: Det, shape: tuple[int, int], index: int) -> str:
+    if subject.track_id is not None:
+        return f"pipe:{rule_id}:t{subject.track_id}"
+    cx, cy = box_center_norm(subject, shape)
+    return f"pipe:{rule_id}:{norm_class(subject.prompt)}@{int(cx // PIPE_CELL)}_{int(cy // PIPE_CELL)}"
+
+
+def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: StreamState, now: float) -> list[Suspect]:
+    """逐条规则管道、逐级门禁：前置不满足直接跳过，不产生任何后续算力与 VLM 开销。"""
+    pipelines = pipelines_for(sid)
+    if not pipelines:
+        return []
+    low = RT.cfg.low
+    live = [d for d in dets if passes(d, low)]
+    result: list[Suspect] = []
+    for pipe in pipelines:
+        rule_id, name = pipe["id"], pipe["name"] or pipe["id"]
+        # 阶段 1：主体检查
+        subjects = [d for d in live if matches_class(d, pipe["subject_classes"])]
+        if not subjects:
+            continue
+        # 阶段 1：手部姿态（仅作用于手部类主体，其余主体不受影响）
+        if pipe["hand_pose_filter"] == "HAND_ELEVATED":
+            subjects = [
+                d for d in subjects
+                if not ("hand" in norm_class(d.prompt)) or hand_elevated(d, dets)
+            ]
+            if not subjects:
+                continue
+        # 阶段 1：空间相交
+        zone_note = ""
+        if pipe["require_roi"]:
+            bound = set(pipe["bound_roi_ids"])
+            polygons = [
+                z for z in zones_for(sid)
+                if z.get("type") == "polygon" and len(z.get("coordinates") or []) >= 3 and (not bound or z["id"] in bound)
+            ]
+            hit_subjects: list[Det] = []
+            for subject in subjects:
+                for zone in polygons:
+                    if box_hits_polygon(subject, zone["coordinates"], shape):
+                        hit_subjects.append(subject)
+                        zone_note = f"进入围栏「{zone.get('name') or zone['id']}」"
+                        break
+            subjects = hit_subjects
+            if not subjects:
+                continue
+        # 阶段 2：伴生物体与接触判定
+        contexts: list[Det] = []
+        if pipe["require_context_object"]:
+            context_roles = (ROLE_PIPE, ROLE_CONTEXT, ROLE_SUBJECT, ROLE_HAZARD)
+            contexts = [d for d in live if d.role in context_roles and matches_class(d, pipe["context_classes"])]
+            if not contexts:
+                continue
+        for index, subject in enumerate(subjects):
+            pair_conf = subject.conf
+            pair_note = ""
+            if pipe["require_context_object"]:
+                limit = pipe["max_interaction_distance"]
+                best: tuple[Det, float] | None = None
+                scx, scy = box_center_norm(subject, shape)
+                for other in contexts:
+                    if other is subject:
+                        continue
+                    if limit is not None:
+                        ocx, ocy = box_center_norm(other, shape)
+                        dist = math.hypot(scx - ocx, scy - ocy)
+                        if dist > limit and iou(subject.box, other.box) <= 0:
+                            continue
+                    elif proximity(subject, other) is None:
+                        continue
+                    if best is None or other.conf > best[0].conf:
+                        best = (other, other.conf)
+                if best is None:
+                    continue
+                pair_conf = min(subject.conf, best[1])
+                pair_note = f" 与 {label_of(best[0].prompt, sid)} 接触"
+            # 阶段 4：同一主体冷却抑制（先于切片截取与送审）
+            key = pipeline_track_key(rule_id, subject, shape, index)
+            if st.cooldown.get(key, 0.0) > now:
+                RT.stats.cooldown_suppressed += 1
+                continue
+            shadow = bool(pipe["enable_shadow_review"]) and pair_conf < RT.cfg.high
+            result.append(
+                Suspect(
+                    key=key,
+                    track_id=subject.track_id,
+                    conf=round(pair_conf, 3),
+                    reasons=[f"规则「{name}」门禁通过：{label_of(subject.prompt, sid)}{zone_note}{pair_note}"],
+                    cooldown=pipe["track_cooldown_seconds"],
+                    rule_id=rule_id,
+                    shadow=shadow,
+                )
+            )
+    return result
 
 
 def draw_zones(canvas: np.ndarray, zones: list[dict[str, Any]]) -> None:
@@ -1032,6 +1224,8 @@ def push_event(event: dict[str, Any], frames: list[str]) -> None:
         "keyframesBase64": frames,
         "explore": bool(event.get("explore")),
         "hint": event.get("hint"),
+        "ruleId": event.get("ruleId"),
+        "shadowReview": bool(event.get("shadow")),
     }
     try:
         response = httpx.post(url, json=body, headers=headers, timeout=httpx.Timeout(170.0, connect=5.0))
@@ -1160,6 +1354,7 @@ def scan_stream(sid: str) -> None:
             suspects.append(hit)
     suspects.extend(explore_suspects(sid, dets, image.shape[:2], st, relation_keys))
     suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
+    suspects.extend(pipeline_suspects(sid, dets, image.shape[:2], st, now))
     st.last_had_person = persons > 0 or any(d.role == ROLE_SUBJECT and passes(d, cfg.low) for d in dets)
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
@@ -1217,7 +1412,10 @@ def scan_stream(sid: str) -> None:
     frames = [base64.b64encode(raw).decode("ascii") for raw in list(st.ring)[-4:]]
     frames.append(base64.b64encode(annotated).decode("ascii"))
     for suspect in triggered:
-        st.cooldown[suspect.key] = now + (max(cfg.cooldown, EXPLORE_COOLDOWN) if suspect.explore else cfg.cooldown)
+        if suspect.cooldown is not None:
+            st.cooldown[suspect.key] = now + suspect.cooldown
+        else:
+            st.cooldown[suspect.key] = now + (max(cfg.cooldown, EXPLORE_COOLDOWN) if suspect.explore else cfg.cooldown)
         RT.stats.tier2_triggered += 1
         event = {
             "id": uuid.uuid4().hex[:12],
@@ -1232,6 +1430,8 @@ def scan_stream(sid: str) -> None:
             "alertId": None,
             "explore": suspect.explore,
             "hint": suspect.hint,
+            "ruleId": suspect.rule_id,
+            "shadow": suspect.shadow,
         }
         RT.events.appendleft(event)
         log_hit(st, tags, suspect.reasons, "escalated", event_id=event["id"], anchor=suspect.anchor, explore=suspect.explore)
@@ -1391,6 +1591,28 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
             for z in req.zones
             if z.type in ("polygon", "tripwire") and z.cameraId
         ],
+        pipelines=[
+            {
+                "id": p.id,
+                "name": p.name,
+                "channels": [c for c in p.boundChannels if c] or ["ALL"],
+                "subject_classes": [c for c in (norm_class(x) for x in p.perception_gate.subject_classes) if c],
+                "require_roi": p.perception_gate.require_roi,
+                "bound_roi_ids": [r for r in p.perception_gate.bound_roi_ids if r],
+                "hand_pose_filter": p.perception_gate.hand_pose_filter,
+                "require_context_object": p.interaction_gate.require_context_object,
+                "context_classes": [c for c in (norm_class(x) for x in p.interaction_gate.context_classes) if c],
+                "max_interaction_distance": (
+                    min(1000.0, max(0.0, p.interaction_gate.max_interaction_distance))
+                    if p.interaction_gate.max_interaction_distance is not None
+                    else None
+                ),
+                "track_cooldown_seconds": min(3600.0, max(0.0, p.throttling.track_cooldown_seconds)),
+                "enable_shadow_review": p.throttling.enable_shadow_review,
+            }
+            for p in req.rulePipelines
+            if p.perception_gate.subject_classes
+        ],
     )
     def build_context(items: list[VocabItem]) -> tuple[list[str], dict[str, str], dict[str, str]]:
         prompts: list[str] = []
@@ -1420,6 +1642,25 @@ def config_reload(req: ReloadRequest) -> dict[str, Any]:
             prompts, roles, labels = list(default_prompts), dict(default_roles), dict(default_labels)
             channel_source[sid] = "default"
         channel_contexts[sid], channel_roles[sid], channel_labels[sid] = prompts, roles, labels
+    # 管道用到的主体/伴生类别并入对应通道词表（角色 ROLE_PIPE，不触发既有判定）；词表里已有的类别不重复添加
+    for pipe in cfg.pipelines:
+        wanted = [c for c in [*pipe["subject_classes"], *pipe["context_classes"]] if c and c != WILDCARD]
+        targets = cfg.stream_ids if "ALL" in pipe["channels"] else [s for s in pipe["channels"] if s in channel_contexts]
+        for sid in targets:
+            if sid not in channel_contexts:
+                channel_contexts[sid], channel_roles[sid], channel_labels[sid] = (
+                    list(default_prompts), dict(default_roles), dict(default_labels),
+                )
+                channel_source[sid] = "default"
+            prompts, roles, labels = channel_contexts[sid], channel_roles[sid], channel_labels[sid]
+            lowered = {norm_class(p): p for p in prompts}
+            for cls in wanted:
+                if cls in lowered or (cls == "person" and ROLE_ANCHOR in roles.values()):
+                    continue
+                prompts.append(cls)
+                roles[cls] = ROLE_PIPE
+                labels[cls] = cls
+                lowered[cls] = cls
     learned_conf: dict[tuple[str, str], float] = {}
     for sid, item in req.learning.items():
         tag_count = 0

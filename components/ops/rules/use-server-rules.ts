@@ -13,6 +13,7 @@ import type {
 import { RULES_ENDPOINT, errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
 import { loadStoredRules, saveStoredRules } from "@/lib/ops/storage/audit-storage"
+import type { RulePipelineConfig } from "@/lib/ops/types"
 
 export interface CustomRuleInput {
   name: string
@@ -25,11 +26,17 @@ export interface CustomRuleInput {
 const NO_RULES: InspectionRule[] = []
 
 /** description 是 VLM 语义判定依据：语义规则落到 prompt，确定性规则落到 logic。 */
-export type RulePatch = Partial<InspectionRule> & { description?: string }
+export type RulePatch = Partial<Omit<InspectionRule, "pipeline">> & {
+  description?: string
+  /** null 表示关闭通用管道 */
+  pipeline?: RulePipelineConfig | null
+}
 
 function applyPatch(rule: InspectionRule, patch: RulePatch): InspectionRule {
-  const { description, ...rest } = patch
-  const next = { ...rule, ...rest }
+  const { description, pipeline, ...rest } = patch
+  const next: InspectionRule = { ...rule, ...rest }
+  if (pipeline === null) delete next.pipeline
+  else if (pipeline !== undefined) next.pipeline = pipeline
   if (description !== undefined) {
     if (rule.type === "PROMPT_SEMANTIC") next.prompt = description
     else next.logic = description

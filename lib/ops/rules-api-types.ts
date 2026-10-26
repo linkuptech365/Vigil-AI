@@ -7,6 +7,7 @@ import type {
   RuleSchedule,
   RuleSeverity,
 } from "./rules-types"
+import type { RulePipelineConfig } from "./types"
 
 export type EvaluateSeverity = RuleSeverity | "SAFE"
 export type CollisionType = "ROI_POLYGON" | "TRIPWIRE" | "VLM_SEMANTIC" | "NONE"
@@ -184,6 +185,7 @@ export interface CreateRuleRequest {
   /** 缺省为 ["ALL"]（全部视频源）；可指定机位 ID，或 "ALL" / "LOCAL" */
   boundChannels?: string[]
   severity?: RuleSeverity
+  pipeline?: RulePipelineConfig
 }
 
 export interface CreateRuleResponse extends RulesListResponse {
@@ -202,6 +204,8 @@ export interface UpdateRuleRequest {
   actions?: Record<RuleActionKey, boolean>
   /** VLM 语义判定依据；语义规则写入 prompt，确定性规则写入 logic */
   description?: string
+  /** 通用管道配置；传 null 表示关闭管道。id / name 以规则自身为准 */
+  pipeline?: RulePipelineConfig | null
 }
 
 export interface UpdateRuleResponse extends RulesListResponse {

@@ -1,4 +1,5 @@
 import { CAMERAS } from "@/lib/ops/data"
+import type { RulePipelineConfig } from "@/lib/ops/types"
 import { INITIAL_ZONES } from "@/lib/ops/perception-data"
 import { SEVERITY_RANK, SOURCE_ALL, bindsSource, ruleSensitivity } from "@/lib/ops/rule-binding"
 import type { RoiZone } from "@/lib/ops/perception-types"
@@ -237,7 +238,13 @@ function cloneRule(rule: InspectionRule): InspectionRule {
     ...rule,
     boundChannels: [...rule.boundChannels],
     actions: rule.actions ? { ...rule.actions } : undefined,
+    pipeline: rule.pipeline ? structuredClone(rule.pipeline) : undefined,
   }
+}
+
+/** 管道的 id / name 永远跟随所属规则，避免客户端伪造。 */
+function bindPipeline(rule: Pick<InspectionRule, "id" | "name">, pipeline: RulePipelineConfig): RulePipelineConfig {
+  return { ...structuredClone(pipeline), id: rule.id, name: rule.name }
 }
 
 /** 先写盘、成功后再替换内存状态，写盘失败时内存与文件保持一致并向上抛出。 */
@@ -268,6 +275,7 @@ export function createCustomRule(input: CreateRuleRequest): InspectionRule {
     sensitivity: input.sensitivity,
     actions: { ...input.actions },
   }
+  if (input.pipeline) rule.pipeline = bindPipeline(rule, input.pipeline)
   commitRules(state, [...state.rules, rule])
   return cloneRule(rule)
 }
@@ -289,6 +297,8 @@ export function updateRule(ruleId: string, patch: UpdateRuleRequest): Inspection
     if (rule.type === "PROMPT_SEMANTIC") rule.prompt = patch.description
     else rule.logic = patch.description
   }
+  if (patch.pipeline === null) delete rule.pipeline
+  else if (patch.pipeline !== undefined) rule.pipeline = bindPipeline(rule, patch.pipeline)
 
   commitRules(
     state,
@@ -319,7 +329,7 @@ export function resetRules(): InspectionRule[] {
   return listRules()
 }
 
-/** 载入 GMP 洁净室标准预设：已存在的同 ID 规则恢复为预设值并启用，缺失的补入；其他规则不动。 */
+/** 载入 GMP 洁净室标准预设：已存在的同 ID 规则恢复为预设值并启用，缺失的补入；���他规则不动。 */
 export function applyGmpPreset(): InspectionRule[] {
   const state = engine()
   const presets = new Map(GMP_CLEANROOM_RULES.map((rule) => [rule.id, cloneRule(rule)]))

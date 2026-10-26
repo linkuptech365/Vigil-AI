@@ -1,5 +1,6 @@
 import type { CreateRuleRequest, CreateRuleResponse, RulesListResponse } from "@/lib/ops/rules-api-types"
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
+import { parsePipeline } from "@/lib/ops/rule-pipeline"
 import { ALL_CHANNELS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSeverity } from "@/lib/ops/rules-types"
 import { createCustomRule, listRules } from "@/lib/ops/server/rule-engine"
@@ -59,7 +60,15 @@ export async function POST(request: Request) {
     return jsonError(400, "INVALID_REQUEST", "severity 必须是 INFO、WARNING 或 CRITICAL")
   }
 
+  let pipeline: CreateRuleRequest["pipeline"]
+  if (body.value.pipeline !== undefined) {
+    const parsed = parsePipeline(body.value.pipeline)
+    if (!parsed.ok) return jsonError(400, "INVALID_REQUEST", parsed.message)
+    pipeline = parsed.value
+  }
+
   const input: CreateRuleRequest = {
+    pipeline,
     name: name.value,
     prompt: prompt.value,
     sensitivity,

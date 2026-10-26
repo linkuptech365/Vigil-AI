@@ -171,3 +171,47 @@ export interface FineGrainedVerdict {
   /** 置信度处于边缘区间（0.5~0.75）或存在遮挡时的存疑审计标记，不产生正式告警 */
   shadow_review?: boolean
 }
+
+/**
+ * 通用解耦规则管道：4 阶段逐级阻断，任何场景只靠配置表达，不在代码里硬编码场景。
+ * 阶段 1/2 由边缘视觉 Worker 执行，阶段 3 由二级 VLM 执行，阶段 4 贯穿两端。
+ */
+export type HandPoseFilter = "HAND_ELEVATED" | "NONE"
+
+export interface RulePipelineConfig {
+  id: string
+  name: string
+  /** 阶段 1: 空间与主体门禁（L1/L2 必须满足才触发截帧） */
+  perception_gate: {
+    /** 主体类别，如 ["person", "hand", "forklift"]；"*" 表示画面中任意已检出主体 */
+    subject_classes: string[]
+    /** 是否必须与特定 ROI 围栏相交 */
+    require_roi: boolean
+    /** 指定的围栏 ID；为空表示该通道任意围栏 */
+    bound_roi_ids?: string[]
+    /** 可选的手部抬起/探出姿态过滤 */
+    hand_pose_filter?: HandPoseFilter
+  }
+  /** 阶段 2: 伴生物体与接触判定 */
+  interaction_gate: {
+    /** 是否必须检出伴随物体（如 "tool"、"container"、"cable"） */
+    require_context_object: boolean
+    context_classes?: string[]
+    /** 主体与伴生物体的空间距离门槛（0~1000 归一化坐标） */
+    max_interaction_distance?: number
+  }
+  /** 阶段 3: 二级 VLM 因果与排除矩阵（L3 语义判定） */
+  vlm_arbitration: {
+    /** 核心违规行为定义 */
+    system_intent_prompt: string
+    /** 通用排他反例列表，命中任一项即不告警 */
+    negative_exclusions: string[]
+  }
+  /** 阶段 4: 节流与状态抑制 */
+  throttling: {
+    /** 针对同一 Track ID 的研判冷却时间（秒，建议 60~120） */
+    track_cooldown_seconds: number
+    /** 边缘置信度事件是否转入静默存疑审计 */
+    enable_shadow_review: boolean
+  }
+}
