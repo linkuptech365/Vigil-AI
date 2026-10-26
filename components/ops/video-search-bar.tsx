@@ -14,45 +14,47 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { CAMERAS, SEARCH_MOMENTS, SEARCH_PRESETS, SEARCH_PRESET_QUERY } from "@/lib/ops/data"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
-import type { AlertEvent, SearchMoment } from "@/lib/ops/types"
+import type { SearchMoment } from "@/lib/ops/types"
+import { formatSimilarity, parseSearchQuery } from "@/lib/ops/video-search"
 import { useDemoMode } from "@/components/vigil/demo-mode-provider"
 import { cn } from "@/lib/utils"
 import { useOps } from "./ops-provider"
 import { OverlayBoxes } from "./overlay-boxes"
 
-const REAL_BOX: SearchMoment["box"] = { x: 0, y: 0, w: 0, h: 0, tone: "warn" }
+interface SearchFilters {
+  channelNames: string[]
+  channelUnresolved: boolean
+  channelPhrases: string[]
+  subjects: string[]
+}
 
-function matchRealAlerts(query: string, alerts: AlertEvent[]): SearchMoment[] {
-  const q = query.trim().toLowerCase()
-  if (!q) return []
-  const tokens = q.split(/[\s,，、;；]+/).filter(Boolean)
-  const grams = Array.from(new Set(tokens.flatMap((t) => (t.length <= 2 ? [t] : Array.from({ length: t.length - 1 }, (_, i) => t.slice(i, i + 2))))))
-  return alerts
-    .map((alert) => {
-      const haystack = `${alert.type} ${alert.summary} ${alert.cameraLabel ?? ""} ${alert.steps.map((s) => s.detail).join(" ")}`.toLowerCase()
-      return { alert, hits: grams.filter((g) => haystack.includes(g)).length }
-    })
-    .filter((entry) => entry.hits > 0)
-    .sort((a, b) => b.hits - a.hits || b.alert.confidence - a.alert.confidence)
-    .map(({ alert }) => ({
-      id: alert.id,
-      cameraId: alert.cameraId,
-      cameraLabel: alert.cameraLabel,
-      start: alert.time,
-      end: alert.time,
-      score: alert.confidence,
-      title: alert.type,
-      rationale: alert.summary,
-      keywords: [],
-      box: REAL_BOX,
-      imageUrl: alert.frameUrls?.[0],
-    }))
+interface SearchResponse {
+  status: "success"
+  moments: SearchMoment[]
+  filters: SearchFilters
+}
+
+async function searchRealAlerts(query: string, signal: AbortSignal): Promise<SearchResponse> {
+  const response = await fetch("/api/v1/video-search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+    signal,
+  })
+  if (!response.ok) throw new Error(`检索失败（HTTP ${response.status}）`)
+  return (await response.json()) as SearchResponse
 }
 
 function matchMoments(query: string): SearchMoment[] {
   const q = query.trim()
   if (!q) return []
-  return SEARCH_MOMENTS.map((moment) => {
+  // 演示数据同样遵循通道硬过滤：query 指定了摄像头编号时，只保留该通道的片段
+  const cams = parseSearchQuery(
+    q,
+    CAMERAS.map((camera) => ({ id: camera.id, name: camera.id }))
+  ).channel
+  return SEARCH_MOMENTS.filter((moment) => !cams.channelIds || cams.channelIds.includes(moment.cameraId))
+    .map((moment) => {
     const hits = moment.keywords.filter((k) => q.includes(k)).length
     return { moment, hits }
   })
@@ -86,7 +88,7 @@ function MatchCard({ moment }: { moment: SearchMoment }) {
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
         {moment.box.w > 0 && <OverlayBoxes boxes={[moment.box]} labelSize="xs" />}
         <Badge className="absolute left-2 top-2 bg-signal font-mono text-black">
-          {moment.score}% 语义匹配
+          {formatSimilarity(moment.score)}
         </Badge>
         <span className="absolute bottom-2 left-2 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
           {moment.cameraLabel ?? moment.cameraId}
@@ -113,11 +115,16 @@ export function VideoSearchBar() {
   const [draft, setDraft] = React.useState("")
   const [searched, setSearched] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
+  const [remote, setRemote] = React.useState<SearchResponse | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
   const timer = React.useRef<number | null>(null)
+  const controller = React.useRef<AbortController | null>(null)
+  const { enabled: demo } = useDemoMode()
 
   React.useEffect(
     () => () => {
       if (timer.current) window.clearTimeout(timer.current)
+      controller.current?.abort()
     },
     []
   )
@@ -126,21 +133,41 @@ export function VideoSearchBar() {
     if (!query.trim()) return
     setSearched(true)
     setLoading(true)
+    setError(null)
     if (timer.current) window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setLoading(false), 650)
+    controller.current?.abort()
+    if (demo) {
+      timer.current = window.setTimeout(() => setLoading(false), 650)
+      return
+    }
+    const current = new AbortController()
+    controller.current = current
+    searchRealAlerts(query, current.signal)
+      .then((data) => {
+        setRemote(data)
+        setLoading(false)
+      })
+      .catch((cause: unknown) => {
+        if (current.signal.aborted) return
+        setRemote(null)
+        setError(cause instanceof Error ? cause.message : "检索失败")
+        setLoading(false)
+      })
   }
 
-  const { enabled: demo } = useDemoMode()
-  const { alerts } = useOps()
   const results = React.useMemo(
-    () => (searched ? (demo ? matchMoments(draft) : matchRealAlerts(draft, alerts)) : []),
-    [draft, searched, demo, alerts]
+    () => (searched ? (demo ? matchMoments(draft) : (remote?.moments ?? [])) : []),
+    [draft, searched, demo, remote]
   )
+  const filters = demo ? null : remote?.filters
 
   const reset = () => {
+    controller.current?.abort()
     setDraft("")
     setSearched(false)
     setLoading(false)
+    setRemote(null)
+    setError(null)
   }
 
   return (
@@ -237,7 +264,34 @@ export function VideoSearchBar() {
             </Button>
           </div>
 
-          {!loading && results.length === 0 && (
+          {!loading && filters && (filters.channelNames.length > 0 || filters.subjects.length > 0 || filters.channelUnresolved) && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <span>已应用硬过滤：</span>
+              {filters.channelNames.map((name) => (
+                <Badge key={name} variant="outline" className="border-signal/40 text-signal">
+                  通道 = {name}
+                </Badge>
+              ))}
+              {filters.channelUnresolved && (
+                <Badge variant="outline" className="border-destructive/50 text-destructive">
+                  未找到「{filters.channelPhrases.join("、")}」对应的通道
+                </Badge>
+              )}
+              {filters.subjects.map((name) => (
+                <Badge key={name} variant="outline">
+                  目标 = {name}
+                </Badge>
+              ))}
+            </div>
+          )}
+
+          {!loading && error && (
+            <p role="alert" className="rounded-md border border-dashed border-destructive/50 py-4 text-center text-sm text-destructive">
+              {error}
+            </p>
+          )}
+
+          {!loading && !error && results.length === 0 && (
             <p className="rounded-md border border-dashed border-border py-6 text-center text-sm text-muted-foreground">
               {demo ? "未找到匹配片段，试试 “打架冲突”、“安全帽” 或 “东门车辆违停”。" : "没有匹配的真实告警记录。检索范围为 AI 已研判并留存的告警事件。"}
             </p>

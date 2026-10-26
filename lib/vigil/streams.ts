@@ -202,6 +202,8 @@ export interface StreamAlert {
   model: string
   engineSource: "remote" | "fallback"
   edge?: { trackId: string; edgeConfidence: number; label?: string }
+  /** 真实检出的目标类别标签（如 cat / 猫），入库时写入，供视频检索做二次校验 */
+  tags?: string[]
   /** 二级四要素解耦判决（动作 / 介质 / 排他 / 置信度） */
   fine?: FineGrainedVerdict
   case?: AlertCase

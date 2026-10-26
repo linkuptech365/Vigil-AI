@@ -1,6 +1,7 @@
 import { CAMERAS } from "./data"
 import { KEYFRAME_OFFSETS } from "./ingestion-data"
 import type { ClipReason, EscalationClip } from "./perception-types"
+import { extractSubjects, parseSearchQuery, scoreCandidate } from "./video-search"
 import type {
   RagCorpusEntry,
   RagSearchResult,
@@ -275,9 +276,23 @@ export function searchCorpus(query: string): RagSearchResult[] {
   const text = query.trim()
   if (!text) return []
 
+  const parsed = parseSearchQuery(
+    text,
+    CAMERAS.map((camera) => ({ id: camera.id, name: camera.name }))
+  )
+
   return RAG_CORPUS.map(({ keywords, ...rest }) => {
     const hits = keywords.filter((keyword) => text.includes(keyword)).length
     if (hits === 0) return { ...rest, similarityScore: 0 }
+    // 通道硬过滤 + 目标类别二次校验：不满足直接剔除，不参与相似度混排
+    const rejected = scoreCandidate(parsed, {
+      id: rest.id,
+      channelId: rest.channelId,
+      confidence: 1,
+      subjects: extractSubjects(`${rest.matchedText} ${keywords.join(" ")}`),
+      text: "",
+    })
+    if (!rejected) return { ...rest, similarityScore: 0 }
     const score = Math.min(98.6, 62 + hits * 8 + stableNoise(rest.id + text))
     return { ...rest, similarityScore: Math.round(score * 10) / 10 }
   })

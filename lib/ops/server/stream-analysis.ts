@@ -11,6 +11,7 @@ import { loadProfiles } from "@/lib/storage/model-store"
 import { fireAutoLinkage } from "@/lib/ops/server/alert-linkage"
 import { appendRecord, getStream, recordAnalysis, saveAlert } from "@/lib/storage/streams-store"
 import { ensureEngine, grabFrame } from "@/lib/stream-engine"
+import { buildAlertTags, composeEventSummary } from "@/lib/ops/video-search"
 import { profileReadiness } from "@/lib/vigil/model-registry"
 import type { AnalyzeStreamResponse, StreamAlert, StreamAlertSource } from "@/lib/vigil/streams"
 
@@ -225,6 +226,17 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     throw new StreamAnalysisError(errorMessage || "研判未返回结果", 502, "ANALYSIS_FAILED")
   }
 
+  const detectedLabel = options.edge?.label ?? options.explore?.subjectLabel
+  const summary = composeEventSummary({
+    streamName: meta.name,
+    zone: meta.zone,
+    ruleName: result.ruleTriggered,
+    modelSummary: result.summary,
+    detectedLabel,
+    fine: result.fine,
+  })
+  const tags = buildAlertTags({ edge: { label: detectedLabel }, ruleName: result.ruleTriggered, summary })
+
   let alert: StreamAlert | null = null
   const hit = verdict.triggered && result.ruleId
   const folded = verdict.suppression?.suppressed === true
@@ -241,7 +253,8 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       ruleName: result.ruleTriggered,
       severity: result.severity as StreamAlert["severity"],
       confidence: result.confidence,
-      summary: result.summary,
+      summary,
+      tags: tags.length ? tags : undefined,
       reasoning: result.reasoning,
       advice: result.advice,
       frames: keyframes.map((frame) => ({
@@ -265,7 +278,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     status: hit ? "alert" : "safe",
     ruleName: hit ? result.ruleTriggered : undefined,
     confidence: result.confidence,
-    summary: result.summary,
+    summary,
     alertId: alert?.id,
   })
 
@@ -278,7 +291,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     outcome: alert ? "alert" : hit ? "folded" : verdict.excluded ? "blocked" : verdict.shadowReview ? "shadow" : "safe",
     ruleName: hit ? result.ruleTriggered : undefined,
     confidence: result.confidence,
-    summary: result.summary,
+    summary,
     fine: result.fine,
     reason: alert
       ? undefined
@@ -299,7 +312,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   return {
     status: "success",
     verdict: hit ? "alert" : "safe",
-    summary: result.summary,
+    summary,
     confidence: result.confidence,
     ruleName: hit ? result.ruleTriggered : null,
     alert,
