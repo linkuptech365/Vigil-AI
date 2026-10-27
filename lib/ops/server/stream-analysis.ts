@@ -7,6 +7,8 @@ import { MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { feedbackFromAnalysis, learnedRuleTuning, tier1ExistingForSource } from "@/lib/ops/server/tier1-feedback"
 import { runAnalysis } from "@/lib/ops/server/vlm-engine"
+import { attachAlertToCall } from "@/lib/storage/vlm-call-store"
+import type { VlmCallTrigger } from "@/lib/vigil/vlm-call-log"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadProfiles } from "@/lib/storage/model-store"
 import { fireAutoLinkage } from "@/lib/ops/server/alert-linkage"
@@ -49,6 +51,8 @@ export interface AnalyzeStreamOptions {
   ruleId?: string
   /** 管道开启「静默存疑审计」且边缘置信度不足：命中也只记审计，不发正式告警 */
   shadowReview?: boolean
+  /** VLM 调用流水归因；缺省时 edge 来源记为「一级告警上报」，其余记为「定时巡检漏斗」 */
+  trigger?: VlmCallTrigger
   requestHost: string | null
   signal: AbortSignal
 }
@@ -226,6 +230,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   let verdict: VlmVerdict | null = null
   let errorMessage = ""
 
+  let callId: string | null = null
   const stream = runAnalysis(
     {
       keyframes,
@@ -239,7 +244,19 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       remoteStream: false,
       tier1Existing: tier1ExistingForSource("channel", meta.id),
     },
-    { signal: options.signal, pace: false, requestHost: options.requestHost }
+    {
+      signal: options.signal,
+      pace: false,
+      requestHost: options.requestHost,
+      call: {
+        trigger: options.trigger ?? (options.source === "edge" ? "edge_report" : "patrol"),
+        streamId: meta.id,
+        streamName: meta.name,
+        onRecorded: (id) => {
+          callId = id
+        },
+      },
+    }
   )
   for await (const chunk of stream) {
     if (chunk.type === "done") {
@@ -301,6 +318,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       fine: result.fine,
     }
     saveAlert(created, frames)
+    attachAlertToCall(callId, created.id)
     alert = created
     void fireAutoLinkage(created.id).catch((error) => console.error("[linkage] 自动联动失败：", error))
   }

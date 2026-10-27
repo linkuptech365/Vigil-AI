@@ -1,5 +1,6 @@
 import { VLM_MODELS } from "../vlm-data"
 import type { VlmKeyframeInput, VlmPromptRule, VlmSimulationHint, VlmSourceType } from "../vlm-api-types"
+import type { VlmCallTrigger } from "../../vigil/vlm-call-log"
 
 export interface NormalizedInput {
   videoPath?: string
@@ -20,12 +21,23 @@ export interface NormalizedInput {
   tier1Existing?: string[]
 }
 
+/** 调用来源元数据：用于「VLM 调用实时流水」归因。未提供时按人工研判记录。 */
+export interface VlmCallContext {
+  trigger: VlmCallTrigger
+  streamId?: string | null
+  streamName?: string
+  alertId?: string | null
+  /** 流水落盘后回调，调用方可据此在告警落库后回填案卷 ID */
+  onRecorded?: (callId: string) => void
+}
+
 export interface EngineContext {
   /** 客户端断开（或取消流）时触发 */
   signal: AbortSignal
   /** 是否按人类可读的节奏吐字；非流式调用不需要 */
   pace: boolean
   requestHost: string | null
+  call?: VlmCallContext
 }
 
 export function hashString(text: string) {

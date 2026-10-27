@@ -125,7 +125,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ ale
       }
       let reasoning = ""
       try {
-        for await (const chunk of runAnalysis(input, { signal: abort.signal, pace: true, requestHost: request.headers.get("host") })) {
+        const engineCtx = {
+          signal: abort.signal,
+          pace: true,
+          requestHost: request.headers.get("host"),
+          call: {
+            trigger: "manual" as const,
+            streamId: alert.streamId,
+            streamName: alert.streamName,
+            alertId: alert.id,
+          },
+        }
+        for await (const chunk of runAnalysis(input, engineCtx)) {
           if (chunk.type === "token") reasoning += chunk.content
           else if (chunk.type === "reset") reasoning = ""
           else if (chunk.type === "done") {

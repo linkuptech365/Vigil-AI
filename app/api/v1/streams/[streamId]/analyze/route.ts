@@ -14,6 +14,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ str
     const outcome = await analyzeStream({
       streamId,
       source: "stream",
+      trigger: "manual",
       frameCount: typeof body.frameCount === "number" ? body.frameCount : 4,
       modelProfileId: typeof body.modelProfileId === "string" ? body.modelProfileId : undefined,
       requestHost: request.headers.get("host"),

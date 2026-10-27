@@ -1,4 +1,5 @@
 import type { VlmProtocol, VlmStreamChunk } from "../vlm-api-types"
+import { recordVlmCall, type RecordVlmCallInput } from "@/lib/storage/vlm-call-store"
 import { isBlockedHost, isGatewayItself, isLocalHost } from "./url-guard"
 import { fallbackStream } from "./vlm-fallback"
 import { buildSystemInstruction, buildUserPrompt } from "./vlm-prompt"
@@ -32,6 +33,24 @@ type RemoteOutcome =
   | { ok: true }
   | { ok: false; aborted: boolean; reason: string; emitted: boolean }
 
+/** 远端调用成功后暂存的流水，待二级裁决（告警/忽略）出来后一并落盘。 */
+interface CallTrace {
+  pending: RecordVlmCallInput | null
+}
+
+type CallBase = Pick<
+  RecordVlmCallInput,
+  "trigger" | "streamId" | "streamName" | "alertId" | "model" | "protocol" | "rules" | "systemPrompt" | "userPrompt" | "imageUrls"
+>
+
+function recordCall(ctx: EngineContext, entry: RecordVlmCallInput) {
+  try {
+    ctx.call?.onRecorded?.(recordVlmCall(entry))
+  } catch (error) {
+    console.error("[vlm-call-log] 记录调用流水失败：", error instanceof Error ? error.message : error)
+  }
+}
+
 function planEngine(input: NormalizedInput, requestHost: string | null): EnginePlan {
   if (!input.apiUrl) return { kind: "fallback", reason: "未配置模型 API 端点" }
 
@@ -64,11 +83,25 @@ export function willCallRemote(input: NormalizedInput, requestHost: string | nul
 async function* runRemote(
   input: NormalizedInput,
   plan: Extract<EnginePlan, { kind: "remote" }>,
-  ctx: EngineContext
+  ctx: EngineContext,
+  trace: CallTrace
 ): AsyncGenerator<PreVerdictChunk, RemoteOutcome> {
   const images = collectImages(input.keyframes, plan.protocol)
   const systemPrompt = buildSystemInstruction(input.rules, input.tier1Existing)
   const userPrompt = buildUserPrompt(input, images.length)
+  const meta = ctx.call ?? { trigger: "manual" as const, streamId: input.sourceKey }
+  const base: CallBase = {
+    trigger: meta.trigger,
+    streamId: meta.streamId ?? null,
+    streamName: meta.streamName,
+    alertId: meta.alertId ?? null,
+    model: input.modelName,
+    protocol: plan.protocol,
+    rules: input.rules.map((rule) => ({ id: rule.id, name: rule.name, description: rule.description })),
+    systemPrompt,
+    userPrompt,
+    imageUrls: images.map((image) => image.url),
+  }
 
   yield {
     type: "thinking",
@@ -83,6 +116,26 @@ async function* runRemote(
   let text = ""
   let firstTokenMs = 0
   let usage: { promptTokens: number; outputTokens: number } | null = null
+
+  const recordFailure = (error: string) => {
+    // 网关没有任何响应时没有产生扣费，不估算 Token；已收到内容或 usage 才计入
+    const consumed = usage !== null || text.length > 0
+    const promptTokens = usage?.promptTokens || (consumed ? estimateTokens(systemPrompt + userPrompt) + images.length * IMAGE_TOKEN_ESTIMATE : 0)
+    const completionTokens = usage?.outputTokens || estimateTokens(text)
+    recordCall(ctx, {
+      ...base,
+      status: "failed",
+      outcome: "ERROR",
+      summary: error,
+      output: text,
+      rttMs: performance.now() - startedAt,
+      promptTokens,
+      completionTokens,
+      usageEstimated: consumed && usage === null,
+      costUsd: costUsd(modelProfile(input.modelName).ratePer1k, promptTokens, completionTokens),
+      error,
+    })
+  }
 
   try {
     for await (const event of streamRemote({
@@ -105,6 +158,8 @@ async function* runRemote(
       yield { type: "token", content: event.content }
     }
   } catch (error) {
+    const reason = ctx.signal.aborted ? "调用方已取消请求" : describeRemoteError(error, plan.url)
+    recordFailure(reason)
     return {
       ok: false,
       aborted: ctx.signal.aborted,
@@ -120,12 +175,9 @@ async function* runRemote(
   )
   const result = parseFinalResult(text, input.rules, input.keyframes)
   if (!result) {
-    return {
-      ok: false,
-      aborted: false,
-      reason: text ? "远端输出无法解析为合规 JSON" : "远端模型返回了空内容",
-      emitted: text.length > 0,
-    }
+    const reason = text ? "远端输出无法解析为合规 JSON" : "远端模型返回了空内容"
+    recordFailure(reason)
+    return { ok: false, aborted: false, reason, emitted: text.length > 0 }
   }
 
   const rttMs = Math.max(1, Math.round(performance.now() - startedAt))
@@ -135,6 +187,19 @@ async function* runRemote(
       : estimateTokens(systemPrompt + userPrompt) + images.length * IMAGE_TOKEN_ESTIMATE
   const outputTokens = usage && usage.outputTokens > 0 ? usage.outputTokens : estimateTokens(text)
   const profile = modelProfile(input.modelName)
+  const cost = costUsd(profile.ratePer1k, promptTokens, outputTokens)
+
+  trace.pending = {
+    ...base,
+    status: "dismissed",
+    outcome: "SAFE",
+    output: text,
+    rttMs,
+    promptTokens,
+    completionTokens: outputTokens,
+    usageEstimated: !(usage && usage.promptTokens > 0 && usage.outputTokens > 0),
+    costUsd: cost,
+  }
 
   yield { type: "evidence", frames: result.evidenceKeyframes }
   yield {
@@ -145,7 +210,7 @@ async function* runRemote(
       outputTokens,
       firstTokenMs: firstTokenMs || rttMs,
       rttMs,
-      costUsd: costUsd(profile.ratePer1k, promptTokens, outputTokens),
+      costUsd: cost,
       source: "remote",
       model: input.modelName,
       protocol: plan.protocol,
@@ -156,7 +221,9 @@ async function* runRemote(
 
 async function* withVerdict(
   input: NormalizedInput,
-  chunks: AsyncGenerator<PreVerdictChunk>
+  chunks: AsyncGenerator<PreVerdictChunk>,
+  ctx: EngineContext,
+  trace: CallTrace
 ): AsyncGenerator<VlmStreamChunk> {
   for await (const chunk of chunks) {
     if (chunk.type !== "done") {
@@ -164,16 +231,39 @@ async function* withVerdict(
       continue
     }
     const { result, verdict } = applyVerdict(input, chunk.result)
+    if (trace.pending) {
+      const outcome = verdict.excluded
+        ? "EXCLUDED"
+        : verdict.belowThreshold
+          ? "BELOW_THRESHOLD"
+          : verdict.shadowReview
+            ? "SHADOW"
+            : verdict.triggered
+              ? verdict.suppression?.suppressed
+                ? "FOLDED"
+                : "ALARM"
+              : "SAFE"
+      recordCall(ctx, {
+        ...trace.pending,
+        status: outcome === "ALARM" || outcome === "FOLDED" ? "alarm" : "dismissed",
+        outcome,
+        ruleName: verdict.ruleName ?? result.ruleTriggered,
+        confidence: result.confidence,
+        summary: result.summary,
+      })
+      trace.pending = null
+    }
     if (verdict.belowThreshold) yield { type: "evidence", frames: [] }
     yield { type: "done", result, metrics: chunk.metrics, verdict }
   }
 }
 
 export function runAnalysis(input: NormalizedInput, ctx: EngineContext): AsyncGenerator<VlmStreamChunk> {
-  return withVerdict(input, runPipeline(input, ctx))
+  const trace: CallTrace = { pending: null }
+  return withVerdict(input, runPipeline(input, ctx, trace), ctx, trace)
 }
 
-async function* runPipeline(input: NormalizedInput, ctx: EngineContext): AsyncGenerator<PreVerdictChunk> {
+async function* runPipeline(input: NormalizedInput, ctx: EngineContext, trace: CallTrace): AsyncGenerator<PreVerdictChunk> {
   const frameCount = input.keyframes.length
   yield {
     type: "thinking",
@@ -184,7 +274,7 @@ async function* runPipeline(input: NormalizedInput, ctx: EngineContext): AsyncGe
   let reason: string
 
   if (plan.kind === "remote") {
-    const outcome = yield* runRemote(input, plan, ctx)
+    const outcome = yield* runRemote(input, plan, ctx, trace)
     if (outcome.ok || outcome.aborted) return
     reason = outcome.reason
     if (outcome.emitted) yield { type: "reset", reason }

@@ -3,6 +3,7 @@
 import type { LocateOptions } from "@/lib/ops/types"
 import { CausalReasoningView } from "./causal-reasoning-view"
 import { VideoRagStudio } from "./video-rag-studio"
+import { VlmCallLogs } from "./vlm-call-logs"
 import { VlmInferenceRunner } from "./vlm-inference-runner"
 import { VlmProvider } from "./vlm-provider"
 
@@ -20,6 +21,7 @@ export function VlmTab({ onLocate }: VlmTabProps) {
             Step 3：只有通过一级初筛并落库的告警才会进入多模态大模型，输出行为意图、因果链与结构化结论，并自动沉淀为可检索的 Video-RAG 案卷索引。
           </p>
         </div>
+        <VlmCallLogs />
         <VlmInferenceRunner />
         <CausalReasoningView />
         <VideoRagStudio onLocate={onLocate} />

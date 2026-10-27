@@ -294,6 +294,7 @@ export async function POST(request: Request) {
     signal: abort.signal,
     pace: parsed.input.stream,
     requestHost,
+  call: { trigger: "manual", streamId: parsed.input.sourceKey },
   }
 
   let input = parsed.input
