@@ -1,8 +1,8 @@
 "use client"
 
 import * as React from "react"
-import useSWR from "swr"
-import { Anchor, RotateCcw, Sparkles, Undo2 } from "lucide-react"
+import useSWR, { useSWRConfig } from "swr"
+import { Anchor, ListPlus, RotateCcw, Sparkles, Undo2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -15,20 +15,32 @@ import { usePerception } from "./perception-provider"
 
 export function LearningPanel() {
   const { cameraId } = usePerception()
-  const [busy, setBusy] = React.useState<"reset" | "rollback" | null>(null)
+  const { mutate: globalMutate } = useSWRConfig()
+  const [busy, setBusy] = React.useState<"reset" | "rollback" | "merge" | null>(null)
   const { data, mutate } = useSWR<Tier1LearningResponse>(VISION_ENDPOINTS.learning, getJson, {
     refreshInterval: 5000,
     keepPreviousData: true,
   })
   const learning = data?.learning[cameraId]
 
-  async function act(action: "reset" | "rollback") {
+  async function act(action: "reset" | "rollback" | "merge") {
     setBusy(action)
-    const loadingId = toast.loading(action === "reset" ? "正在恢复初始词表…" : "正在回滚上一版本…")
+    const loadingId = toast.loading(
+      action === "reset" ? "正在恢复初始词表…" : action === "rollback" ? "正在回滚上一版本…" : "正在并入通道词表并热更新…"
+    )
     try {
       const next = await sendJson<Tier1LearningResponse>(VISION_ENDPOINTS.learning, "POST", { streamId: cameraId, action })
       await mutate(next, { revalidate: false })
-      toast.success(action === "reset" ? "已恢复初始词表并清除记忆锚点" : "已回滚到上一版本", {
+      if (action === "merge") await globalMutate((key) => typeof key === "string" && key.includes("channel-config"))
+      const title =
+        action === "reset"
+          ? "已恢复初始词表并清除记忆锚点"
+          : action === "rollback"
+            ? "已回滚到上一版本"
+            : next.merge && next.merge.added + next.merge.reenabled > 0
+              ? `已并入词表：新增 ${next.merge.added}，重新启用 ${next.merge.reenabled}`
+              : "这些词条已全部在当前词表中"
+      toast.success(title, {
         description: next.reload ? `视觉服务热更新 ${next.reload.ok ? "成功" : "失败"}：${next.reload.message}` : undefined,
       })
     } catch (error) {
@@ -55,6 +67,15 @@ export function LearningPanel() {
             ) : null}
           </CardTitle>
           <div className="flex items-center gap-1.5">
+            <Button
+              size="sm"
+              disabled={busy !== null || !learning || learning.tags.length === 0}
+              onClick={() => act("merge")}
+              title="把补充检测词写入当前通道的生效词表，并立即热更新到模型"
+            >
+              <ListPlus aria-hidden="true" />
+              并入通道词表
+            </Button>
             <Button
               size="sm"
               variant="outline"

@@ -81,8 +81,15 @@ WAIST_RATIO = 0.55  # HAND_ELEVATED：手中心高于人员框「框顶 + 55% �
 # 非人员锚点、非 PPE 的词条，门槛取 min(全局下限, OPEN_VOCAB_MIN_CONF)，不被全局 0.40 一刀切；二级反哺词条自带 floor 优先。
 OPEN_VOCAB_MIN_CONF = min(0.95, max(0.05, float(os.environ.get("VIGIL_OPEN_VOCAB_CONF", "0.30") or 0.30)))
 # 诊断：模型 predict 的置信度底线（低于全局门槛的候选也会进入原始输出追踪，但不会参与门禁）
-RAW_DIAG_FLOOR = min(0.25, max(0.01, float(os.environ.get("VIGIL_RAW_DIAG_FLOOR", "0.10") or 0.10)))
+RAW_DIAG_FLOOR = min(0.25, max(0.01, float(os.environ.get("VIGIL_RAW_DIAG_FLOOR", "0.05") or 0.05)))
 RAW_TOP_N = 8
+# 夜视 / 红外 / 逆光画面纹理对比度极低，开放词汇模型的响应会整体偏弱：平均亮度低于该值时先做 CLAHE 局部对比度增强再推理
+LOW_LIGHT_LUMA = float(os.environ.get("VIGIL_LOW_LIGHT_LUMA", "80") or 80)
+# 补救重推理：本帧没有任何词条通过门槛时，用增强图 + 更高输入分辨率再推理一次，并把主体/场景物类词条的门槛放宽到该值；设为 0 关闭
+RESCUE_CONF = max(0.0, min(0.5, float(os.environ.get("VIGIL_RESCUE_CONF", "0.15") or 0)))
+RESCUE_IMGSZ = 960
+RESCUE_INTERVAL_SECONDS = 6.0  # 同一通道两次补救之间的最小间隔，避免空画面持续翻倍 CPU 开销
+INFER_IMGSZ = 640
 SMOKING_KEYWORDS = ("吸烟", "抽烟", "smok", "cigarette")
 # 吸烟类规则的冷却上限（秒）：排查"无命中无告警"期间避免冷却锁吞掉真实事件；设为 0 关闭该上限
 SMOKING_COOLDOWN_CAP = max(0.0, float(os.environ.get("VIGIL_SMOKING_COOLDOWN_CAP", "30") or 0))
@@ -256,6 +263,7 @@ class StreamState:
     last_ok_ts: float = 0.0
     last_motion_pct: float | None = None
     last_persons: int = 0
+    last_subjects: int = 0  # 词表中通过门槛的非人员目标数（猫 / 食盆等）
     last: dict[str, Any] | None = None
     frames: int = 0
     last_entry: dict[str, Any] | None = None
@@ -326,6 +334,7 @@ class Runtime:
         self.gate_trace_last: dict[str, float] = {}
         # 每路通道最近一次推理的模型原始 Top 检出（含低于门槛的候选），供 /health 与 /gate-traces 诊断
         self.raw_top: dict[str, dict[str, Any]] = {}
+        self.rescue_last: dict[str, float] = {}
         self.tracker_kind = "bytetrack"
         self.last_reload_ms = 0.0
         self.model_lock = threading.RLock()
@@ -477,6 +486,25 @@ def audit_commit(sid: str) -> None:
                 "box": [round(x1 / width * 1000), round(y1 / height * 1000), round(x2 / width * 1000), round(y2 / height * 1000)],
             }
         )
+    # 低于进门禁底线的原始候选（噪点）同样留痕，便于判断模型是「没响应」还是「响应弱被拦」
+    seen_prompts = {item["prompt"] for item in raw}
+    for item in ctx.get("raw_top") or []:
+        if len(raw) >= 12:
+            break
+        if item["prompt"] in seen_prompts and item["conf"] >= low:
+            continue
+        raw.append(
+            {
+                "prompt": item["prompt"],
+                "label": label_of(item["prompt"], sid),
+                "role": item["role"],
+                "confidence": item["conf"],
+                "passed": bool(item["passed"]),
+                "trackId": None,
+                "box": item["box"],
+            }
+        )
+        seen_prompts.add(item["prompt"])
     if escalated or ctx["events"]:
         outcome = "escalated"
     elif ctx["pending"]:
@@ -487,8 +515,9 @@ def audit_commit(sid: str) -> None:
         outcome = "blocked"
     else:
         outcome = "no_suspect"
-    if outcome == "no_suspect" and not raw and not decisions:
-        return  # 空画面不留痕，避免挤占保留额度
+    reasons = [r for r in ctx["reasons"]][:4]
+    if ctx.get("gate0"):
+        reasons.insert(0, ctx["gate0"])
     event_ids = [event_id for _, event_id in ctx["events"] if event_id]
     sig = f"{outcome}|" + ",".join(sorted(f"{d['ruleId']}:{d['outcome']}:{d['dropCode']}" for d in decisions)) + "|" + ",".join(sorted({r["prompt"] for r in raw}))
     now = time.time()
@@ -508,7 +537,7 @@ def audit_commit(sid: str) -> None:
         "repeat": 1,
         "rawDetections": raw,
         "decisions": decisions,
-        "reasons": [r for r in ctx["reasons"]][:5],
+        "reasons": reasons[:5],
         "eventIds": event_ids,
     }
     AUDIT_LAST[sid] = {"sig": sig, "ts": now, "record": record}
@@ -911,8 +940,8 @@ def passes(det: Det, low: float) -> bool:
     return det.conf >= threshold_of(det.role, det.floor, low)
 
 
-def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], predict_floor: float) -> None:
-    """记录模型原始 Top 检出（含低置信度候选）：区分「被置信度拦截」与「根本没有特征响应」。"""
+def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], predict_floor: float, frame: dict[str, Any]) -> None:
+    """记录模型原始 Top 检出（含低置信度候选）：区分「被置信度拦截」与「根本没有特征响应」，并附带送入模型的画面诊断。"""
     raw.sort(key=lambda item: -item["conf"])
     top = raw[:RAW_TOP_N]
     synced = list(RT.classes_applied) == list(prompts)
@@ -922,59 +951,138 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
         "vocabSynced": synced,
         "appliedCount": len(RT.classes_applied),
         "channelVocabCount": len(prompts),
+        "frame": frame,
         "top": top,
     }
     vocab_note = f"词表已注入 {len(RT.classes_applied)} 条" + ("" if synced else f"，与通道词表 {len(prompts)} 条不一致")
+    frame_note = (
+        f"输入 {frame['width']}x{frame['height']} 经 BGR 直送、imgsz={frame['imgsz']}，亮度 {frame['luma']:.0f}"
+        + ("、近灰度(红外/夜视)" if frame["grayscale"] else "")
+        + ("、已做 CLAHE 低照度增强" if frame["enhanced"] else "")
+        + ("、已触发补救重推理(imgsz=%d, 门槛放宽到 %.2f)" % (RESCUE_IMGSZ, RESCUE_CONF) if frame["rescued"] else "")
+    )
     if not top:
-        detail = f"{vocab_note}；模型无任何特征响应（全词表 conf≥{predict_floor:.2f} 均无框）。通道词表：{', '.join(prompts[:12])}"
+        detail = f"{vocab_note}；{frame_note}；模型无任何特征响应（全词表 conf≥{predict_floor:.2f} 均无框）。通道词表：{', '.join(prompts[:12])}"
     else:
         parts = [
             f"{item['prompt']}:{item['conf']:.2f}[{'通过≥' if item['passed'] else '拦截<'}{item['threshold']:.2f}]"
             for item in top
         ]
-        detail = f"{vocab_note}；模型原始 Top{len(top)}（predict≥{predict_floor:.2f}）：" + ", ".join(parts)
+        detail = f"{vocab_note}；{frame_note}；模型原始 Top{len(top)}（predict≥{predict_floor:.2f}）：" + ", ".join(parts)
     gate_trace(sid, "_raw", "模型原始输出", "[Gate 0 - Raw]", "info", detail)
+    audit_note(gate0=detail[:380], raw_top=top)
+
+
+def gate0_reason(sid: str) -> str:
+    """初筛命中日志里「无检出」条目的一句话原因。"""
+    info = RT.raw_top.get(sid)
+    if not info:
+        return "Gate 0：本帧尚无模型输出"
+    top = info.get("top") or []
+    frame = info.get("frame") or {}
+    tail = "；已做低照度增强" if frame.get("enhanced") else ""
+    if frame.get("rescued"):
+        tail += "；已补救重推理"
+    if not top:
+        return f"Gate 0：模型无任何特征响应（conf≥{info['predictFloor']:.2f} 均无框）{tail}"
+    parts = [f"{item['prompt']} {item['conf']:.2f}<{item['threshold']:.2f}" for item in top[:3] if not item["passed"]]
+    return "Gate 0：候选均被置信度门槛拦截（" + "，".join(parts) + "）" + tail
+
+
+def frame_profile(image: np.ndarray) -> tuple[float, bool]:
+    small = image[::4, ::4]
+    luma = float(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).mean())
+    chroma = float(np.abs(small[:, :, 0].astype(np.int16) - small[:, :, 2].astype(np.int16)).mean())
+    return luma, chroma < 8.0
+
+
+def enhance_low_light(image: np.ndarray) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    l_channel = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(l_channel)
+    return cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+
+def parse_result(
+    result: Any,
+    roles: dict[str, str],
+    sid: str,
+    low: float,
+    conf_floor: float,
+    rescue: bool,
+) -> tuple[list[Det], list[dict[str, Any]]]:
+    names = result.names
+    dets: list[Det] = []
+    raw: list[dict[str, Any]] = []
+    boxes = result.boxes
+    if boxes is None or len(boxes) == 0:
+        return dets, raw
+    height, width = result.orig_shape[:2]
+    xyxy = boxes.xyxy.cpu().numpy()
+    confs = boxes.conf.cpu().numpy()
+    classes = boxes.cls.cpu().numpy().astype(int)
+    for k in range(len(boxes)):
+        prompt = str(names.get(int(classes[k]), ""))
+        role = roles.get(prompt)
+        if role is None:
+            continue
+        conf = float(confs[k])
+        floor = RT.learned_conf.get((sid, prompt))
+        if rescue and role in (ROLE_SUBJECT, ROLE_CONTEXT):
+            floor = RESCUE_CONF
+        threshold = threshold_of(role, floor, low)
+        x1, y1, x2, y2 = (float(v) for v in xyxy[k])
+        raw.append(
+            {
+                "prompt": prompt,
+                "role": role,
+                "conf": round(conf, 3),
+                "threshold": round(threshold, 3),
+                "passed": conf >= threshold,
+                "box": [round(x1 / width * 1000), round(y1 / height * 1000), round(x2 / width * 1000), round(y2 / height * 1000)],
+            }
+        )
+        if conf < (min(conf_floor, RESCUE_CONF) if rescue else conf_floor):
+            continue
+        if floor is not None and conf < floor:
+            continue
+        dets.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2), floor=floor))
+    return dets, raw
 
 
 def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     low = RT.cfg.low
-    # 进入门禁的候选底线��不高于 0.25，且不高于开放词汇门槛
+    # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
     conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
     predict_floor = min(conf_floor, RAW_DIAG_FLOOR)
     prompts = prompts_of(sid)
     roles = roles_of(sid)
     if not prompts:
         return []
+    height, width = image.shape[:2]
+    luma, grayscale = frame_profile(image)
+    enhanced = luma < LOW_LIGHT_LUMA or grayscale
+    source = enhance_low_light(image) if enhanced else image
+    frame = {"width": width, "height": height, "imgsz": INFER_IMGSZ, "luma": round(luma, 1), "grayscale": grayscale, "enhanced": enhanced, "rescued": False}
     # 同一把锁内切换词表并推理，保证本帧只用本通道的词表做文本-图像内积
     with RT.model_lock:
         ok, _ = apply_classes(prompts)
         if not ok:
             return []
-        result = RT.model.predict(image, conf=predict_floor, imgsz=640, device=RT.device, verbose=False)[0]
-    names = result.names
-    dets: list[Det] = []
-    raw: list[dict[str, Any]] = []
-    boxes = result.boxes
-    if boxes is not None and len(boxes) > 0:
-        xyxy = boxes.xyxy.cpu().numpy()
-        confs = boxes.conf.cpu().numpy()
-        classes = boxes.cls.cpu().numpy().astype(int)
-        for k in range(len(boxes)):
-            prompt = str(names.get(int(classes[k]), ""))
-            role = roles.get(prompt)
-            if role is None:
-                continue
-            conf = float(confs[k])
-            floor = RT.learned_conf.get((sid, prompt))
-            threshold = threshold_of(role, floor, low)
-            raw.append({"prompt": prompt, "role": role, "conf": round(conf, 3), "threshold": round(threshold, 3), "passed": conf >= threshold})
-            if conf < conf_floor:
-                continue
-            if floor is not None and conf < floor:
-                continue
-            x1, y1, x2, y2 = (float(v) for v in xyxy[k])
-            dets.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2), floor=floor))
-    record_raw_output(sid, prompts, raw, predict_floor)
+        result = RT.model.predict(source, conf=predict_floor, imgsz=INFER_IMGSZ, device=RT.device, verbose=False)[0]
+        dets, raw = parse_result(result, roles, sid, low, conf_floor, rescue=False)
+        now = time.time()
+        if RESCUE_CONF > 0 and not any(passes(d, low) for d in dets) and now - RT.rescue_last.get(sid, 0.0) >= RESCUE_INTERVAL_SECONDS:
+            RT.rescue_last[sid] = now
+            rescue_source = source if enhanced else enhance_low_light(image)
+            rescue_result = RT.model.predict(
+                rescue_source, conf=min(predict_floor, RESCUE_CONF), imgsz=RESCUE_IMGSZ, device=RT.device, verbose=False
+            )[0]
+            rescue_dets, rescue_raw = parse_result(rescue_result, roles, sid, low, conf_floor, rescue=True)
+            if any(passes(d, low) for d in rescue_dets):
+                dets, raw = rescue_dets, rescue_raw
+                frame.update({"imgsz": RESCUE_IMGSZ, "enhanced": True, "rescued": True})
+    record_raw_output(sid, prompts, raw, predict_floor, frame)
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
     ids = tracker.update([d.box for d in persons], [d.conf for d in persons])
     for d, track_id in zip(persons, ids):
@@ -1383,7 +1491,7 @@ def rule_zone_polygons(pipe: dict[str, Any], sid: str) -> tuple[list[dict[str, A
             skipped.append(str(zone.get("name") or zone["id"]))
         else:
             neutral.append(zone)
-    note = "未绑定围栏" + (f"，已排除其他规则专属围栏 {skipped}" if skipped else "")
+    note = "未绑定围栏" + (f"，已排除其��规则专属围栏 {skipped}" if skipped else "")
     return (mine or neutral), note
 
 
@@ -1785,6 +1893,13 @@ def log_hit(
     if not tags and not reasons:
         return
     now = time.time()
+    last_entry = st.last_entry
+    if gate == "nodet" and last_entry is not None and last_entry["gate"] == "nodet":
+        last_entry["repeat"] += 1
+        last_entry["reasons"] = reasons[:3]
+        last_entry["at"] = now_iso()
+        st.last_entry_ts = now
+        return
     sig = f"{gate}|{event_id or ''}|{int(anchor)}{int(explore)}|" + ",".join(t["prompt"] for t in tags)
     last = st.last_entry
     if last is not None and event_id is None and st.last_entry_sig == sig and now - st.last_entry_ts < HIT_DEDUPE_SECONDS:
@@ -1874,6 +1989,7 @@ def _scan_stream(sid: str) -> None:
     audit_note(inferred=True, dets=dets, shape=image.shape[:2])
     st.last_had_person = persons > 0 or any(d.role == ROLE_SUBJECT and passes(d, cfg.low) for d in dets)
     st.last_persons = persons
+    st.last_subjects = len({d.prompt for d in dets if d.role != ROLE_ANCHOR and passes(d, cfg.low)})
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
 
     tags = hit_tags(dets, sid)
@@ -1882,7 +1998,10 @@ def _scan_stream(sid: str) -> None:
         RT.stats.tier1_passed += 1
         st.tracks.clear()
         st.has_pending = False
-        log_hit(st, tags, [], "passed")
+        if tags:
+            log_hit(st, tags, [], "passed")
+        else:
+            log_hit(st, [], [gate0_reason(sid)], "nodet")
         return
 
     keys = {s.key for s in suspects if not s.instant}
@@ -2060,6 +2179,7 @@ async def health() -> dict[str, Any]:
             "zones": len(zones_for(sid)),
             "motionPct": None if st.last_motion_pct is None else round(st.last_motion_pct, 2),
             "persons": st.last_persons,
+            "subjects": st.last_subjects,
             "pendingTracks": len(st.tracks),
             "rawTop": RT.raw_top.get(sid),
             "error": st.last_error,

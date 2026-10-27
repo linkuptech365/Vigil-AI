@@ -466,4 +466,6 @@ export interface Tier1LearningResponse {
   learning: Record<string, Tier1Learning>
   /** 执行重置/回滚后，视觉服务热更新的结果 */
   reload?: { ok: boolean; reloadMs: number; message: string }
+  /** 执行 merge 后的并入统计 */
+  merge?: { added: number; skipped: number; reenabled: number; total: number }
 }

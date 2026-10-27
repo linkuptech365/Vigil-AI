@@ -198,12 +198,44 @@ export const EMPTY_VISION_STATS: VisionStats = {
   tier2Failed: 0,
 }
 
+export interface VisionRawCandidate {
+  prompt: string
+  role: string
+  conf: number
+  threshold: number
+  passed: boolean
+  box: number[]
+}
+
+export interface VisionRawTop {
+  at: string
+  predictFloor: number
+  /** 词表是否已真正注入模型（false 说明通道词表与模型当前词表不一致） */
+  vocabSynced: boolean
+  appliedCount: number
+  channelVocabCount: number
+  frame: {
+    width: number
+    height: number
+    imgsz: number
+    luma: number
+    grayscale: boolean
+    enhanced: boolean
+    rescued: boolean
+  }
+  top: VisionRawCandidate[]
+}
+
 export interface VisionStreamHealth {
   online: boolean
   monitored: boolean
   frames: number
   motionPct?: number | null
   persons?: number
+  /** 词表中通过门槛的非人员目标数（猫 / 食盆等） */
+  subjects?: number
+  /** Gate 0 最近一帧模型原始输出诊断 */
+  rawTop?: VisionRawTop | null
   pendingTracks?: number
   /** 帧缓冲（Ring Buffer）里当前缓存的帧数 */
   ringFrames?: number
@@ -220,7 +252,8 @@ export interface VisionHitTag {
   confidence: number
 }
 
-export type VisionHitGate = "passed" | "pending" | "cooldown" | "escalated"
+/** nodet：本帧模型没有任何词条越过 Gate 0（无主体或全部被置信度拦截） */
+export type VisionHitGate = "passed" | "pending" | "cooldown" | "escalated" | "nodet"
 
 export interface VisionHitEntry {
   id: string
@@ -257,6 +290,8 @@ export interface VisionHitsResponse {
     ringFrames: number
     zones: number
     persons: number
+    subjects: number
+    rawTop: VisionRawTop | null
     error: string
   }[]
 }

@@ -12,6 +12,8 @@ import {
   type Tier1Learning,
   type Tier1MergeResult,
 } from "@/lib/vigil/tier1-learning"
+import { loadChannelPerception, saveChannelPerception } from "@/lib/storage/channel-perception-store"
+import { mergeVocabulary, type VocabularyItem } from "@/lib/vigil/vision"
 import { pushConfig, type PushResult } from "@/lib/vision-engine"
 
 /** 通道一级初筛当前已用的英文检测词（基础词表 + 已沉淀词），提示给 VLM 避免重复推荐。 */
@@ -81,6 +83,41 @@ export async function applyTier1FalsePositive(streamId: string, input: FalsePosi
   const reload = hasHotspot ? await pushConfig(true) : null
   console.log(`[tier1-feedback] ${streamId} 误报反馈 → v${merge.learning.version}：${merge.learning.note}`)
   return { changed: true, version: merge.learning.version, note: merge.learning.note, reload }
+}
+
+export interface LearnedMergeOutcome {
+  added: number
+  skipped: number
+  reenabled: number
+  total: number
+  reload: PushResult | null
+}
+
+/** 把二级反哺沉淀的词条一键并入该通道专属词表（写入 compiled_tags），并热更新视觉服务；已存在的英文词会被去重或重新启用。 */
+export async function mergeLearnedIntoChannelVocabulary(streamId: string): Promise<LearnedMergeOutcome | null> {
+  const learning = loadLearning(streamId)
+  if (!learning || learning.tags.length === 0) return null
+  const stored = loadChannelPerception(streamId)
+  const base = stored?.compiled_tags ?? effectiveVocabulary(streamId).tags
+  const incoming: VocabularyItem[] = learning.tags.map((tag) => ({
+    id: "",
+    labelZh: tag.labelZh,
+    promptEn: tag.promptEn,
+    role: tag.role,
+    enabled: true,
+  }))
+  const merge = mergeVocabulary(base, incoming)
+  if (merge.added === 0 && merge.reenabled === 0) {
+    return { added: 0, skipped: merge.skipped, reenabled: 0, total: merge.vocabulary.length, reload: null }
+  }
+  saveChannelPerception(streamId, {
+    raw_prompt: stored?.raw_prompt ?? "",
+    compiled_tags: merge.vocabulary,
+    updatedAt: new Date().toISOString(),
+  })
+  const reload = await pushConfig(true)
+  console.log(`[tier1-feedback] ${streamId} 二级词条并入专属词表：新增 ${merge.added}，重新启用 ${merge.reenabled}`)
+  return { added: merge.added, skipped: merge.skipped, reenabled: merge.reenabled, total: merge.vocabulary.length, reload }
 }
 
 export async function resetTier1Learning(streamId: string): Promise<{ learning: Tier1Learning; reload: PushResult | null }> {

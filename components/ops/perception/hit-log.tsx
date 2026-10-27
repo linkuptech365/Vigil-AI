@@ -24,6 +24,7 @@ const GATE: Record<VisionHitGate, { label: string; className: string }> = {
   pending: { label: "累积确认中", className: "border-warning/40 bg-warning/10 text-warning" },
   cooldown: { label: "冷却中", className: "border-border bg-muted text-muted-foreground" },
   passed: { label: "已检出 · 未触发", className: "border-success/40 bg-success/10 text-success" },
+  nodet: { label: "Gate 0 · 无检出", className: "border-border bg-muted text-muted-foreground" },
 }
 
 function timeOf(at: string) {
@@ -84,7 +85,7 @@ export function HitLog() {
         ? "该通道尚未被视觉服务接入"
         : !stream.online
           ? `通道离线${stream.error ? `：${stream.error}` : ""}`
-          : `帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 画面中 ${stream.persons} 个主体`
+          : `帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 人员 ${stream.persons} · 词表目标 ${stream.subjects}${stream.rawTop && !stream.rawTop.vocabSynced ? " · 词表未同步到模型" : ""}`
 
   return (
     <Card className="gap-0 py-0">
@@ -105,7 +106,7 @@ export function HitLog() {
       </CardHeader>
       <div className="scrollbar-thin max-h-64 overflow-y-auto" aria-live="polite">
         {entries.length === 0 ? (
-          <p className="px-4 py-6 text-center text-xs text-muted-foreground">暂无命中记录。画面中检出词表目标后会实时出现在这里。</p>
+          <p className="px-4 py-6 text-center text-xs text-muted-foreground">暂无记录。视觉服务每次推理后都会在这里写入检出或「Gate 0 无检出」原因。</p>
         ) : (
           <ul className="divide-y divide-border">
             {entries.map((entry) => (

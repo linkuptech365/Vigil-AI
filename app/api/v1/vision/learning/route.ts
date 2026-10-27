@@ -1,5 +1,5 @@
 import { jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
-import { loadAllLearning, resetTier1Learning, rollbackTier1Learning } from "@/lib/ops/server/tier1-feedback"
+import { loadAllLearning, mergeLearnedIntoChannelVocabulary, resetTier1Learning, rollbackTier1Learning } from "@/lib/ops/server/tier1-feedback"
 import { getStream } from "@/lib/storage/streams-store"
 import type { Tier1LearningResponse } from "@/lib/vigil/tier1-learning"
 
@@ -30,5 +30,16 @@ export async function POST(request: Request) {
     const response: Tier1LearningResponse = { status: "ok", learning: loadAllLearning(), reload: outcome.reload ?? undefined }
     return jsonOk(response)
   }
-  return jsonError(400, "INVALID_ACTION", "action 必须是 reset 或 rollback")
+  if (value?.action === "merge") {
+    const outcome = await mergeLearnedIntoChannelVocabulary(streamId)
+    if (!outcome) return jsonError(409, "NO_LEARNED_TAGS", "当前通道尚无二级反哺词条可并入")
+    const response: Tier1LearningResponse = {
+      status: "ok",
+      learning: loadAllLearning(),
+      reload: outcome.reload ?? undefined,
+      merge: { added: outcome.added, skipped: outcome.skipped, reenabled: outcome.reenabled, total: outcome.total },
+    }
+    return jsonOk(response)
+  }
+  return jsonError(400, "INVALID_ACTION", "action 必须是 reset、rollback 或 merge")
 }
