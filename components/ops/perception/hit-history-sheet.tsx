@@ -2,11 +2,15 @@
 
 import * as React from "react"
 import useSWR from "swr"
-import { ChevronDown, History, ImageOff, Trash2 } from "lucide-react"
+import { ChevronDown, History, ImageOff, Loader2, ShieldOff, Sparkles, Trash2 } from "lucide-react"
+import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
@@ -98,6 +102,264 @@ function FrameWithBoxes({ record }: { record: HitHistoryRecord }) {
   )
 }
 
+interface ManualAnalysis {
+  verdict: "alert" | "safe"
+  confidence: number
+  summary: string
+  reasoning: string
+  action: string | null
+  ruleName: string | null
+  model: string
+  frameCount: number
+}
+
+/** 收起抽屉卡片会卸载详情，模块级缓存让「已标记」与研判结果在重新展开后仍可见。 */
+const markedDetections = new Set<string>()
+const manualAnalyses = new Map<string, ManualAnalysis>()
+
+const detectionKey = (recordId: string, index: number) => `${recordId}:${index}`
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  } catch {
+    throw new Error("无法连接到服务端，请检查网络后重试")
+  }
+  const payload = (await response.json().catch(() => null)) as (T & { message?: string }) | null
+  if (!response.ok || !payload) throw new Error(payload?.message ?? `请求失败 (HTTP ${response.status})`)
+  return payload
+}
+
+/** 0-1000 的 [x1, y1, x2, y2] 转为锚点要求的 0-1 归一化 [ymin, xmin, ymax, xmax]。 */
+function toAnchorBbox(box: [number, number, number, number]): [number, number, number, number] | null {
+  const clamp = (value: number) => Math.min(1, Math.max(0, value / 1000))
+  const [x1, y1, x2, y2] = box
+  const bbox: [number, number, number, number] = [clamp(y1), clamp(x1), clamp(y2), clamp(x2)]
+  return bbox[2] > bbox[0] && bbox[3] > bbox[1] ? bbox : null
+}
+
+function regionLabel(box: [number, number, number, number]) {
+  const [x1, y1, x2, y2] = box
+  const cx = (x1 + x2) / 2
+  const cy = (y1 + y2) / 2
+  const horizontal = cx < 333 ? "左侧" : cx > 666 ? "右侧" : "中间"
+  const vertical = cy < 333 ? "上方" : cy > 666 ? "下方" : "中部"
+  return `${horizontal}${vertical}区域`
+}
+
+function NegativeAnchorPicker({ record }: { record: HitHistoryRecord }) {
+  const detections = record.rawDetections
+  const [marked, setMarked] = React.useState<ReadonlySet<number>>(
+    () => new Set(detections.map((_, index) => index).filter((index) => markedDetections.has(detectionKey(record.id, index)))),
+  )
+  const [picking, setPicking] = React.useState(false)
+  const [selected, setSelected] = React.useState<number | null>(null)
+  const [label, setLabel] = React.useState("")
+  const [wildcard, setWildcard] = React.useState(false)
+  const [submitting, setSubmitting] = React.useState(false)
+
+  const markable = detections.map((_, index) => index).filter((index) => !marked.has(index))
+
+  function choose(index: number) {
+    setSelected(index)
+    setLabel(detections[index]?.prompt ?? "")
+  }
+
+  function open() {
+    if (picking) {
+      setPicking(false)
+      return
+    }
+    setPicking(true)
+    const first = selected !== null && markable.includes(selected) ? selected : markable[0]
+    if (first !== undefined) choose(first)
+  }
+
+  async function submit() {
+    if (selected === null) return
+    const det = detections[selected]
+    const bbox = det ? toAnchorBbox(det.box) : null
+    if (!det || !bbox) {
+      toast.error("该检测框坐标无效，无法加入负样本")
+      return
+    }
+    const finalLabel = wildcard ? "*" : label.trim()
+    if (!finalLabel) {
+      toast.error("请填写类别名称，或勾选通配所有类别")
+      return
+    }
+    setSubmitting(true)
+    try {
+      await postJson(`/api/v1/channels/${encodeURIComponent(record.streamId)}/negative-anchors`, { label: finalLabel, bbox })
+      markedDetections.add(detectionKey(record.id, selected))
+      setMarked((current) => new Set(current).add(selected))
+      setPicking(false)
+      toast.success("已加入负样本抑制库，后续同位置静态伪影将被静默过滤")
+    } catch (error) {
+      toast.error(`加入负样本失败：${errorMessage(error)}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const disabled = detections.length === 0 || markable.length === 0
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 gap-1.5 px-2 text-xs"
+        disabled={disabled}
+        aria-expanded={picking}
+        onClick={open}
+        title={detections.length === 0 ? "该帧没有原始检测框" : undefined}
+      >
+        <ShieldOff className="size-3.5" aria-hidden="true" />
+        {detections.length > 0 && markable.length === 0 ? "检测框均已加入负样本" : "标为固定误判"}
+      </Button>
+      {picking ? (
+        <div className="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+          <p className="text-xs font-medium">{detections.length > 1 ? "选择要抑制的检测框" : "将抑制该检测框所在位置"}</p>
+          <RadioGroup value={selected === null ? "" : String(selected)} onValueChange={(value) => choose(Number(value))} className="gap-1.5">
+            {detections.map((det, index) => {
+              const isMarked = marked.has(index)
+              const id = `neg-${record.id}-${index}`
+              return (
+                <div key={id} className="flex items-center gap-2">
+                  <RadioGroupItem value={String(index)} id={id} disabled={isMarked || submitting} />
+                  <Label htmlFor={id} className={cn("flex flex-1 flex-wrap items-center gap-1.5 text-xs font-normal", isMarked && "text-muted-foreground")}>
+                    <span>
+                      {det.prompt} ({(det.confidence * 100).toFixed(1)}%) - {regionLabel(det.box)}
+                    </span>
+                    {isMarked ? (
+                      <Badge variant="outline" className={cn("text-[10px]", VERDICT_STYLE.pass)}>
+                        已添加负样本
+                      </Badge>
+                    ) : null}
+                  </Label>
+                </div>
+              )
+            })}
+          </RadioGroup>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor={`neg-label-${record.id}`} className="text-xs font-normal">
+                类别
+              </Label>
+              <Input
+                id={`neg-label-${record.id}`}
+                value={wildcard ? "*" : label}
+                onChange={(event) => setLabel(event.target.value)}
+                disabled={wildcard || submitting}
+                maxLength={60}
+                className="h-7 w-44 font-mono text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Checkbox id={`neg-wild-${record.id}`} checked={wildcard} onCheckedChange={(next) => setWildcard(next === true)} disabled={submitting} />
+              <Label htmlFor={`neg-wild-${record.id}`} className="text-xs font-normal">
+                通配所有类别 *
+              </Label>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button type="button" size="sm" className="h-7 px-2 text-xs" onClick={submit} disabled={submitting || selected === null}>
+              {submitting ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+              {submitting ? "提交中..." : "确认加入负样本库"}
+            </Button>
+            <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setPicking(false)} disabled={submitting}>
+              取消
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ManualReviewPanel({ record }: { record: HitHistoryRecord }) {
+  const [loading, setLoading] = React.useState(false)
+  const [analysis, setAnalysis] = React.useState<ManualAnalysis | null>(() => manualAnalyses.get(record.id) ?? null)
+
+  async function review() {
+    if (!record.hasFrame) {
+      toast.error("该记录的触发帧截屏不可用（未保存或已被淘汰），无法送审")
+      return
+    }
+    setLoading(true)
+    try {
+      const data = await postJson<Partial<ManualAnalysis>>(`/api/v1/streams/${encodeURIComponent(record.streamId)}/analyze`, {
+        trigger: "manual",
+        evidenceFrames: [hitFrameUrl(record.id)],
+      })
+      const next: ManualAnalysis = {
+        verdict: data.verdict === "alert" ? "alert" : "safe",
+        confidence: typeof data.confidence === "number" ? data.confidence : 0,
+        summary: data.summary ?? "",
+        reasoning: data.reasoning ?? "",
+        action: data.action ?? null,
+        ruleName: data.ruleName ?? null,
+        model: data.model ?? "",
+        frameCount: data.frameCount ?? 1,
+      }
+      manualAnalyses.set(record.id, next)
+      setAnalysis(next)
+    } catch (error) {
+      toast.error(`手动送审失败：${errorMessage(error)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const behavior = analysis ? [analysis.ruleName, analysis.action].filter(Boolean).join(" · ") || "未识别到规则行为" : ""
+  const percent = analysis ? Math.round((analysis.confidence <= 1 ? analysis.confidence * 100 : analysis.confidence) * 10) / 10 : 0
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Button type="button" size="sm" variant="outline" className="h-7 gap-1.5 px-2 text-xs" onClick={review} disabled={loading}>
+        {loading ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Sparkles className="size-3.5" aria-hidden="true" />}
+        {loading ? "VLM 研判中..." : "手动送审二级 VLM"}
+      </Button>
+      {analysis ? (
+        <section className="flex flex-col gap-2 rounded-md border border-border bg-card p-3" aria-label="手动研判结果">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className={cn("text-[10px]", analysis.verdict === "alert" ? "border-destructive/40 bg-destructive/10 text-destructive" : VERDICT_STYLE.pass)}
+            >
+              {analysis.verdict === "alert" ? "违规告警" : "合规忽略"}
+            </Badge>
+            <span className="text-xs">
+              置信度 <span className="font-mono">{percent}%</span>
+            </span>
+            <span className="text-xs text-muted-foreground">行为类型：{behavior}</span>
+            {analysis.model ? <span className="ml-auto font-mono text-[10px] text-muted-foreground">{analysis.model}</span> : null}
+          </div>
+          {analysis.summary ? <p className="text-xs leading-relaxed">{analysis.summary}</p> : null}
+          <div className="flex flex-col gap-1">
+            <h5 className="text-[11px] font-medium text-muted-foreground">推理因果链</h5>
+            <p className="whitespace-pre-wrap text-xs leading-relaxed">{analysis.reasoning || "模型未返回推理文本。"}</p>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  )
+}
+
+function RecordActions({ record }: { record: HitHistoryRecord }) {
+  return (
+    <section className="flex flex-col gap-2 border-t border-border pt-3" aria-label="记录操作">
+      <div className="flex flex-wrap items-start gap-2">
+        <NegativeAnchorPicker record={record} />
+        <ManualReviewPanel record={record} />
+      </div>
+    </section>
+  )
+}
+
 function RecordDetail({ record }: { record: HitHistoryRecord }) {
   return (
     <div className="flex flex-col gap-3 border-t border-border bg-muted/30 px-4 py-3">
@@ -148,6 +410,7 @@ function RecordDetail({ record }: { record: HitHistoryRecord }) {
           </ul>
         )}
       </section>
+      <RecordActions record={record} />
     </div>
   )
 }

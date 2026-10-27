@@ -69,8 +69,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ str
       requestHost: request.headers.get("host"),
       signal: request.signal,
     })
-    const { verdictDetail: _verdict, result: _result, ...payload } = outcome
-    return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } })
+    const { verdictDetail: _verdict, result, ...payload } = outcome
+    // 合规忽略时没有 alert，推理因果链与动作类型只能从 result 里取
+    return NextResponse.json(
+      { ...payload, reasoning: result.reasoning ?? "", action: result.fine?.primary_action ?? null },
+      { headers: { "Cache-Control": "no-store" } }
+    )
   } catch (error) {
     if (error instanceof StreamAnalysisError) {
       return NextResponse.json({ status: "error", message: error.message, error: error.code }, { status: error.status })
