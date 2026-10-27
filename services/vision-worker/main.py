@@ -76,6 +76,12 @@ HIT_DEDUPE_SECONDS = 8.0
 MAX_GATE_TRACES = 300
 GATE_TRACE_REPEAT_SECONDS = 3.0  # 同一门禁同一结论的重复追踪合并窗口，避免 2~3 FPS 下刷屏
 WAIST_RATIO = 0.55  # HAND_ELEVATED：手中心高于人员框「框顶 + 55% 高度」视为抬起
+# 开放词汇模型（YOLO-World）的置信度普遍偏低（猫/食盆等常见 0.25~0.35）：
+# 非人员锚点、非 PPE 的词条，门槛取 min(全局下限, OPEN_VOCAB_MIN_CONF)，不被全局 0.40 一刀切；二级反哺词条自带 floor 优先。
+OPEN_VOCAB_MIN_CONF = min(0.95, max(0.05, float(os.environ.get("VIGIL_OPEN_VOCAB_CONF", "0.30") or 0.30)))
+# 诊断：模型 predict 的置信度底线（低于全局门槛的候选也会进入原始输出追踪，但不会参与门禁）
+RAW_DIAG_FLOOR = min(0.25, max(0.01, float(os.environ.get("VIGIL_RAW_DIAG_FLOOR", "0.10") or 0.10)))
+RAW_TOP_N = 8
 SMOKING_KEYWORDS = ("吸烟", "抽烟", "smok", "cigarette")
 # 吸烟类规则的冷却上限（秒）：排查"无命中无告警"期间避免冷却锁吞掉真实事件；设为 0 关闭该上限
 SMOKING_COOLDOWN_CAP = max(0.0, float(os.environ.get("VIGIL_SMOKING_COOLDOWN_CAP", "30") or 0))
@@ -313,6 +319,8 @@ class Runtime:
         # 规则管道门禁逐级诊断：环形缓冲 + 同一 (通道, 规则, 门禁, 结论) 的节流时间戳
         self.gate_traces: deque = deque(maxlen=MAX_GATE_TRACES)
         self.gate_trace_last: dict[str, float] = {}
+        # 每路通道最近一次推理的模型原始 Top 检出（含低于门槛的候选），供 /health 与 /gate-traces 诊断
+        self.raw_top: dict[str, dict[str, Any]] = {}
         self.tracker_kind = "bytetrack"
         self.last_reload_ms = 0.0
         self.model_lock = threading.RLock()
@@ -732,13 +740,49 @@ def display_prompts() -> list[str]:
     return merged
 
 
+def threshold_of(role: str, floor: float | None, low: float) -> float:
+    """单个检出的有效置信度门槛：反哺词条自带 floor > 人员/PPE 用全局下限 > 开放词汇词条放宽到 OPEN_VOCAB_MIN_CONF。"""
+    if floor is not None:
+        return floor
+    if role in (ROLE_ANCHOR, ROLE_PPE):
+        return low
+    return min(low, OPEN_VOCAB_MIN_CONF)
+
+
 def passes(det: Det, low: float) -> bool:
-    return det.conf >= (det.floor if det.floor is not None else low)
+    return det.conf >= threshold_of(det.role, det.floor, low)
+
+
+def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], predict_floor: float) -> None:
+    """记录模型原始 Top 检出（含低置信度候选）：区分「被置信度拦截」与「根本没有特征响应」。"""
+    raw.sort(key=lambda item: -item["conf"])
+    top = raw[:RAW_TOP_N]
+    synced = list(RT.classes_applied) == list(prompts)
+    RT.raw_top[sid] = {
+        "at": now_iso(),
+        "predictFloor": predict_floor,
+        "vocabSynced": synced,
+        "appliedCount": len(RT.classes_applied),
+        "channelVocabCount": len(prompts),
+        "top": top,
+    }
+    vocab_note = f"词表已注入 {len(RT.classes_applied)} 条" + ("" if synced else f"，与通道词表 {len(prompts)} 条不一致")
+    if not top:
+        detail = f"{vocab_note}；模型无任何特征响应（全词表 conf≥{predict_floor:.2f} 均无框）。通道词表：{', '.join(prompts[:12])}"
+    else:
+        parts = [
+            f"{item['prompt']}:{item['conf']:.2f}[{'通过≥' if item['passed'] else '拦截<'}{item['threshold']:.2f}]"
+            for item in top
+        ]
+        detail = f"{vocab_note}；模型原始 Top{len(top)}（predict≥{predict_floor:.2f}）：" + ", ".join(parts)
+    gate_trace(sid, "_raw", "模型原始输出", "[Gate 0 - Raw]", "info", detail)
 
 
 def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     low = RT.cfg.low
-    conf_floor = max(0.05, min(0.25, low))
+    # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
+    conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
+    predict_floor = min(conf_floor, RAW_DIAG_FLOOR)
     prompts = prompts_of(sid)
     roles = roles_of(sid)
     if not prompts:
@@ -748,9 +792,10 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         ok, _ = apply_classes(prompts)
         if not ok:
             return []
-        result = RT.model.predict(image, conf=conf_floor, imgsz=640, device=RT.device, verbose=False)[0]
+        result = RT.model.predict(image, conf=predict_floor, imgsz=640, device=RT.device, verbose=False)[0]
     names = result.names
     dets: list[Det] = []
+    raw: list[dict[str, Any]] = []
     boxes = result.boxes
     if boxes is not None and len(boxes) > 0:
         xyxy = boxes.xyxy.cpu().numpy()
@@ -761,11 +806,17 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
             role = roles.get(prompt)
             if role is None:
                 continue
+            conf = float(confs[k])
             floor = RT.learned_conf.get((sid, prompt))
-            if floor is not None and float(confs[k]) < floor:
+            threshold = threshold_of(role, floor, low)
+            raw.append({"prompt": prompt, "role": role, "conf": round(conf, 3), "threshold": round(threshold, 3), "passed": conf >= threshold})
+            if conf < conf_floor:
+                continue
+            if floor is not None and conf < floor:
                 continue
             x1, y1, x2, y2 = (float(v) for v in xyxy[k])
-            dets.append(Det(prompt=prompt, role=role, conf=float(confs[k]), box=(x1, y1, x2, y2), floor=floor))
+            dets.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2), floor=floor))
+    record_raw_output(sid, prompts, raw, predict_floor)
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
     ids = tracker.update([d.box for d in persons], [d.conf for d in persons])
     for d, track_id in zip(persons, ids):
@@ -1140,9 +1191,47 @@ def seen_summary(dets: list[Det], limit: int = 8) -> str:
     return ", ".join(f"{d.prompt}:{d.conf:.2f}" for d in ordered)
 
 
+def raw_blocked_summary(sid: str) -> str:
+    """最近一次推理里被置信度门槛拦下的候选，附在 Gate 1 阻断说明后，便于判断是「低于阈值」还是「无特征响应」。"""
+    entry = RT.raw_top.get(sid)
+    if not entry:
+        return ""
+    blocked = [item for item in entry["top"] if not item["passed"]]
+    if not blocked:
+        return "；模型原始输出中无低于阈值的候选（无特征响应或词表未命中）"
+    return "；被阈值拦截的候选：" + ", ".join(f"{i['prompt']}:{i['conf']:.2f}(<{i['threshold']:.2f})" for i in blocked[:5])
+
+
+def rule_zone_polygons(pipe: dict[str, Any], sid: str) -> tuple[list[dict[str, Any]], str]:
+    """本规则适用的多边形围栏。绑定了围栏的只用绑定项；未绑定时，排除已被同通道其他规则认领、
+    或名称只与其他规则相关（如「猫砂盆」只服务「猫在猫砂盆上厕所」）的围栏，避免其他行为被 Gate 3 误杀。"""
+    polygons = [z for z in zones_for(sid) if z.get("type") == "polygon" and len(z.get("coordinates") or []) >= 3]
+    bound = set(pipe["bound_roi_ids"])
+    if bound:
+        return [z for z in polygons if z["id"] in bound], f"绑定围栏 {sorted(bound)}"
+    others = [p for p in pipelines_for(sid) if p is not pipe]
+    rule_text = norm_class(" ".join([pipe["name"] or pipe["id"], *pipe["subject_classes"], *pipe["context_classes"]]))
+    mine: list[dict[str, Any]] = []
+    neutral: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for zone in polygons:
+        zname = norm_class(str(zone.get("name") or ""))
+        if zname and zname in rule_text:
+            mine.append(zone)
+            continue
+        claimed = any(zone["id"] in p["bound_roi_ids"] for p in others)
+        theirs = bool(zname) and any(zname in norm_class(p["name"] or p["id"]) for p in others)
+        if claimed or theirs:
+            skipped.append(str(zone.get("name") or zone["id"]))
+        else:
+            neutral.append(zone)
+    note = "未绑定围栏" + (f"，已排除其他规则专属围栏 {skipped}" if skipped else "")
+    return (mine or neutral), note
+
+
 def hand_pose_check(hand: Det, live: list[Det]) -> tuple[bool | None, str]:
     """手部抬起/探出的几何近似：手中心高于最近人员框的腰线（框顶 + 55% 高度）。
-    返回 (结论, 诊断文本)；结论为 None 表示画面无人员框，无法判定。"""
+    返回 (结论, 诊断文本)��结论为 None 表示画面无人员框，无法判定。"""
     hx, hy = (hand.box[0] + hand.box[2]) / 2, (hand.box[1] + hand.box[3]) / 2
     persons = [d for d in live if is_person(d)]
     if not persons:
@@ -1194,7 +1283,8 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
         if not subjects:
             trace(
                 "[Gate 1 - Subject]", "block",
-                f"要求主体 {pipe['subject_classes']}，本帧检出（阈值≥{low:.2f}）：{seen_summary(live)}",
+                f"要求主体 {pipe['subject_classes']}，本帧检出（全局下限≥{low:.2f}，开放词汇词条≥{min(low, OPEN_VOCAB_MIN_CONF):.2f}）："
+                f"{seen_summary(live)}{raw_blocked_summary(sid)}",
             )
             continue
         if not degraded:
@@ -1228,15 +1318,11 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
         # 阶段 1：空间相交
         zone_note = ""
         if pipe["require_roi"]:
-            bound = set(pipe["bound_roi_ids"])
-            polygons = [
-                z for z in zones_for(sid)
-                if z.get("type") == "polygon" and len(z.get("coordinates") or []) >= 3 and (not bound or z["id"] in bound)
-            ]
+            polygons, zone_scope = rule_zone_polygons(pipe, sid)
             if not polygons:
                 trace(
                     "[Gate 3 - ROI]", "pass",
-                    f"规则要求围栏，但通道 {sid} 无可用多边形围栏（绑定 {sorted(bound) or '全部'}），退化为全画面监测",
+                    f"规则要求围栏，但通道 {sid} 无适用于本规则的多边形围栏（{zone_scope}），退化为全画面监测",
                 )
             else:
                 hit_subjects: list[Det] = []
@@ -1799,6 +1885,7 @@ async def health() -> dict[str, Any]:
             "motionPct": None if st.last_motion_pct is None else round(st.last_motion_pct, 2),
             "persons": st.last_persons,
             "pendingTracks": len(st.tracks),
+            "rawTop": RT.raw_top.get(sid),
             "error": st.last_error,
         }
     return {
