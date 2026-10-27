@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -178,6 +179,8 @@ class ReloadRequest(BaseModel):
     rulePipelines: list[PipelineItem] = Field(default_factory=list)
     go2rtcUrl: str = "http://127.0.0.1:1984"
     triggerUrl: str = ""
+    auditMode: bool = False
+    auditUrl: str = ""
 
 
 @dataclass
@@ -196,6 +199,8 @@ class Config:
     zones: list[dict[str, Any]] = field(default_factory=list)
     learning: dict[str, dict[str, Any]] = field(default_factory=dict)
     pipelines: list[dict[str, Any]] = field(default_factory=list)
+    audit_mode: bool = False
+    audit_url: str = ""
 
 
 @dataclass
@@ -360,6 +365,7 @@ def log(message: str) -> None:
 def gate_trace(sid: str, rule_id: str, rule_name: str, gate: str, verdict: str, detail: str) -> None:
     """门禁诊断：写控制台 + 内存环形缓冲（/gate-traces）。verdict: pass | block | info。"""
     now = time.time()
+    audit_capture_gate(rule_id, rule_name, gate, verdict, detail)  # 审计采集不受节流影响，逐帧完整留痕
     signature = f"{sid}|{rule_id}|{gate}|{verdict}"
     last = RT.gate_trace_last.get(signature)
     if last is not None and now - last < GATE_TRACE_REPEAT_SECONDS:
@@ -382,6 +388,158 @@ def gate_trace(sid: str, rule_id: str, rule_name: str, gate: str, verdict: str, 
     )
     tag = {"pass": "PASS", "block": "BLOCK"}.get(verdict, "INFO")
     log(f"{gate} {tag} stream={sid or '-'} rule={rule_name or rule_id} {detail}")
+
+
+# --------------------------------------------------------------------------- #
+# 链路审计：开启后逐帧记录一级门禁决策（含被拦截的帧），批量异步上报到 Next 服务落盘
+# --------------------------------------------------------------------------- #
+AUDIT_LOCAL = threading.local()
+AUDIT_QUEUE: deque = deque(maxlen=2000)
+AUDIT_LAST: dict[str, dict[str, Any]] = {}
+AUDIT_MERGE_SECONDS = 8.0
+AUDIT_FLUSH_SECONDS = 2.0
+AUDIT_BATCH = 100
+AUDIT_DROP_CODES = {
+    "1": "GATE_1_SUBJECT_MISSING",
+    "2": "GATE_2_POSE_FAILED",
+    "3": "GATE_3_ROI_OUT_OF_BOUNDS",
+    "4": "GATE_4_MEDIA_MISSING",
+    "5": "GATE_5_COOLDOWN",
+    "6": "GATE_6_DEBOUNCE_PENDING",
+}
+
+
+def audit_begin() -> None:
+    AUDIT_LOCAL.ctx = (
+        {"steps": {}, "inferred": False, "dets": [], "shape": (1, 1), "pending": [], "cooled": [], "events": [], "reasons": []}
+        if RT.cfg.audit_mode and RT.cfg.audit_url
+        else None
+    )
+
+
+def audit_note(**kwargs: Any) -> None:
+    ctx = getattr(AUDIT_LOCAL, "ctx", None)
+    if ctx is not None:
+        ctx.update(kwargs)
+
+
+def audit_capture_gate(rule_id: str, rule_name: str, gate: str, verdict: str, detail: str) -> None:
+    ctx = getattr(AUDIT_LOCAL, "ctx", None)
+    if ctx is None or not rule_id or rule_id == "_raw":
+        return
+    entry = ctx["steps"].setdefault(rule_id, {"name": rule_name or rule_id, "gates": []})
+    if entry["name"] == rule_id and rule_name and rule_name != rule_id:
+        entry["name"] = rule_name
+    entry["gates"].append({"gate": gate, "verdict": verdict, "detail": detail[:400]})
+
+
+def audit_drop_code(gate: str) -> str:
+    match = re.search(r"Gate (\d)", gate)
+    return AUDIT_DROP_CODES.get(match.group(1) if match else "", "UNKNOWN")
+
+
+def audit_commit(sid: str) -> None:
+    ctx = getattr(AUDIT_LOCAL, "ctx", None)
+    AUDIT_LOCAL.ctx = None
+    if ctx is None or not ctx["inferred"]:
+        return
+    escalated = {rid for rid, _ in ctx["events"] if rid}
+    pending = {rid for rid, _ in ctx["pending"] if rid}
+    cooled = {rid for rid, _ in ctx["cooled"] if rid}
+    decisions: list[dict[str, Any]] = []
+    for rule_id, entry in ctx["steps"].items():
+        gates = entry["gates"]
+        first_block = next((g for g in gates if g["verdict"] == "block"), None)
+        if rule_id in escalated:
+            outcome, drop = "escalated", None
+        elif rule_id in pending:
+            outcome, drop = "pending", "GATE_6_DEBOUNCE_PENDING"
+        elif rule_id in cooled:
+            outcome, drop = "block", "GATE_5_COOLDOWN"
+        elif first_block:
+            outcome, drop = "block", audit_drop_code(first_block["gate"])
+        else:
+            outcome, drop = "pass", None
+        decisions.append({"ruleId": rule_id, "ruleName": entry["name"], "outcome": outcome, "dropCode": drop, "gates": gates[:12]})
+    height, width = ctx["shape"]
+    low = RT.cfg.low
+    raw = []
+    for d in sorted(ctx["dets"], key=lambda item: -item.conf)[:12]:
+        x1, y1, x2, y2 = d.box
+        raw.append(
+            {
+                "prompt": d.prompt,
+                "label": label_of(d.prompt, sid),
+                "role": d.role,
+                "confidence": round(d.conf, 3),
+                "passed": passes(d, low),
+                "trackId": d.track_id,
+                "box": [round(x1 / width * 1000), round(y1 / height * 1000), round(x2 / width * 1000), round(y2 / height * 1000)],
+            }
+        )
+    if escalated or ctx["events"]:
+        outcome = "escalated"
+    elif ctx["pending"]:
+        outcome = "pending"
+    elif ctx["cooled"]:
+        outcome = "cooldown"
+    elif any(item["outcome"] == "block" for item in decisions):
+        outcome = "blocked"
+    else:
+        outcome = "no_suspect"
+    if outcome == "no_suspect" and not raw and not decisions:
+        return  # 空画面不留痕，避免挤占保留额度
+    event_ids = [event_id for _, event_id in ctx["events"] if event_id]
+    sig = f"{outcome}|" + ",".join(sorted(f"{d['ruleId']}:{d['outcome']}:{d['dropCode']}" for d in decisions)) + "|" + ",".join(sorted({r["prompt"] for r in raw}))
+    now = time.time()
+    last = AUDIT_LAST.get(sid)
+    if outcome != "escalated" and last and last["sig"] == sig and now - last["ts"] < AUDIT_MERGE_SECONDS:
+        last["record"]["repeat"] += 1
+        last["record"]["rawDetections"] = raw
+        last["record"]["decisions"] = decisions
+        last["ts"] = now
+        AUDIT_QUEUE.append(last["record"])
+        return
+    record = {
+        "id": uuid.uuid4().hex[:12],
+        "at": now_iso(),
+        "streamId": sid,
+        "outcome": outcome,
+        "repeat": 1,
+        "rawDetections": raw,
+        "decisions": decisions,
+        "reasons": [r for r in ctx["reasons"]][:5],
+        "eventIds": event_ids,
+    }
+    AUDIT_LAST[sid] = {"sig": sig, "ts": now, "record": record}
+    AUDIT_QUEUE.append(record)
+
+
+def audit_flush_loop() -> None:
+    warned = False
+    while not STOP.is_set():
+        STOP.wait(AUDIT_FLUSH_SECONDS)
+        url = RT.cfg.audit_url
+        if not url or not AUDIT_QUEUE:
+            if not RT.cfg.audit_mode:
+                AUDIT_QUEUE.clear()
+            continue
+        batch: dict[str, dict[str, Any]] = {}
+        while AUDIT_QUEUE and len(batch) < AUDIT_BATCH:
+            item = AUDIT_QUEUE.popleft()
+            batch[item["id"]] = dict(item)
+        headers = {"Authorization": f"Bearer {EDGE_TOKEN}"} if EDGE_TOKEN else {}
+        try:
+            response = HTTP.post(url, json={"records": list(batch.values())}, headers=headers)
+            if response.status_code != 200 and not warned:
+                log(f"审计上报失败：HTTP {response.status_code}")
+                warned = True
+            elif response.status_code == 200:
+                warned = False
+        except Exception as error:  # noqa: BLE001
+            if not warned:
+                log(f"审计上报失败：{str(error)[:120]}")
+                warned = True
 
 
 # --------------------------------------------------------------------------- #
@@ -780,7 +938,7 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
 
 def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     low = RT.cfg.low
-    # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
+    # 进入门禁的候选底线��不高于 0.25，且不高于开放词汇门槛
     conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
     predict_floor = min(conf_floor, RAW_DIAG_FLOOR)
     prompts = prompts_of(sid)
@@ -1661,6 +1819,14 @@ def log_hit(
 # 单路扫描（后台线程）
 # --------------------------------------------------------------------------- #
 def scan_stream(sid: str) -> None:
+    audit_begin()
+    try:
+        _scan_stream(sid)
+    finally:
+        audit_commit(sid)
+
+
+def _scan_stream(sid: str) -> None:
     cfg = RT.cfg
     st = stream_state(sid)
     now = time.time()
@@ -1705,6 +1871,7 @@ def scan_stream(sid: str) -> None:
     suspects.extend(explore_suspects(sid, dets, image.shape[:2], st, relation_keys))
     suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
     suspects.extend(pipeline_suspects(sid, dets, image.shape[:2], st, now))
+    audit_note(inferred=True, dets=dets, shape=image.shape[:2])
     st.last_had_person = persons > 0 or any(d.role == ROLE_SUBJECT and passes(d, cfg.low) for d in dets)
     st.last_persons = persons
     st.last = {"ts": now, "image": image, "dets": dets, "motion": ratio, "mask": None}
@@ -1750,6 +1917,11 @@ def scan_stream(sid: str) -> None:
             continue
         triggered.append(suspect)
     st.has_pending = bool(pending_list)
+    audit_note(
+        pending=[(s.rule_id, h) for s, h in pending_list],
+        cooled=[(s.rule_id, None) for s in cooled_list],
+        reasons=[r for s in [*triggered, *(p for p, _ in pending_list), *cooled_list] for r in s.reasons][:5],
+    )
 
     if not triggered:
         RT.stats.tier1_pending += 1
@@ -1789,6 +1961,9 @@ def scan_stream(sid: str) -> None:
             "shadow": suspect.shadow,
         }
         RT.events.appendleft(event)
+        audit_ctx = getattr(AUDIT_LOCAL, "ctx", None)
+        if audit_ctx is not None:
+            audit_ctx["events"].append((suspect.rule_id, event["id"]))
         if suspect.rule_id:
             gate_trace(
                 sid, suspect.rule_id, suspect.rule_id, "[Gate 6 - Escalate]", "pass",
@@ -1832,6 +2007,7 @@ def scan_loop() -> None:
 async def lifespan(_: FastAPI):
     threading.Thread(target=load_model, name="model-loader", daemon=True).start()
     threading.Thread(target=scan_loop, name="scan-loop", daemon=True).start()
+    threading.Thread(target=audit_flush_loop, name="audit-flush", daemon=True).start()
     yield
     STOP.set()
     PUSH_POOL.shutdown(wait=False, cancel_futures=True)
@@ -1963,6 +2139,8 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         stream_ids=[s for s in dict.fromkeys(req.streamIds) if s],
         go2rtc=req.go2rtcUrl.rstrip("/") or "http://127.0.0.1:1984",
         trigger_url=req.triggerUrl.strip(),
+        audit_mode=req.auditMode,
+        audit_url=req.auditUrl.strip(),
         zones=[
             {
                 "id": z.id,

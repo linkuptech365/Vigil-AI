@@ -1,3 +1,5 @@
+import { auditRetentionOf, DEFAULT_AUDIT_RETENTION } from "./audit"
+
 export type VisionRole = "anchor_person" | "required_ppe" | "hazard_target" | "subject_target" | "context_object"
 
 export const VISION_ROLES: { id: VisionRole; label: string; hint: string }[] = [
@@ -31,6 +33,10 @@ export interface VisionConfig {
   minConsecutiveFrames: number
   cooldownSeconds: number
   staticRecheckSeconds: number
+  /** 链路审计模式：开启后一级门禁拦截 / 二级研判放行的每一帧都完整留痕，用于漏报排查与模型调优 */
+  auditMode: boolean
+  /** 非报警审计记录最多保留条数 */
+  auditRetention: number
 }
 
 /**
@@ -50,6 +56,8 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
   minConsecutiveFrames: 3,
   cooldownSeconds: 30,
   staticRecheckSeconds: 10,
+  auditMode: false,
+  auditRetention: DEFAULT_AUDIT_RETENTION,
 }
 
 /** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
@@ -154,6 +162,8 @@ export function sanitizeVisionConfig(input: unknown, base: VisionConfig = DEFAUL
     minConsecutiveFrames: Math.round(clampNumber(raw.minConsecutiveFrames, 1, 30, base.minConsecutiveFrames)),
     cooldownSeconds: clampNumber(raw.cooldownSeconds, 0, 3600, base.cooldownSeconds),
     staticRecheckSeconds: clampNumber(raw.staticRecheckSeconds, 0, 300, base.staticRecheckSeconds),
+    auditMode: typeof raw.auditMode === "boolean" ? raw.auditMode : base.auditMode,
+    auditRetention: raw.auditRetention === undefined ? base.auditRetention : auditRetentionOf(raw.auditRetention),
   }
 }
 

@@ -10,6 +10,7 @@ import { runAnalysis } from "@/lib/ops/server/vlm-engine"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadProfiles } from "@/lib/storage/model-store"
 import { fireAutoLinkage } from "@/lib/ops/server/alert-linkage"
+import { recordTier2Audit } from "@/lib/ops/server/audit-recorder"
 import { appendRecord, getStream, recordAnalysis, saveAlert } from "@/lib/storage/streams-store"
 import { ensureEngine, grabFrame } from "@/lib/stream-engine"
 import { buildAlertTags, composeEventSummary } from "@/lib/ops/video-search"
@@ -154,6 +155,23 @@ export async function analyzeStream(options: AnalyzeStreamOptions): Promise<Anal
         summary: error instanceof Error ? error.message : "研判失败",
         reason: error instanceof StreamAnalysisError ? error.code : "INTERNAL",
         edge: options.edge,
+      })
+      const message = error instanceof Error ? error.message : "研判失败"
+      recordTier2Audit({
+        streamId: meta.id,
+        streamName: meta.name,
+        source: options.source,
+        verdict: "ERROR",
+        alarm: false,
+        ruleId: options.ruleId ?? null,
+        ruleName: "",
+        confidence: 0,
+        threshold: null,
+        reasoning: "",
+        summary: message,
+        frameCount: 0,
+        edge: options.edge,
+        error: error instanceof StreamAnalysisError ? error.code : "INTERNAL",
       })
     }
     throw error
@@ -323,6 +341,39 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     alertId: alert?.id,
     edge: options.edge,
     hardSample: edgeRejected && (options.edge?.edgeConfidence ?? 0) >= 0.8 ? true : undefined,
+  })
+
+  recordTier2Audit({
+    at: capturedAt.toISOString(),
+    streamId: meta.id,
+    streamName: meta.name,
+    source: options.source,
+    verdict: alert
+      ? "ALARM"
+      : shadowed || verdict.shadowReview
+        ? "SHADOW"
+        : hit
+          ? "FOLDED"
+          : verdict.excluded
+            ? "EXCLUDED"
+            : verdict.belowThreshold
+              ? "BELOW_THRESHOLD"
+              : "SAFE",
+    alarm: Boolean(alert),
+    ruleId: result.ruleId || options.ruleId || null,
+    ruleName: result.ruleTriggered || "",
+    confidence: result.confidence,
+    threshold: scopedRules.length === 1 ? ruleSensitivity(scopedRules[0]) : null,
+    reasoning: result.reasoning || "",
+    summary,
+    exclusion: verdict.excluded ? { reason: verdict.excluded.reason, action: verdict.excluded.action } : undefined,
+    action: result.fine?.primary_action,
+    medium: result.fine?.interaction_target.category,
+    frameCount: frames.length,
+    model: metrics.model,
+    engineSource: metrics.source,
+    edge: options.edge,
+    alertId: alert?.id ?? null,
   })
 
   return {

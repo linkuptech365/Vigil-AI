@@ -219,6 +219,32 @@ export function VisionCard() {
           </div>
         </FieldGroup>
 
+        <Separator />
+
+        <FieldGroup>
+          <Field orientation="horizontal">
+            <Switch id="vision-audit" checked={draft.auditMode} onCheckedChange={(auditMode) => patch({ auditMode })} />
+            <FieldLabel htmlFor="vision-audit">链路审计模式（逐帧记录一级门禁决策，含被拦截的帧）</FieldLabel>
+          </Field>
+          <FieldDescription>
+            开启后可在「运维中心 · 审计」中回溯每帧的原始检出、各规则逐级门禁结果与二级研判输入输出，用于排查“为什么没报警”。会增加少量写入开销，排查完毕建议关闭。
+          </FieldDescription>
+          {draft.auditMode ? (
+            <Field className="sm:max-w-xs">
+              <FieldLabel htmlFor="vision-audit-retention">审计保留条数</FieldLabel>
+              <Input
+                id="vision-audit-retention"
+                type="number"
+                min={50}
+                max={5000}
+                step={50}
+                value={draft.auditRetention}
+                onChange={(e) => patch({ auditRetention: Number(e.target.value) })}
+              />
+            </Field>
+          ) : null}
+        </FieldGroup>
+
         <div className="flex items-center justify-between gap-2">
           <span className={cn("text-xs", dirty ? "text-warning" : "text-muted-foreground")}>{dirty ? "有未保存的修改" : "已与服务端同步"}</span>
           <div className="flex gap-2">
