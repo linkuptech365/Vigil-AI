@@ -227,6 +227,8 @@ class Config:
     pipelines: list[dict[str, Any]] = field(default_factory=list)
     # 通道 -> {"rules": [规则 id], "classes": {规则要素类别}, "wildcard": bool}；没有启用规则的通道不会出现在 active_sids 里
     channel_rules: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 通道 -> 负样本锚点 [{"label": 类别或 "*", "bbox": [ymin, xmin, ymax, xmax] 归一化}]；随 cfg 整体替换，读取天然线程安全
+    negative_anchors: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     audit_mode: bool = False
     audit_url: str = ""
     hits_url: str = ""
@@ -1699,6 +1701,85 @@ def fmt_box(det: Det) -> str:
     return f"({int(det.box[0])},{int(det.box[1])},{int(det.box[2])},{int(det.box[3])})"
 
 
+NEGATIVE_ANCHOR_IOU = 0.55
+
+
+def calc_bbox_iou(box_a: tuple[float, float, float, float], box_b: tuple[float, float, float, float]) -> float:
+    """两个归一化框 [ymin, xmin, ymax, xmax]（0.0~1.0）的交并比。"""
+    ay1, ax1, ay2, ax2 = box_a
+    by1, bx1, by2, bx2 = box_b
+    inter_h = min(ay2, by2) - max(ay1, by1)
+    inter_w = min(ax2, bx2) - max(ax1, bx1)
+    if inter_h <= 0 or inter_w <= 0:
+        return 0.0
+    inter = inter_h * inter_w
+    union = max(0.0, ay2 - ay1) * max(0.0, ax2 - ax1) + max(0.0, by2 - by1) * max(0.0, bx2 - bx1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def det_box_norm(det: Det, shape: tuple[int, int]) -> tuple[float, float, float, float]:
+    """检测框（像素 x1,y1,x2,y2）→ 归一化 [ymin, xmin, ymax, xmax]，与锚点坐标系对齐。"""
+    height, width = max(1, shape[0]), max(1, shape[1])
+    x1, y1, x2, y2 = det.box
+    return (y1 / height, x1 / width, y2 / height, x2 / width)
+
+
+def parse_negative_anchors(raw: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    """下发的负样本锚点清洗：丢弃坐标非法 / 退化的条目，坐标夹到 0~1，label 为空视为通配。"""
+    parsed: dict[str, list[dict[str, Any]]] = {}
+    for sid, anchors in (raw or {}).items():
+        items: list[dict[str, Any]] = []
+        for anchor in anchors if isinstance(anchors, list) else []:
+            if not isinstance(anchor, dict):
+                continue
+            bbox = anchor.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            try:
+                ymin, xmin, ymax, xmax = (min(1.0, max(0.0, float(v))) for v in bbox)
+            except (TypeError, ValueError):
+                continue
+            if ymax <= ymin or xmax <= xmin:
+                continue
+            label = str(anchor.get("label") or "").strip() or "*"
+            items.append({"id": str(anchor.get("id") or ""), "label": label, "bbox": [ymin, xmin, ymax, xmax]})
+        if items:
+            parsed[str(sid)] = items
+    return parsed
+
+
+def negative_anchor_hit(prompt: str, box_norm: tuple[float, float, float, float], anchors: list[dict[str, Any]]) -> tuple[str, float] | None:
+    """返回与该候选框 IoU 最高且达标的锚点 (label, iou)。label 为 * 通配所有类别。"""
+    best: tuple[str, float] | None = None
+    wanted = norm_class(prompt)
+    for anchor in anchors:
+        label = anchor["label"]
+        if label != "*" and norm_class(label) != wanted:
+            continue
+        score = calc_bbox_iou(box_norm, tuple(anchor["bbox"]))  # type: ignore[arg-type]
+        if score >= NEGATIVE_ANCHOR_IOU and (best is None or score > best[1]):
+            best = (label, score)
+    return best
+
+
+def filter_negative_anchors(sid: str, dets: list[Det], shape: tuple[int, int]) -> tuple[list[Det], list[str]]:
+    """Gate 1 空间抑制：与本通道负样本锚点类别一致且 IoU≥0.55 的候选框被压制，不进入后续 Gate 2~5。"""
+    anchors = RT.cfg.negative_anchors.get(sid)
+    if not anchors or not dets:
+        return dets, []
+    kept: list[Det] = []
+    notes: list[str] = []
+    for det in dets:
+        hit = negative_anchor_hit(det.prompt, det_box_norm(det, shape), anchors)
+        if hit is None:
+            kept.append(det)
+            continue
+        label, score = hit
+        notes.append(f"{det.prompt}{fmt_box(det)} 命中负样本锚点抑制(IoU: {score:.2f}，锚点类别 {label})")
+        log(f"[Gate 1 - 负样本抑制] 通道 {sid} 目标 {det.prompt} 命中坐标锚点 (IoU: {score:.2f})，已成功压制")
+    return kept, notes
+
+
 def seen_summary(dets: list[Det], limit: int = 8) -> str:
     if not dets:
         return "无任何检出"
@@ -1784,6 +1865,9 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
         wants_hand = any("hand" in norm_class(c) for c in pipe["subject_classes"])
         # 阶段 1：主体检查
         subjects = [d for d in live if matches_class(d, pipe["subject_classes"])]
+        subjects, suppressed_notes = filter_negative_anchors(sid, subjects, shape)
+        if suppressed_notes:
+            trace("[Gate 1 - 负样本抑制]", "block" if not subjects else "info", "；".join(suppressed_notes[:3]))
         degraded = False
         if not subjects and pose_on and wants_hand:
             # 小模型在中远景常检不出独立手部框：退化为人员框放行，细节交二级 VLM 裁定
@@ -2555,6 +2639,7 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
             }
             for sid, item in req.channelRules.items()
         },
+        negative_anchors=parse_negative_anchors(req.negativeAnchors),
         zones=[
             {
                 "id": z.id,
