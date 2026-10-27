@@ -282,7 +282,9 @@ class StreamState:
     last_infer_ts: float = 0.0
     last_had_person: bool = False
     has_pending: bool = False
-    last_error: str = ""
+    last_error: str = ""  # 取帧失败原因（仅取帧失败才会让通道判离线）
+    fail_streak: int = 0  # 连续取帧失败次数
+    infer_error: str = ""  # 取帧成功但后续推理/门禁处理抛出的异常，通道仍在线
     last_ok_ts: float = 0.0
     last_motion_pct: float | None = None
     last_persons: int = 0
@@ -979,15 +981,28 @@ def load_model() -> None:
 # --------------------------------------------------------------------------- #
 # 取帧、Tier-0 帧差
 # --------------------------------------------------------------------------- #
+class FrameFetchError(RuntimeError):
+    """从 go2rtc 取帧失败：只有这类错误才计入「通道离线」，推理阶段的异常不算。"""
+
+
+# 连续取帧失败达到该次数，才判定通道离线（单次抖动、超时重试不算）
+OFFLINE_FAIL_STREAK = 3
+# 距上次成功取帧超过该秒数（词表更新期间不计），才判定通道离线；需大于单轮推理 + 取帧超时的耗时
+OFFLINE_STALE_SECONDS = 30.0
+
+
 def fetch_frame(sid: str) -> tuple[bytes, np.ndarray]:
     url = f"{RT.cfg.go2rtc}/api/frame.jpeg"
-    response = HTTP.get(url, params={"src": sid, "width": 960}, timeout=httpx.Timeout(15.0, connect=3.0))
+    try:
+        response = HTTP.get(url, params={"src": sid, "width": 960}, timeout=httpx.Timeout(15.0, connect=3.0))
+    except httpx.HTTPError as error:
+        raise FrameFetchError(f"流媒体引擎请求失败：{type(error).__name__}") from error
     if response.status_code != 200:
-        raise RuntimeError(f"流媒体引擎返回 HTTP {response.status_code}")
+        raise FrameFetchError(f"流媒体引擎返回 HTTP {response.status_code}")
     data = response.content
     image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
-        raise RuntimeError("引擎返回的不是有效的 JPEG 画面")
+        raise FrameFetchError("引擎返回的不是有效的 JPEG 画面")
     return data, image
 
 
@@ -1697,7 +1712,7 @@ def raw_blocked_summary(sid: str) -> str:
         return ""
     blocked = [item for item in entry["top"] if not item["passed"]]
     if not blocked:
-        return "；模型原始输出中无低于阈值的候选（无特征响应或词表未命中）"
+        return "；模型原始输���中无低于阈值的候选（无特征响应或词表未命中）"
     return "；被阈值拦截的候选：" + ", ".join(f"{i['prompt']}:{i['conf']:.2f}(<{i['threshold']:.2f})" for i in blocked[:5])
 
 
@@ -1782,7 +1797,7 @@ def pipeline_suspects(sid: str, dets: list[Det], shape: tuple[int, int], st: Str
         if not subjects:
             trace(
                 "[Gate 1 - Subject]", "block",
-                f"要求主体 {pipe['subject_classes']}，本帧检出（全局下限≥{low:.2f}，开放词汇词条≥{min(low, OPEN_VOCAB_MIN_CONF):.2f}）："
+                f"要求主体 {pipe['subject_classes']}，本���检出（全局下限≥{low:.2f}，开放词汇词条≥{min(low, OPEN_VOCAB_MIN_CONF):.2f}）："
                 f"{seen_summary(live)}{raw_blocked_summary(sid)}",
             )
             continue
@@ -2182,6 +2197,7 @@ def _scan_stream(sid: str) -> None:
     now = time.time()
     jpeg, image = fetch_frame(sid)
     st.last_error = ""
+    st.fail_streak = 0
     st.last_ok_ts = now
     st.frames += 1
     RT.stats.total_frames += 1
@@ -2351,8 +2367,18 @@ def scan_loop() -> None:
             st.next_at = now + interval
             try:
                 scan_stream(sid)
-            except Exception as error:  # noqa: BLE001
+                st.infer_error = ""
+            except FrameFetchError as error:
+                st.fail_streak += 1
                 st.last_error = str(error)[:160] or type(error).__name__
+                st.next_at = time.time() + 1.0
+                now_err = time.time()
+                if now_err - SCAN_ERROR_LOGGED.get(sid, 0.0) >= 30:
+                    SCAN_ERROR_LOGGED[sid] = now_err
+                    log(f"[{sid}] 取帧失败（连续 {st.fail_streak} 次，≥{OFFLINE_FAIL_STREAK} 次才判离线）：{error}")
+            except Exception as error:  # noqa: BLE001
+                # 取帧已成功，只是推理/门禁处理出错：通道保持在线，错误单独上报
+                st.infer_error = f"{type(error).__name__}: {str(error)[:140]}"
                 st.next_at = time.time() + 3.0
                 now_err = time.time()
                 if now_err - SCAN_ERROR_LOGGED.get(sid, 0.0) >= 30:
@@ -2414,8 +2440,14 @@ async def health() -> dict[str, Any]:
                 "zones": len(zones_for(sid)), "error": "",
             }
             continue
+        # 词表更新期间扫描线程会暂停，不能把暂停当成断流
+        stale = (not updating) and now - st.last_ok_ts >= OFFLINE_STALE_SECONDS
+        online = bool(st.last_ok_ts) and not stale and st.fail_streak < OFFLINE_FAIL_STREAK
         streams[sid] = {
-            "online": bool(st.last_ok_ts) and now - st.last_ok_ts < 10 and not st.last_error,
+            "online": online,
+            "degraded": online and (st.fail_streak > 0 or bool(st.infer_error)),
+            "failStreak": st.fail_streak,
+            "inferError": st.infer_error,
             "monitored": True,
             "frames": st.frames,
             "ringFrames": len(st.ring),
@@ -2425,7 +2457,14 @@ async def health() -> dict[str, Any]:
             "subjects": st.last_subjects,
             "pendingTracks": len(st.tracks),
             "rawTop": RT.raw_top.get(sid),
-            "error": st.last_error,
+            "error": st.last_error
+            or (
+                ""
+                if online
+                else f"{now - st.last_ok_ts:.0f} 秒未取到画面（扫描线程被推理占满或流媒体无响应）"
+                if st.last_ok_ts
+                else "尚未取到任何画面"
+            ),
         }
     return {
         "ok": True,

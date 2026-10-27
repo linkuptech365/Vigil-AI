@@ -714,6 +714,8 @@ export async function getVisionHits(): Promise<VisionHitsResponse> {
       persons: item?.persons ?? 0,
       subjects: item?.subjects ?? 0,
       rawTop: item?.rawTop ?? null,
+      degraded: item?.degraded ?? false,
+      inferError: item?.inferError ?? "",
       error: item?.error ?? "",
     }
   })

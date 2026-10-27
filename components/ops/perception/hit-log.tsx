@@ -68,6 +68,9 @@ function HitRow({ entry }: { entry: VisionHitEntry }) {
   )
 }
 
+/** 轮询间隔 2s，连续 3 次（约 6 秒）都离线才对用户显示离线 */
+const OFFLINE_CONFIRM_POLLS = 3
+
 export function HitLog() {
   const { cameraId } = usePerception()
   const [onlyCurrent, setOnlyCurrent] = React.useState(true)
@@ -75,6 +78,16 @@ export function HitLog() {
 
   const entries = (data?.hitLog ?? []).filter((entry) => !onlyCurrent || entry.streamId === cameraId)
   const stream = data?.streams.find((item) => item.id === cameraId)
+
+  // 连续多次轮询都离线才展示「通道离线」，单次抖动不闪烁
+  const offlinePolls = React.useRef(0)
+  const lastDataRef = React.useRef<typeof data>(undefined)
+  if (data !== lastDataRef.current) {
+    lastDataRef.current = data
+    offlinePolls.current = data && data.online && stream && !stream.online ? offlinePolls.current + 1 : 0
+  }
+  const confirmedOffline = offlinePolls.current >= OFFLINE_CONFIRM_POLLS
+  const streamOnline = stream ? stream.online || !confirmedOffline : false
 
   const health = !data
     ? error
@@ -84,9 +97,9 @@ export function HitLog() {
       ? data.message || "视觉服务未运行"
       : !stream
         ? "该通道尚未被视觉服务接入"
-        : !stream.online
+        : !streamOnline
           ? `通道离线${stream.error ? `：${stream.error}` : ""}`
-          : `帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 人员 ${stream.persons} · 命中主体 ${stream.subjects} · 模型词表 ${stream.rawTop ? `${stream.rawTop.channelVocabCount} 条` : "未知"}${stream.rawTop && stream.rawTop.channelVocabCount === 0 ? "（空，已回退基线）" : ""}${stream.rawTop && !stream.rawTop.vocabSynced ? " · 词表未同步到模型" : ""}`
+          : `${stream.online ? "" : "取帧重试中 · "}${stream.inferError ? `推理异常（通道在线）：${stream.inferError} · ` : ""}帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 人员 ${stream.persons} · 命中主体 ${stream.subjects} · 模型词表 ${stream.rawTop ? `${stream.rawTop.channelVocabCount} 条` : "未知"}${stream.rawTop && stream.rawTop.channelVocabCount === 0 ? "（空，已回退基线）" : ""}${stream.rawTop && !stream.rawTop.vocabSynced ? " · 词表未同步到模型" : ""}`
 
   return (
     <Card className="gap-0 py-0">

@@ -252,6 +252,12 @@ export interface VisionStreamHealth {
   ringFrames?: number
   /** 该通道下发到视觉服务的围栏数；0 表示全局检测模式 */
   zones?: number
+  /** 在线但存在偶发取帧失败或推理异常 */
+  degraded?: boolean
+  /** 连续取帧失败次数，达到阈值才判离线 */
+  failStreak?: number
+  /** 取帧成功后推理阶段的异常（通道仍在线） */
+  inferError?: string
   error: string
 }
 
@@ -303,6 +309,8 @@ export interface VisionHitsResponse {
     persons: number
     subjects: number
     rawTop: VisionRawTop | null
+    degraded: boolean
+    inferError: string
     error: string
   }[]
 }
