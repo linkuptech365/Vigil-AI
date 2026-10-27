@@ -1096,8 +1096,22 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
             f"；[调试·强制基线词表] shape={probe['shape']} 像素 {probe['min']}~{probe['max']} 均值 {probe['mean']} 推理 {probe['ms']}ms"
             + ("，画面近乎纯色" if probe["blank"] else "")
         )
-    if not top:
-        detail = f"{vocab_note}；{frame_note}；模型无任何特征响应（全词表 conf≥{predict_floor:.2f} 均无框）。通道词表：{', '.join(prompts[:12])}"
+    raw_box_count = int(frame.get("rawBoxCount", 0))
+    dropped_count = int(frame.get("droppedUnmappedCount", 0))
+    dropped_names = frame.get("droppedNames") or []
+    frame_note += f"；raw_box_count={raw_box_count}，dropped_unmapped_count={dropped_count}"
+    if not top and raw_box_count == 0:
+        detail = (
+            f"[Gate 0] 模型底层无任何框响应 (conf≥{predict_floor:.2f})；{vocab_note}；{frame_note}。"
+            f"通道词表：{', '.join(prompts[:12])}"
+        )
+    elif not top:
+        detail = (
+            f"[Gate 0] 模型检出 {raw_box_count} 个候选，但均因类名不在 roles 映射中被丢弃；"
+            f"被丢弃类名：{', '.join(dropped_names) or '（空类名）'}；{vocab_note}；{frame_note}。"
+            f"通道词表：{', '.join(prompts[:12])}"
+        )
+        log(f"[Gate 0][{sid}] 检出 {raw_box_count} 个候选均被 roles 映射丢弃：{dropped_names}；roles={sorted(RT.classes_applied)[:12]}")
     else:
         parts = [
             f"{item['prompt']}:{item['conf']:.2f}[{'通过≥' if item['passed'] else '拦截<'}{item['threshold']:.2f}]"
@@ -1119,7 +1133,11 @@ def gate0_reason(sid: str) -> str:
     if frame.get("rescued"):
         tail += "；已补救重推理"
     if not top:
-        return f"Gate 0：模型无任何特征响应（conf≥{info['predictFloor']:.2f} 均无框）{tail}"
+        raw_box_count = int(frame.get("rawBoxCount", 0))
+        if raw_box_count > 0:
+            names = "、".join(frame.get("droppedNames") or []) or "空类名"
+            return f"[Gate 0] 模型检出 {raw_box_count} 个候选，但均因类名不在 roles 映射中被丢弃（{names}）{tail}"
+        return f"[Gate 0] 模型底层无任何框响应 (conf≥{info['predictFloor']:.2f}){tail}"
     parts = [f"{item['prompt']} {item['conf']:.2f}<{item['threshold']:.2f}" for item in top[:3] if not item["passed"]]
     return "Gate 0：候选均被置信度门槛拦截（" + "，".join(parts) + "）" + tail
 
@@ -1141,7 +1159,9 @@ def enhance_low_light(image: np.ndarray, mode: str = "adaptive") -> np.ndarray:
     # 不放大地砖/传感器噪点，也不破坏深灰毛发的纹理对比。
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     mean = float(gray.mean())
-    gamma = min(2.0, max(1.0, math.log(0.4) / math.log(max(mean, 8.0) / 255.0)))
+    # 要让 (mean/255)^(1/gamma) = 0.40，需 gamma = ln(mean/255) / ln(0.40)；
+    # 旧写法把分子分母写反，暗帧得到 gamma<1 并被 max(1.0, ...) 钳成恒等映射，等于没有增强。
+    gamma = min(2.2, max(1.0, math.log(max(mean, 8.0) / 255.0) / math.log(0.40)))
     table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255.0 for i in range(256)], dtype=np.float32)
     lifted = table[image]
     weight = np.clip((200.0 - gray.astype(np.float32)) / 200.0, 0.0, 1.0)[:, :, None]
@@ -1165,13 +1185,16 @@ def parse_result(
     low: float,
     conf_floor: float,
     rescue: bool,
-) -> tuple[list[Det], list[dict[str, Any]]]:
+) -> tuple[list[Det], list[dict[str, Any]], dict[str, Any]]:
     names = class_name_lookup(result.names)
     dets: list[Det] = []
     raw: list[dict[str, Any]] = []
     boxes = result.boxes
+    stats: dict[str, Any] = {"rawBoxCount": 0, "droppedUnmappedCount": 0, "droppedNames": []}
     if boxes is None or len(boxes) == 0:
-        return dets, raw
+        return dets, raw, stats
+    stats["rawBoxCount"] = len(boxes)
+    dropped_names: dict[str, int] = {}
     height, width = result.orig_shape[:2]
     xyxy = boxes.xyxy.cpu().numpy()
     confs = boxes.conf.cpu().numpy()
@@ -1180,6 +1203,8 @@ def parse_result(
         prompt = str(names.get(int(classes[k]), ""))
         role = roles.get(prompt)
         if role is None:
+            stats["droppedUnmappedCount"] += 1
+            dropped_names[prompt] = dropped_names.get(prompt, 0) + 1
             continue
         conf = float(confs[k])
         floor = RT.learned_conf.get((sid, prompt))
@@ -1202,7 +1227,8 @@ def parse_result(
         if floor is not None and conf < floor:
             continue
         dets.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2), floor=floor))
-    return dets, raw
+    stats["droppedNames"] = [f"{name!r}×{count}" for name, count in dropped_names.items()]
+    return dets, raw, stats
 
 
 def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
@@ -1247,8 +1273,13 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         predict_started = time.perf_counter()
         result = RT.model.predict(source, conf=predict_floor, imgsz=INFER_IMGSZ, device=RT.device, verbose=False)[0]
         predict_ms = (time.perf_counter() - predict_started) * 1000.0
+        dets, raw, stats = parse_result(result, roles, sid, low, conf_floor, rescue=False)
+        frame["rawBoxCount"] = stats["rawBoxCount"]
+        frame["droppedUnmappedCount"] = stats["droppedUnmappedCount"]
+        frame["droppedNames"] = stats["droppedNames"]
         if debug:
             pixel_min, pixel_max = int(source.min()), int(source.max())
+            applied = list(RT.classes_applied)
             frame["probe"] = {
                 "shape": list(source.shape),
                 "dtype": str(source.dtype),
@@ -1257,13 +1288,18 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
                 "mean": round(float(source.mean()), 1),
                 "ms": round(predict_ms, 1),
                 "blank": pixel_max - pixel_min < 4,
+                "applied": applied,
+                "appliedSynced": applied == list(prompts),
             }
             log(
-                f"[debug-probe][{sid}] 输入 shape={tuple(source.shape)} dtype={source.dtype} 像素 min/max={pixel_min}/{pixel_max} "
-                f"mean={frame['probe']['mean']} 推理 {predict_ms:.0f}ms 词表({len(prompts)})={prompts} 原始框数={len(result.boxes) if result.boxes is not None else 0}"
+                f"[debug-probe][通道 {sid}] 输入 shape={tuple(source.shape)} dtype={source.dtype} 像素 min/max={pixel_min}/{pixel_max} "
+                f"mean={frame['probe']['mean']} 推理 {predict_ms:.0f}ms 已注入词表({len(applied)})={applied}"
+                f"{'' if applied == list(prompts) else ' [警告] 与期望基线词表不一致'} "
+                f"raw_box_count={stats['rawBoxCount']} dropped_unmapped_count={stats['droppedUnmappedCount']} "
+                f"保留候选={len(raw)}"
+                + (f" 被丢弃类名={stats['droppedNames']}" if stats["droppedNames"] else "")
                 + ("  [警告] 画面近乎纯色，疑似取帧异常" if frame["probe"]["blank"] else "")
             )
-        dets, raw = parse_result(result, roles, sid, low, conf_floor, rescue=False)
         now = time.time()
         if RESCUE_CONF > 0 and not any(passes(d, low) for d in dets) and now - RT.rescue_last.get(sid, 0.0) >= RESCUE_INTERVAL_SECONDS:
             RT.rescue_last[sid] = now
@@ -1272,9 +1308,12 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
             rescue_result = RT.model.predict(
                 rescue_source, conf=min(predict_floor, RESCUE_CONF), imgsz=RESCUE_IMGSZ, device=RT.device, verbose=False
             )[0]
-            rescue_dets, rescue_raw = parse_result(rescue_result, roles, sid, low, conf_floor, rescue=True)
+            rescue_dets, rescue_raw, rescue_stats = parse_result(rescue_result, roles, sid, low, conf_floor, rescue=True)
             if any(passes(d, low) for d in rescue_dets):
                 dets, raw = rescue_dets, rescue_raw
+                frame["rawBoxCount"] = rescue_stats["rawBoxCount"]
+                frame["droppedUnmappedCount"] = rescue_stats["droppedUnmappedCount"]
+                frame["droppedNames"] = rescue_stats["droppedNames"]
                 frame.update({"imgsz": RESCUE_IMGSZ, "enhanced": not enhanced, "enhanceMode": "off" if enhanced else (mode if mode != "off" else "adaptive"), "rescued": True})
     record_raw_output(sid, prompts, raw, predict_floor, frame)
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
