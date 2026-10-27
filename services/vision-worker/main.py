@@ -193,6 +193,7 @@ class ReloadRequest(BaseModel):
     triggerUrl: str = ""
     auditMode: bool = False
     auditUrl: str = ""
+    hitsUrl: str = ""
     lowLightMode: str = "adaptive"
 
 
@@ -214,6 +215,7 @@ class Config:
     pipelines: list[dict[str, Any]] = field(default_factory=list)
     audit_mode: bool = False
     audit_url: str = ""
+    hits_url: str = ""
     low_light_mode: str = "adaptive"
 
 
@@ -379,7 +381,7 @@ def log(message: str) -> None:
 
 
 def gate_trace(sid: str, rule_id: str, rule_name: str, gate: str, verdict: str, detail: str) -> None:
-    """门禁诊断：写控制台 + 内存环形缓冲（/gate-traces）。verdict: pass | block | info。"""
+    """门禁诊断���写控制台 + 内存环形缓冲（/gate-traces）。verdict: pass | block | info。"""
     now = time.time()
     audit_capture_gate(rule_id, rule_name, gate, verdict, detail)  # 审计采集不受节流影响，逐帧完整留痕
     signature = f"{sid}|{rule_id}|{gate}|{verdict}"
@@ -428,7 +430,7 @@ AUDIT_DROP_CODES = {
 def audit_begin() -> None:
     AUDIT_LOCAL.ctx = (
         {"steps": {}, "inferred": False, "dets": [], "shape": (1, 1), "pending": [], "cooled": [], "events": [], "reasons": []}
-        if RT.cfg.audit_mode and RT.cfg.audit_url
+        if (RT.cfg.audit_mode and RT.cfg.audit_url) or RT.cfg.hits_url
         else None
     )
 
@@ -526,6 +528,9 @@ def audit_commit(sid: str) -> None:
     if ctx.get("gate0"):
         reasons.insert(0, ctx["gate0"])
     event_ids = [event_id for _, event_id in ctx["events"] if event_id]
+    hit_record_push(ctx, sid, raw, decisions)
+    if not (RT.cfg.audit_mode and RT.cfg.audit_url):
+        return
     sig = f"{outcome}|" + ",".join(sorted(f"{d['ruleId']}:{d['outcome']}:{d['dropCode']}" for d in decisions)) + "|" + ",".join(sorted({r["prompt"] for r in raw}))
     now = time.time()
     last = AUDIT_LAST.get(sid)
@@ -575,6 +580,95 @@ def audit_flush_loop() -> None:
         except Exception as error:  # noqa: BLE001
             if not warned:
                 log(f"审计上报失败：{str(error)[:120]}")
+                warned = True
+
+
+# --------------------------------------------------------------------------- #
+# 命中全量留存：每条初筛命中（含被门禁拦截 / 冷却 / 合规放行）连同触发帧与原始检测框上报，
+# 由 Next 服务按「审计保留条数」FIFO 落盘。不依赖链路审计开关。
+# --------------------------------------------------------------------------- #
+HIT_QUEUE: deque = deque(maxlen=300)
+HIT_FLUSH_SECONDS = 2.0
+HIT_BATCH = 20
+HIT_FRAME_WIDTH = 640
+
+
+def audit_hit(entry: dict[str, Any], is_new: bool) -> None:
+    ctx = getattr(AUDIT_LOCAL, "ctx", None)
+    if ctx is not None and entry.get("gate") != "nodet":
+        ctx["hit"] = (entry, is_new)
+
+
+def hit_frame_b64(image: np.ndarray) -> tuple[str, int, int] | None:
+    try:
+        height, width = image.shape[:2]
+        if width > HIT_FRAME_WIDTH:
+            scale = HIT_FRAME_WIDTH / width
+            image = cv2.resize(image, (HIT_FRAME_WIDTH, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+        return base64.b64encode(encode_jpeg(image, 72)).decode("ascii"), int(image.shape[1]), int(image.shape[0])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def hit_record_push(ctx: dict[str, Any], sid: str, raw: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> None:
+    hit = ctx.get("hit")
+    if hit is None or not RT.cfg.hits_url:
+        return
+    entry, is_new = hit
+    if not is_new:
+        HIT_QUEUE.append({"id": entry["id"], "update": True, "repeat": entry["repeat"], "lastAt": now_iso()})
+        return
+    record: dict[str, Any] = {
+        "id": entry["id"],
+        "at": entry["at"],
+        "lastAt": entry["at"],
+        "streamId": sid,
+        "gate": entry["gate"],
+        "tags": entry.get("hits") or [],
+        "reasons": entry.get("reasons") or [],
+        "repeat": entry["repeat"],
+        "anchor": bool(entry.get("anchor")),
+        "rawDetections": raw,
+        "decisions": decisions,
+    }
+    if entry.get("progress"):
+        record["progress"] = entry["progress"]
+    if entry.get("eventId"):
+        record["eventId"] = entry["eventId"]
+    image = ctx.get("image")
+    if image is not None:
+        frame = hit_frame_b64(image)
+        if frame:
+            record["frame"], record["frameWidth"], record["frameHeight"] = frame
+    HIT_QUEUE.append(record)
+
+
+def hit_flush_loop() -> None:
+    warned = False
+    while not STOP.is_set():
+        STOP.wait(HIT_FLUSH_SECONDS)
+        url = RT.cfg.hits_url
+        if not url or not HIT_QUEUE:
+            continue
+        batch: dict[str, dict[str, Any]] = {}
+        while HIT_QUEUE and len(batch) < HIT_BATCH:
+            item = HIT_QUEUE.popleft()
+            prior = batch.get(item["id"])
+            if prior is not None and item.get("update"):
+                prior["repeat"], prior["lastAt"] = item["repeat"], item["lastAt"]
+                continue
+            batch[item["id"]] = item
+        headers = {"Authorization": f"Bearer {EDGE_TOKEN}"} if EDGE_TOKEN else {}
+        try:
+            response = HTTP.post(url, json={"records": list(batch.values())}, headers=headers)
+            if response.status_code != 200 and not warned:
+                log(f"命中留存上报失败：HTTP {response.status_code}")
+                warned = True
+            elif response.status_code == 200:
+                warned = False
+        except Exception as error:  # noqa: BLE001
+            if not warned:
+                log(f"命中留存上报失败：{str(error)[:120]}")
                 warned = True
 
 
@@ -916,7 +1010,7 @@ _EMPTY_VOCAB_WARNED: dict[str, float] = {}
 
 
 def warn_empty_vocab(sid: str) -> None:
-    """通道词表为空（多半是通道 ID 与下发词表的键不一致）：每 30 秒告警一次并列出已知键，随后回退基线。"""
+    """通道词表为空（多半是通道 ID 与下发词表的键不一致）：每 30 秒告警一次并列出已知���，随后回退基线。"""
     now = time.time()
     if now - _EMPTY_VOCAB_WARNED.get(sid, 0.0) < 30:
         return
@@ -1953,6 +2047,7 @@ def log_hit(
         if progress:
             last["progress"] = progress
         st.last_entry_ts = now
+        audit_hit(last, False)
         return
     entry: dict[str, Any] = {
         "id": uuid.uuid4().hex[:10],
@@ -1973,6 +2068,7 @@ def log_hit(
         entry["eventId"] = event_id
     RT.hitlog.appendleft(entry)
     st.last_entry, st.last_entry_sig, st.last_entry_ts = entry, sig, now
+    audit_hit(entry, True)
 
 
 # --------------------------------------------------------------------------- #
@@ -2031,7 +2127,7 @@ def _scan_stream(sid: str) -> None:
     suspects.extend(explore_suspects(sid, dets, image.shape[:2], st, relation_keys))
     suspects.extend(zone_suspects(sid, dets, image.shape[:2], st.zone_side))
     suspects.extend(pipeline_suspects(sid, dets, image.shape[:2], st, now))
-    audit_note(inferred=True, dets=dets, shape=image.shape[:2])
+    audit_note(inferred=True, dets=dets, shape=image.shape[:2], image=image)
     st.last_had_person = persons > 0 or any(d.role == ROLE_SUBJECT and passes(d, cfg.low) for d in dets)
     st.last_persons = persons
     st.last_subjects = len({d.prompt for d in dets if d.role != ROLE_ANCHOR and passes(d, cfg.low)})
@@ -2146,7 +2242,7 @@ def scan_loop() -> None:
             STOP.wait(0.5)
             continue
         if RT.updating:
-            # 词表正在后台更新：暂停推理，避免与 set_classes 争抢 model_lock / CPU
+            # 词表��在后台更新：暂停推理，避免与 set_classes 争抢 model_lock / CPU
             STOP.wait(0.2)
             continue
         interval = 1.0 / effective_fps(cfg)
@@ -2172,6 +2268,7 @@ async def lifespan(_: FastAPI):
     threading.Thread(target=load_model, name="model-loader", daemon=True).start()
     threading.Thread(target=scan_loop, name="scan-loop", daemon=True).start()
     threading.Thread(target=audit_flush_loop, name="audit-flush", daemon=True).start()
+    threading.Thread(target=hit_flush_loop, name="hit-flush", daemon=True).start()
     yield
     STOP.set()
     PUSH_POOL.shutdown(wait=False, cancel_futures=True)
@@ -2306,6 +2403,7 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         trigger_url=req.triggerUrl.strip(),
         audit_mode=req.auditMode,
         audit_url=req.auditUrl.strip(),
+        hits_url=req.hitsUrl.strip(),
         low_light_mode=req.lowLightMode if req.lowLightMode in LOW_LIGHT_MODES else "adaptive",
         zones=[
             {
@@ -2490,7 +2588,7 @@ def annotated(stream_id: str) -> Response:
 
 @app.get("/streams/{stream_id}/overlay.png")
 def overlay(stream_id: str) -> Response:
-    """透明标注图层：前端叠在原始视频上方，没有帧 / 没有检测时仍可返回围栏与锚点。"""
+    """透明标注图层：前端叠在原始视频上方，没有帧 / 没有检测时仍可��回围栏与锚点。"""
     view = fresh_view(stream_id)
     layer = draw_overlay(view["image"].shape, view["dets"], zones_for(stream_id), anchor_of(stream_id))
     ok, buffer = cv2.imencode(".png", layer)

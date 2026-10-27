@@ -452,7 +452,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?
     void ensureVisionEngine({ waitMs: 8_000 })
   }
   child.once("error", (error) => finish(`安装进程启动失败：${error.message}`))
-  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败�����������退出码 ${code}），请查看上方日志`))
+  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败�������������退出码 ${code}），请查看上方日志`))
   return { started: true, message: "已开始安装视觉环境，首次需要下载 PyTorch 与模型权重，可能需要数分钟到数十分钟" }
 }
 
@@ -465,6 +465,10 @@ export function triggerUrl() {
 
 export function auditIngestUrl() {
   return triggerUrl().replace(/\/incident\/trigger$/, "/audit/ingest")
+}
+
+export function hitsIngestUrl() {
+  return triggerUrl().replace(/\/incident\/trigger$/, "/hits/ingest")
 }
 
 /** 自动巡检通道里应交给视觉漏斗处理的通道 id */
@@ -498,7 +502,7 @@ function workerLearning(): Record<string, WorkerLearning> {
   return out
 }
 
-/** 只下发启用且配置了通用管道的规则；boundChannels 决定管道在哪些通道上生效（ALL = 全部）。 */
+/** 只下发启用且配置了通用管道的规则；boundChannels ��定管道在哪些通道上生效（ALL = 全部）。 */
 function workerRulePipelines() {
   return loadRules()
     .filter((rule) => rule.enabled && rule.pipeline)
@@ -529,6 +533,7 @@ function buildPayload(config: VisionConfig) {
     triggerUrl: triggerUrl(),
     auditMode: config.auditMode,
     auditUrl: auditIngestUrl(),
+    hitsUrl: hitsIngestUrl(),
     lowLightMode: config.lowLightMode,
   }
 }

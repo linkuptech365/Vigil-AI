@@ -17,6 +17,7 @@ import {
   type VisionHitsResponse,
 } from "@/lib/vigil/vision"
 import { cn } from "@/lib/utils"
+import { HitHistorySheet } from "./hit-history-sheet"
 import { usePerception } from "./perception-provider"
 
 const GATE: Record<VisionHitGate, { label: string; className: string }> = {
@@ -95,7 +96,8 @@ export function HitLog() {
             <Radio className="size-4 text-primary" aria-hidden="true" />
             初筛命中日志
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <HitHistorySheet />
             <Switch id="hitlog-current" size="sm" checked={onlyCurrent} onCheckedChange={setOnlyCurrent} />
             <Label htmlFor="hitlog-current" className="text-xs font-normal">
               仅当前通道
