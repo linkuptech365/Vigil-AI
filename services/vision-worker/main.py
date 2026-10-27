@@ -1086,7 +1086,7 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
     frame_note = (
         f"输入 {frame['width']}x{frame['height']} 经 BGR 直送、imgsz={frame['imgsz']}，亮度 {frame['luma']:.0f}"
         + ("、近灰度(红外/夜视)" if frame["grayscale"] else "")
-        + (f"、已做低照度增强({frame.get('enhanceMode', 'adaptive')})" if frame["enhanced"] else "、未做增强")
+        + (f"、已做低照度增强({frame.get('enhanceMode', 'adaptive')})" if frame["enhanced"] else "、���做增强")
         + ("、已触发补救重推理(imgsz=%d, 门槛放宽到 %.2f)" % (RESCUE_IMGSZ, RESCUE_CONF) if frame["rescued"] else "")
     )
     probe = frame.get("probe")
@@ -2522,12 +2522,19 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
     channel_labels: dict[str, dict[str, str]] = {}
     channel_source: dict[str, str] = {}
     # 每路通道各自一份词表上下文：专属词表（没有则用默认词表）+ 该通道自己的二级反哺词条，互不串味
-    # 词表严格派生自规则：没有启用规则（或规则没有任何检测要素）的通道词表物理为空，不做推理；
-    # 通道词表里不属于规则要素的词条（孤儿词条）在这里再剔除一遍，即便上游误下发也进不了 set_classes
+    # 通道词表 = 通道已持久化的专属词条（用户编译 / 二级反哺并入）∪ 规则引用的类别（由下方管道注入）。
+    # 通道只要满足其一就参与推理：规则带有检测要素，或自己持有至少一条启用词条；
+    # 两者皆无的通道词表物理为空，不做推理。专属词条不再因“未被规则引用”被剔除。
+    def rules_of(sid: str) -> dict[str, Any]:
+        return cfg.channel_rules.get(sid) or {"rules": [], "classes": set(), "wildcard": False}
+
+    def has_own_vocab(sid: str) -> bool:
+        return any(item.enabled for item in req.channelVocabulary.get(sid) or [])
+
     active_sids = {
         sid
-        for sid, item in cfg.channel_rules.items()
-        if item["rules"] and (item["classes"] or item["wildcard"])
+        for sid in dict.fromkeys([*cfg.stream_ids, *req.channelVocabulary.keys(), *cfg.channel_rules.keys()])
+        if (rules_of(sid)["rules"] and (rules_of(sid)["classes"] or rules_of(sid)["wildcard"])) or has_own_vocab(sid)
     }
     for sid in dict.fromkeys([*cfg.stream_ids, *req.channelVocabulary.keys(), *req.learning.keys()]):
         own = req.channelVocabulary.get(sid)
@@ -2535,19 +2542,11 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
             prompts, roles, labels = [], {}, {}
             channel_source[sid] = "no-rules"
             if own or sid in req.learning:
-                log(f"[{sid}] 无启用规则，丢弃 {len(own or [])} 条通道词条与反哺词条，该通道不做推理")
+                log(f"[{sid}] 无启用规则且无启用的专属词条，丢弃 {len(own or [])} 条通道词条与反哺词条，该通道不做推理")
         elif own:
             prompts, roles, labels = build_context(own)
-            allowed = cfg.channel_rules[sid]["classes"]
-            dropped = [p for p, r in roles.items() if r != ROLE_ANCHOR and norm_class(p) not in allowed]
-            if cfg.channel_rules[sid]["wildcard"]:
-                dropped = []
-            if dropped:
-                log(f"[{sid}] 剔除 {len(dropped)} 条不属于任何启用规则的词条：{dropped}")
-                prompts = [p for p in prompts if p not in dropped]
-                roles = {p: r for p, r in roles.items() if p not in dropped}
-                labels = {p: lb for p, lb in labels.items() if p not in dropped}
-            channel_source[sid] = "rules"
+            channel_source[sid] = "rules" if rules_of(sid)["rules"] else "custom"
+            log(f"[{sid}] 载入 {len(prompts)} 条通道专属词条（来源 {channel_source[sid]}）：{prompts}")
         else:
             prompts, roles, labels = [], {}, {}
             channel_source[sid] = "pipeline-only"
@@ -2621,9 +2620,9 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
     RT.last_reload_ms = round((time.perf_counter() - started) * 1000, 1)
     for sid in cfg.stream_ids:
         if sid in active_sids:
-            log(f"[{sid}] 规则派生词表：{channel_contexts.get(sid, [])}（规则 {cfg.channel_rules[sid]['rules']}）")
+            log(f"[{sid}] 生效词表：{channel_contexts.get(sid, [])}（规则 {rules_of(sid)['rules']}）")
         else:
-            log(f"[{sid}] 没有可用的规则检测要素，通道不推理")
+            log(f"[{sid}] 没有可用的规则检测要素，也没有专属词条，通道不推理")
     log(
         f"配置已受理（{RT.last_reload_ms}ms）：仅按通道词表 · "
         f"{len(channel_contexts)} 路独立词表上下文 · {len(cfg.stream_ids)} 路通道 · {message}"

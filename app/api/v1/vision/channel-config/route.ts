@@ -1,5 +1,6 @@
 import { buildChannelConfig } from "@/lib/ops/server/channel-perception"
 import { jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
+import { deriveChannelBinding } from "@/lib/ops/server/rule-vocabulary"
 import { CompileError, compileInstruction } from "@/lib/ops/server/vision-compiler"
 import { deleteChannelPerception, loadChannelPerception, saveChannelPerception } from "@/lib/storage/channel-perception-store"
 import { getStream } from "@/lib/storage/streams-store"
@@ -78,7 +79,9 @@ export async function POST(request: Request) {
     }
 
     const finalTags = tags ?? stored?.compiled_tags ?? []
-    if (finalTags.length > 0 && !finalTags.some((tag) => tag.enabled && TRACKED_ROLES.has(tag.role))) {
+    // 通道有启用规则时，主体由规则引用的类别提供，此处不强制专属词条自带主体
+    const ruleSubjects = deriveChannelBinding(channelId).classes.some((entry) => entry.kind === "subject")
+    if (finalTags.length > 0 && !ruleSubjects && !finalTags.some((tag) => tag.enabled && TRACKED_ROLES.has(tag.role))) {
       return jsonError(400, "NO_SUBJECT", "词表中至少需要启用一个主体锚点或行为主体")
     }
     saveChannelPerception(channelId, { raw_prompt: rawPrompt, compiled_tags: finalTags, updatedAt: new Date().toISOString() })

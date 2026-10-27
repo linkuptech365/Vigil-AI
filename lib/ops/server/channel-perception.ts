@@ -5,19 +5,23 @@ import { emptyLearning, type Tier1LearningState } from "@/lib/vigil/tier1-learni
 import { deriveVocabulary } from "./rule-vocabulary"
 
 /**
- * 某通道的基础检测词表：由该通道已启用规则的 subject_classes + context_classes 并集派生，
- * 没有任何启用规则时仅保留人员锚点基线。已存储的历史编译词条只提供中文名与角色，不会自行进入推理词表。
+ * 某通道的生效检测词表：已持久化的专属词条（用户编译、二级反哺并入）∪ 该通道已启用规则引用的类别。
+ * 两者皆无时仅保留人员锚点基线。
  */
-export function effectiveVocabulary(channelId: string): { tags: CompiledTag[]; source: "rules" | "baseline" } {
+export function effectiveVocabulary(channelId: string): { tags: CompiledTag[]; source: "rules" | "custom" | "baseline" } {
   const { tags, source } = deriveVocabulary(channelId)
   return { tags, source }
 }
 
-/** 下发给视觉服务的词表：每路监控通道各取各的规则派生词表，不再携带任何全局词表或孤儿词条。 */
+/**
+ * 下发给视觉服务的词表：每路通道各取各的生效词表（含全部已持久化词条）。
+ * 只剩人员锚点基线的通道下发空表，由 Worker 判定为不推理，避免对无配置通道白白占用算力。
+ */
 export function channelVocabularies(streamIds: string[]): Record<string, CompiledTag[]> {
   const out: Record<string, CompiledTag[]> = {}
   for (const channelId of new Set([...streamIds, ...Object.keys(loadAllChannelPerception())])) {
-    out[channelId] = effectiveVocabulary(channelId).tags
+    const { tags, source } = effectiveVocabulary(channelId)
+    out[channelId] = source === "baseline" ? [] : tags
   }
   return out
 }
@@ -38,7 +42,7 @@ export function buildChannelConfig(channelId: string): ChannelConfigResponse {
       compiled_tags: stored?.compiled_tags ?? [],
       learning_state: learningState(channelId),
     },
-    configured: derived.source === "rules",
+    configured: derived.source !== "baseline" || Boolean(stored),
     source: derived.source,
     effective_tags: derived.tags,
     binding: derived.binding,

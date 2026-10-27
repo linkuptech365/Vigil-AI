@@ -63,15 +63,15 @@ export interface ChannelRuleBinding {
 export interface ChannelConfigResponse {
   status: "ok"
   config: ChannelPerceptionConfig
-  /** 该通道是否存在已启用规则并因此有规则派生词表 */
+  /** 该通道是否已有生效词表（已启用规则或专属词条）；仅剩人员锚点基线时为 false */
   configured: boolean
-  /** 视觉服务实际使用的基础词表来源：rules 为由已启用规则派生，baseline 为没有任何启用规则时的人员锚点基线 */
-  source: "rules" | "baseline"
-  /** 视觉服务实际使用的基础词表（规则派生，或人员锚点基线） */
+  /** 词表来源：rules 为规则引用类别 ∪ 专属词条；custom 为无启用规则、仅专属词条；baseline 为仅人员锚点基线 */
+  source: "rules" | "custom" | "baseline"
+  /** 视觉服务实际使用的词表（专属词条 ∪ 规则引用类别，或人员锚点基线） */
   effective_tags: CompiledTag[]
   /** 当前通道的规则绑定与由规则派生的检测要素 */
   binding: ChannelRuleBinding
-  /** 已存储但不被任何已启用规则引用的孤儿词条：不会下发到 Worker */
+  /** 已持久化但没有被任何已启用规则引用的词条（手动编译 / 反哺并入）：同样生效并下发 Worker */
   orphan_tags: CompiledTag[]
   updatedAt: string | null
   compile?: ChannelCompileSummary

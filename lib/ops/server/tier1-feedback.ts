@@ -98,7 +98,8 @@ export async function mergeLearnedIntoChannelVocabulary(streamId: string): Promi
   const learning = loadLearning(streamId)
   if (!learning || learning.tags.length === 0) return null
   const stored = loadChannelPerception(streamId)
-  const base = stored?.compiled_tags ?? effectiveVocabulary(streamId).tags
+  // 只在已持久化词条的基础上追加：不把规则临时合成的类别固化进存储，规则变更后仍能随之增减
+  const base = stored?.compiled_tags ?? []
   const incoming: VocabularyItem[] = learning.tags.map((tag) => ({
     id: "",
     labelZh: tag.labelZh,

@@ -111,7 +111,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
       setPrompt("")
       setNote(null)
       setCompiled(null)
-      toast.success(`「${channelName}」专属词表已清空，仅保留人员锚点基线`, { description: response.reload?.ok ? "视觉服务已热更新" : undefined })
+      toast.success(`「${channelName}」已保存的专属词条已清空，仅保留启用规则引用的类别`, { description: response.reload?.ok ? "视觉服务已热更新" : undefined })
     } catch (caught) {
       toast.error("重置失败", { description: errorMessage(caught) })
     } finally {
@@ -130,6 +130,16 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
   }
 
   const tags = data.effective_tags
+  const persisted = data.config.compiled_tags
+  const persistedKeys = new Set(persisted.map((tag) => tag.promptEn.trim().toLowerCase()))
+  const isPersisted = (tag: CompiledTag) => persistedKeys.has(tag.promptEn.trim().toLowerCase())
+  const toggleTag = (tag: CompiledTag, enabled: boolean) =>
+    saveTags(
+      isPersisted(tag)
+        ? persisted.map((item) => (item.promptEn === tag.promptEn ? { ...item, enabled } : item))
+        : [...persisted, { ...tag, enabled }],
+      enabled ? `已启用「${tag.labelZh}」` : `已停用「${tag.labelZh}」`
+    )
   const busy = compiling || savingTags
 
   return (
@@ -213,9 +223,13 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
           </h4>
           <Badge
             variant="outline"
-            className={cn("text-[10px]", data.source === "rules" ? "border-primary/40 bg-primary/10 text-primary" : "text-muted-foreground")}
+            className={cn("text-[10px]", data.source !== "baseline" ? "border-primary/40 bg-primary/10 text-primary" : "text-muted-foreground")}
           >
-            {data.source === "rules" ? `由 ${data.binding.rules.length} 条启用规则派生` : "无启用规则 · 仅人员锚点基线"}
+            {data.source === "rules"
+              ? `${persisted.length} 条已保存词条 + ${data.binding.rules.length} 条启用规则的类别`
+              : data.source === "custom"
+                ? `${persisted.length} 条已保存词条 · 无启用规则`
+                : "无启用规则 · 仅人员锚点基线"}
           </Badge>
         </div>
         {tags.length === 0 ? (
@@ -231,26 +245,26 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
                   checked={tag.enabled}
                   disabled={busy}
                   aria-label={`启用 ${tag.labelZh}`}
-                  onCheckedChange={(enabled) =>
-                    void saveTags(
-                      tags.map((item) => (item.promptEn === tag.promptEn ? { ...item, enabled } : item)),
-                      enabled ? `已启用「${tag.labelZh}」` : `已停用「${tag.labelZh}」`
-                    )
-                  }
+                  onCheckedChange={(enabled) => void toggleTag(tag, enabled)}
                 />
                 <span className="font-mono">{tag.promptEn}</span>
                 <span className="text-muted-foreground">{tag.labelZh}</span>
+                {!isPersisted(tag) ? (
+                  <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                    规则引用
+                  </Badge>
+                ) : null}
                 <Badge variant="outline" className="ml-auto text-[10px]">
                   {visionRoleLabel(tag.role)}
                 </Badge>
                 <Button
                   size="icon-sm"
                   variant="ghost"
-                  disabled={busy}
-                  aria-label={`删除 ${tag.labelZh}`}
+                  disabled={busy || !isPersisted(tag)}
+                  aria-label={isPersisted(tag) ? `删除 ${tag.labelZh}` : `${tag.labelZh} 由启用规则引用，需在规则中移除`}
                   onClick={() =>
                     void saveTags(
-                      tags.filter((item) => item.promptEn !== tag.promptEn),
+                      persisted.filter((item) => item.promptEn !== tag.promptEn),
                       `已删除「${tag.labelZh}」`
                     )
                   }
@@ -262,7 +276,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
           </ul>
         )}
         <p className="text-xs text-muted-foreground">
-          编辑词条会为本通道生成专属词表副本；下方「二级反哺」补充的词条与记忆锚点同样只属于本通道。
+          编辑词条会为本通道生成专属词表副本；下方「二级��哺」补充的词条与记忆锚点同样只属于本通道。
         </p>
       </div>
     </div>

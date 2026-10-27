@@ -55,12 +55,13 @@ export function deriveChannelBinding(channelId: string, rules: InspectionRule[] 
 }
 
 export interface RuleDerivedVocabulary {
-  /** 下发给 Worker 的词条：只含被已启用规则引用的已编译词条 */
+  /** 通道生效词表 = 已持久化的专属词条（含停用项，保留顺序）∪ 规则引用但尚无词条的类别 */
   tags: CompiledTag[]
-  /** 已存储但未被任何已启用规则引用的孤儿词条 */
+  /** 已持久化、但没有被任何已启用规则引用的词条（手动编译 / 二级反哺并入）；它们同样生效并下发 Worker */
   orphans: CompiledTag[]
   binding: ChannelRuleBinding
-  source: "rules" | "baseline"
+  /** rules：有启用规则；custom：无规则但有专属词条；baseline：两者皆无，仅人员锚点基线 */
+  source: "rules" | "custom" | "baseline"
 }
 
 export function deriveVocabulary(channelId: string, rules: InspectionRule[] = loadRules()): RuleDerivedVocabulary {
@@ -68,32 +69,35 @@ export function deriveVocabulary(channelId: string, rules: InspectionRule[] = lo
   const stored = loadChannelPerception(channelId)?.compiled_tags ?? []
   const baseline = BASELINE_VOCABULARY.map((item) => ({ ...item }))
 
-  if (binding.rules.length === 0) {
-    // 没有任何启用规则：只保留基线锚点，历史编译词条全部视为孤儿
-    return { tags: baseline, orphans: stored, binding, source: "baseline" }
-  }
+  // 用户编译 / 反哺并入的词条是通道的持久化事实来源，无论规则是否引用都必须保留，刷新后原样还原
+  const tags: CompiledTag[] = stored.map((tag) => ({ ...tag }))
+  const byKey = new Map(tags.map((tag) => [normalizeClass(tag.promptEn), tag]))
 
-  const byKey = new Map(stored.map((tag) => [normalizeClass(tag.promptEn), tag]))
-  const tags: CompiledTag[] = []
   for (const entry of binding.classes) {
-    const stored = byKey.get(entry.promptEn)
-    // 规则引用的类别即使没有已编译词条，也必须进入推理词表，否则会被静默丢弃导致一级模型“没有这个词”
-    const tag: CompiledTag = stored ?? {
+    const existing = byKey.get(entry.promptEn)
+    entry.inVocabulary = Boolean(existing)
+    if (existing) {
+      entry.labelZh = existing.labelZh || entry.promptEn
+      continue
+    }
+    // 规则引用的类别即使没有已编译词条，也必须进入推理词表，否则一级模型会“没有这个词”
+    const tag: CompiledTag = {
       id: `rule-${entry.promptEn.replace(/[^a-z0-9]+/g, "-")}`,
       labelZh: entry.promptEn,
       promptEn: entry.promptEn,
       role: entry.promptEn === "person" ? "anchor_person" : entry.kind === "subject" ? "subject_target" : "context_object",
       enabled: true,
     }
-    entry.inVocabulary = Boolean(stored)
-    entry.labelZh = tag.labelZh || entry.promptEn
+    byKey.set(entry.promptEn, tag)
     tags.push(tag)
   }
   if (binding.wildcard && !tags.some((tag) => tag.role === "anchor_person")) tags.unshift(baseline[0])
 
-  const used = new Set(tags.map((tag) => normalizeClass(tag.promptEn)))
-  const orphans = stored.filter((tag) => !used.has(normalizeClass(tag.promptEn)))
-  return { tags, orphans, binding, source: "rules" }
+  const ruleKeys = new Set(binding.classes.map((entry) => entry.promptEn))
+  const orphans = stored.filter((tag) => !ruleKeys.has(normalizeClass(tag.promptEn)))
+
+  if (tags.length === 0) return { tags: baseline, orphans, binding, source: "baseline" }
+  return { tags, orphans, binding, source: binding.rules.length > 0 ? "rules" : "custom" }
 }
 
 /** 下发给 Worker 的通道规则绑定：Worker 用它做词表物理剔除与 Gate 0.5 校验。 */
