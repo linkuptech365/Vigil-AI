@@ -19,6 +19,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -1148,6 +1149,15 @@ def enhance_low_light(image: np.ndarray, mode: str = "adaptive") -> np.ndarray:
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
+def class_name_lookup(names: Any) -> dict[int, str]:
+    """统一 Ultralytics 的类别名容器：set_classes 之后 result.names 可能是 list[str]，常规情况是 dict[int, str]。"""
+    if isinstance(names, dict):
+        return {int(k): str(v) for k, v in names.items()}
+    if isinstance(names, (list, tuple)):
+        return {i: str(v) for i, v in enumerate(names)}
+    return {}
+
+
 def parse_result(
     result: Any,
     roles: dict[str, str],
@@ -1156,7 +1166,7 @@ def parse_result(
     conf_floor: float,
     rescue: bool,
 ) -> tuple[list[Det], list[dict[str, Any]]]:
-    names = result.names
+    names = class_name_lookup(result.names)
     dets: list[Det] = []
     raw: list[dict[str, Any]] = []
     boxes = result.boxes
@@ -2280,6 +2290,9 @@ def _scan_stream(sid: str) -> None:
         del st.cooldown[key]
 
 
+SCAN_ERROR_LOGGED: dict[str, float] = {}
+
+
 def scan_loop() -> None:
     while not STOP.is_set():
         cfg = RT.cfg
@@ -2302,6 +2315,10 @@ def scan_loop() -> None:
             except Exception as error:  # noqa: BLE001
                 st.last_error = str(error)[:160] or type(error).__name__
                 st.next_at = time.time() + 3.0
+                now_err = time.time()
+                if now_err - SCAN_ERROR_LOGGED.get(sid, 0.0) >= 30:
+                    SCAN_ERROR_LOGGED[sid] = now_err
+                    log(f"[{sid}] 推理循环异常：{type(error).__name__}: {error}\n{traceback.format_exc()}")
         STOP.wait(0.03)
 
 
