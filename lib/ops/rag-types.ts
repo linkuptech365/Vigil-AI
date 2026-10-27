@@ -70,6 +70,57 @@ export interface RagSearchResponse {
   filters: { channelNames: string[]; channelUnresolved: boolean; subjects: string[] }
 }
 
+export type RagCaseFilter = "all" | "vlm" | "pending" | "archived"
+
+export const RAG_CASE_FILTERS: readonly RagCaseFilter[] = ["all", "vlm", "pending", "archived"]
+
+/** 全量案卷列表中的一条记录：不经过检索打分，直接展示索引中的原始文档。 */
+export interface RagCase {
+  id: string
+  alertId: string
+  caseId: string | null
+  channelId: string
+  channelName: string
+  zone: string
+  ruleName: string
+  severity: RagDoc["severity"]
+  confidence: number
+  triggeredAt: string
+  indexedAt: string
+  /** 一级初筛入库时的结论 */
+  tier1Summary: string
+  hasVlm: boolean
+  vlmAnalyzedAt: string | null
+  /** 二级研判结论；未研判时为 null */
+  vlmSummary: string | null
+  /** 二级研判是否判定为有效预警；未研判时为 null */
+  vlmTriggered: boolean | null
+  archived: boolean
+  /** 参与 BM25 检索的合成文本（四要素、推理依据、处置记录） */
+  text: string
+  frameCount: number
+  thumbnailUrl: string | null
+  frameUrls: string[]
+}
+
+export interface RagCaseCounts {
+  all: number
+  vlm: number
+  pending: number
+  archived: number
+}
+
+export interface RagCasesResponse {
+  status: "success"
+  filter: RagCaseFilter
+  cases: RagCase[]
+  /** 当前筛选条件下的总数，可能大于本次返回条数 */
+  total: number
+  limit: number
+  counts: RagCaseCounts
+  index: RagIndexStatus
+}
+
 /** 二级研判页的候选切片：来自一级初筛真实命中的告警。 */
 export interface VlmCandidate {
   alertId: string

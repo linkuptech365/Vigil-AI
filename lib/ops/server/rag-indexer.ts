@@ -1,5 +1,14 @@
 import { alertSubjects, parseSearchQuery, SUBJECT_LABEL, type ChannelRef } from "@/lib/ops/video-search"
-import type { RagDoc, RagHit, RagIndexStatus, RagSearchResponse, VlmCandidate } from "@/lib/ops/rag-types"
+import type {
+  RagCase,
+  RagCaseFilter,
+  RagCasesResponse,
+  RagDoc,
+  RagHit,
+  RagIndexStatus,
+  RagSearchResponse,
+  VlmCandidate,
+} from "@/lib/ops/rag-types"
 import { loadRagDocs, ragIndexPath, writeRagDocs } from "@/lib/storage/rag-store"
 import { loadAlerts, loadStreams } from "@/lib/storage/streams-store"
 import type { StreamAlert } from "@/lib/vigil/streams"
@@ -196,6 +205,74 @@ export function searchRag(query: string, topK: number): RagSearchResponse {
       channelUnresolved: parsed.channel.unresolved,
       subjects: parsed.subjects.map((key) => SUBJECT_LABEL[key]),
     },
+  }
+}
+
+const DEFAULT_CASE_LIMIT = 100
+const MAX_CASE_LIMIT = 200
+
+function matchesCaseFilter(doc: RagDoc, filter: RagCaseFilter) {
+  if (filter === "vlm") return doc.hasVlm
+  if (filter === "pending") return !doc.hasVlm
+  if (filter === "archived") return doc.archived
+  return true
+}
+
+/** 不经检索打分，按入库（触发）时间倒序直接列出索引中的案卷。 */
+export function listRagCases(filter: RagCaseFilter = "all", limit = DEFAULT_CASE_LIMIT): RagCasesResponse {
+  const docs = syncRagIndex()
+  const alertMap = new Map(loadAlerts().map((alert) => [alert.id, alert]))
+  const safeLimit = Math.min(MAX_CASE_LIMIT, Math.max(1, Math.floor(limit)))
+
+  const sorted = docs
+    .slice()
+    .sort((a, b) => b.triggeredAt.localeCompare(a.triggeredAt) || b.indexedAt.localeCompare(a.indexedAt))
+  const filtered = sorted.filter((doc) => matchesCaseFilter(doc, filter))
+
+  const cases: RagCase[] = filtered.slice(0, safeLimit).map((doc) => {
+    const alert = alertMap.get(doc.alertId)
+    const frameUrls = Array.from(
+      { length: Math.min(doc.frameCount, 6) },
+      (_, i) => `/api/v1/stream-alerts/${encodeURIComponent(doc.alertId)}/frames/${i + 1}`
+    )
+    return {
+      id: doc.id,
+      alertId: doc.alertId,
+      caseId: doc.caseId,
+      channelId: doc.streamId,
+      channelName: doc.streamName,
+      zone: doc.zone,
+      ruleName: doc.ruleName,
+      severity: doc.severity,
+      confidence: doc.confidence,
+      triggeredAt: doc.triggeredAt,
+      indexedAt: doc.indexedAt,
+      tier1Summary: alert?.summary ?? doc.summary,
+      hasVlm: doc.hasVlm,
+      vlmAnalyzedAt: doc.vlmAnalyzedAt ?? null,
+      vlmSummary: doc.hasVlm ? doc.summary : null,
+      vlmTriggered: alert?.vlm ? alert.vlm.verdict.triggered : null,
+      archived: doc.archived,
+      text: doc.text,
+      frameCount: doc.frameCount,
+      thumbnailUrl: frameUrls[0] ?? null,
+      frameUrls,
+    }
+  })
+
+  return {
+    status: "success",
+    filter,
+    cases,
+    total: filtered.length,
+    limit: safeLimit,
+    counts: {
+      all: docs.length,
+      vlm: docs.filter((doc) => doc.hasVlm).length,
+      pending: docs.filter((doc) => !doc.hasVlm).length,
+      archived: docs.filter((doc) => doc.archived).length,
+    },
+    index: ragStatus(docs),
   }
 }
 

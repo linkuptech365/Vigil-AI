@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import useSWR from "swr"
-import { Archive, Database, MapPin, Search, SearchX, Sparkles } from "lucide-react"
+import { Archive, Database, FolderOpen, MapPin, RotateCcw, Search, SearchX, Sparkles } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -12,7 +12,8 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { handleImageError, hasMediaSrc, PLACEHOLDER_IMAGE } from "@/lib/ops/media"
-import type { RagHit, RagIndexStatus, RagSearchResponse } from "@/lib/ops/rag-types"
+import { RagCaseList } from "@/components/ops/vlm/rag-case-list"
+import type { RagCaseFilter, RagCasesResponse, RagHit, RagIndexStatus, RagSearchResponse } from "@/lib/ops/rag-types"
 import type { LocateOptions } from "@/lib/ops/types"
 
 type LocateHandler = (channelId: string, opts?: LocateOptions) => void
@@ -35,7 +36,34 @@ async function fetchIndexStatus(url: string): Promise<{ index: RagIndexStatus }>
   return (await response.json()) as { index: RagIndexStatus }
 }
 
-function IndexStatus({ status, error, loading }: { status?: RagIndexStatus; error?: Error; loading: boolean }) {
+const CASE_LIMIT = 100
+
+const CASE_FILTER_LABEL: Record<RagCaseFilter, string> = {
+  all: "全部",
+  vlm: "已研判",
+  pending: "未研判",
+  archived: "已归档",
+}
+
+const CASE_FILTERS = Object.keys(CASE_FILTER_LABEL) as RagCaseFilter[]
+
+async function fetchCases(url: string): Promise<RagCasesResponse> {
+  const response = await fetch(url, { cache: "no-store" })
+  if (!response.ok) throw new Error(`案卷列表获取失败（HTTP ${response.status}）`)
+  return (await response.json()) as RagCasesResponse
+}
+
+function IndexStatus({
+  status,
+  error,
+  loading,
+  onShowAll,
+}: {
+  status?: RagIndexStatus
+  error?: Error
+  loading: boolean
+  onShowAll: () => void
+}) {
   const stats = status
     ? [
         { label: "已索引案卷", value: `${status.docs.toLocaleString("en-US")} 条（含二级研判 ${status.vlmDocs}，已归档 ${status.archivedDocs}）` },
@@ -51,15 +79,34 @@ function IndexStatus({ status, error, loading }: { status?: RagIndexStatus; erro
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        {stats.map((stat) => (
-          <div key={stat.label} className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
-            <Database className="mt-0.5 size-4 shrink-0 text-signal" aria-hidden="true" />
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <span className="text-xs text-muted-foreground">{stat.label}</span>
-              <span className="text-sm font-medium break-words">{stat.value}</span>
+        {stats.map((stat, index) => {
+          const content = (
+            <>
+              <Database className="mt-0.5 size-4 shrink-0 text-signal" aria-hidden="true" />
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-xs text-muted-foreground">
+                  {stat.label}
+                  {index === 0 && status ? "（点击查看全部）" : ""}
+                </span>
+                <span className="text-sm font-medium break-words">{stat.value}</span>
+              </div>
+            </>
+          )
+          return index === 0 && status ? (
+            <button
+              key={stat.label}
+              type="button"
+              onClick={onShowAll}
+              className="flex items-start gap-3 rounded-md border border-border bg-background p-3 text-left transition-colors hover:border-signal/60 hover:bg-signal/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              {content}
+            </button>
+          ) : (
+            <div key={stat.label} className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
+              {content}
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
       {status && (
         <p className="font-mono text-xs text-muted-foreground">索引文件：{status.storagePath}</p>
@@ -145,17 +192,49 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
   const [error, setError] = React.useState<string | null>(null)
   const abortRef = React.useRef<AbortController | null>(null)
 
+  const [filter, setFilter] = React.useState<RagCaseFilter>("all")
+  const listRef = React.useRef<HTMLDivElement | null>(null)
+
   const { data: statusData, error: statusError, isLoading: statusLoading, mutate: refreshStatus } = useSWR(
     "/api/v1/rag/search",
     fetchIndexStatus,
     { refreshInterval: 30_000 }
   )
 
+  const {
+    data: casesData,
+    error: casesError,
+    isLoading: casesLoading,
+    mutate: refreshCases,
+  } = useSWR(`/api/v1/rag/cases?filter=${filter}&limit=${CASE_LIMIT}`, fetchCases, {
+    refreshInterval: 30_000,
+    keepPreviousData: true,
+  })
+
   React.useEffect(() => () => abortRef.current?.abort(), [])
+
+  const browsing = response === null && !searching
+
+  const showAll = (nextFilter: RagCaseFilter = "all") => {
+    abortRef.current?.abort()
+    setQuery("")
+    setSearched("")
+    setResponse(null)
+    setError(null)
+    setSearching(false)
+    setFilter(nextFilter)
+    void refreshStatus()
+    void refreshCases()
+    requestAnimationFrame(() => listRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }))
+  }
 
   const runSearch = async (text: string) => {
     const value = text.trim()
-    if (!value || searching) return
+    if (!value) {
+      showAll(filter)
+      return
+    }
+    if (searching) return
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
@@ -195,7 +274,12 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
         </CardDescription>
       </CardHeader>
       <div className="flex flex-col gap-4 p-4">
-        <IndexStatus status={statusData?.index} error={statusError} loading={statusLoading} />
+        <IndexStatus
+          status={statusData?.index}
+          error={statusError}
+          loading={statusLoading}
+          onShowAll={() => showAll("all")}
+        />
 
         <form
           className="flex flex-col gap-3"
@@ -212,7 +296,7 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
               <InputGroupInput
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="描述要找的事件，例如：1楼 吸烟、未戴安全帽、跌倒"
+                placeholder="描述要找的事件，例如：1楼 吸烟、未戴安全帽、跌倒；留空查看全部案卷"
                 aria-label="案卷检索"
                 disabled={searching}
               />
@@ -221,8 +305,28 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
               {searching ? <Spinner data-icon="inline-start" /> : <Search data-icon="inline-start" />}
               检索
             </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => showAll("all")}
+              disabled={!query && !response && filter === "all"}
+            >
+              <RotateCcw data-icon="inline-start" />
+              清空 / 重置
+            </Button>
           </div>
           <div className="flex flex-wrap gap-2" role="group" aria-label="检索示例">
+            <Button
+              type="button"
+              variant={browsing ? "default" : "outline"}
+              size="sm"
+              className="h-auto py-1 text-xs"
+              aria-pressed={browsing}
+              onClick={() => showAll(filter)}
+            >
+              <FolderOpen data-icon="inline-start" />
+              全部案卷（共 {(casesData?.counts.all ?? statusData?.index.docs ?? 0).toLocaleString("en-US")} 条）
+            </Button>
             {SUGGESTED_QUERIES.map((preset) => (
               <Button
                 key={preset}
@@ -243,6 +347,59 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
           <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive" role="alert">
             {error}
           </p>
+        )}
+
+        {browsing && !indexEmpty && (
+          <div ref={listRef} className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="案卷状态筛选">
+                {CASE_FILTERS.map((key) => (
+                  <Button
+                    key={key}
+                    type="button"
+                    size="sm"
+                    variant={filter === key ? "default" : "outline"}
+                    aria-pressed={filter === key}
+                    onClick={() => setFilter(key)}
+                  >
+                    {CASE_FILTER_LABEL[key]}
+                    <span className="font-mono tabular-nums">
+                      {casesData ? casesData.counts[key].toLocaleString("en-US") : "-"}
+                    </span>
+                  </Button>
+                ))}
+              </div>
+              {casesData && (
+                <p className="text-xs text-muted-foreground">
+                  按入库时间倒序，当前显示 {casesData.cases.length} / {casesData.total} 条
+                  {casesData.total > casesData.cases.length ? `（最多展示前 ${casesData.limit} 条）` : ""}
+                </p>
+              )}
+            </div>
+
+            {casesError && !casesData && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive" role="alert">
+                {casesError.message}
+              </p>
+            )}
+            {casesLoading && !casesData && (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Spinner /> 正在加载案卷列表…
+              </p>
+            )}
+            {casesData && casesData.cases.length > 0 && <RagCaseList key={filter} cases={casesData.cases} onLocate={onLocate} />}
+            {casesData && casesData.cases.length === 0 && (
+              <Empty className="border border-dashed">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <FolderOpen />
+                  </EmptyMedia>
+                  <EmptyTitle>该状态下暂无案卷</EmptyTitle>
+                  <EmptyDescription>当前筛选「{CASE_FILTER_LABEL[filter]}」没有案卷，可切换到「全部」查看库内所有记录。</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </div>
         )}
 
         {response && hits.length > 0 && (
@@ -275,7 +432,7 @@ export function VideoRagStudio({ onLocate }: RagStudioProps) {
           </Empty>
         )}
 
-        {!response && !error && !searching && indexEmpty && !statusLoading && (
+        {browsing && !error && indexEmpty && !statusLoading && (
           <Empty className="border border-dashed">
             <EmptyHeader>
               <EmptyMedia variant="icon">
