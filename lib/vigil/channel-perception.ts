@@ -33,15 +33,46 @@ export interface ChannelCompileSummary {
   reenabled: number
 }
 
+/** 通道上一条已启用规则的概要。 */
+export interface ActiveRuleInfo {
+  id: string
+  name: string
+  /** 规则是否配置了通用管道；没有管道的规则不产生任何检测词条 */
+  hasPipeline: boolean
+}
+
+/** 由已启用规则派生出的一个检测要素（触发主体或伴生物体）。 */
+export interface ActiveClass {
+  promptEn: string
+  kind: "subject" | "context"
+  ruleIds: string[]
+  ruleNames: string[]
+  /** 是否已有对应的编译词条（带中文名与角色）；没有时由 Worker 以管道类别方式注入 */
+  inVocabulary: boolean
+  labelZh: string
+}
+
+/** 通道当前规则绑定：词表的唯一来源。 */
+export interface ChannelRuleBinding {
+  rules: ActiveRuleInfo[]
+  classes: ActiveClass[]
+  /** 存在以 "*" 作为触发主体的规则（任意已检出主体） */
+  wildcard: boolean
+}
+
 export interface ChannelConfigResponse {
   status: "ok"
   config: ChannelPerceptionConfig
-  /** 该通道是否已有专属词表 */
+  /** 该通道是否存在已启用规则并因此有规则派生词表 */
   configured: boolean
-  /** 视觉服务实际使用的基础词表来源：channel 为本通道专属词表，baseline 为未配置时的人员锚点基线 */
-  source: "channel" | "baseline"
-  /** 视觉服务实际使用的基础词表（本通道专属词表，或人员锚点基线） */
+  /** 视觉服务实际使用的基础词表来源：rules 为由已启用规则派生，baseline 为没有任何启用规则时的人员锚点基线 */
+  source: "rules" | "baseline"
+  /** 视觉服务实际使用的基础词表（规则派生，或人员锚点基线） */
   effective_tags: CompiledTag[]
+  /** 当前通道的规则绑定与由规则派生的检测要素 */
+  binding: ChannelRuleBinding
+  /** 已存储但不被任何已启用规则引用的孤儿词条：不会下发到 Worker */
+  orphan_tags: CompiledTag[]
   updatedAt: string | null
   compile?: ChannelCompileSummary
   reload?: { ok: boolean; reloadMs: number; message: string }

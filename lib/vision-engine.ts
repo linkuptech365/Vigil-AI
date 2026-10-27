@@ -5,6 +5,7 @@ import path from "node:path"
 
 import { validPythons, visionPaths, visionRuntimeEnv } from "../scripts/lib/python-runtime.mjs"
 import { channelVocabularies } from "@/lib/ops/server/channel-perception"
+import { workerChannelRules, type WorkerChannelRules } from "@/lib/ops/server/rule-vocabulary"
 import type { RulePipelineConfig } from "@/lib/ops/types"
 import { loadRules } from "@/lib/storage/rules-store"
 import { loadZones } from "@/lib/storage/roi-store"
@@ -452,7 +453,7 @@ export function installVisionEnv(options: { light?: boolean; cpu?: boolean; gpu?
     void ensureVisionEngine({ waitMs: 8_000 })
   }
   child.once("error", (error) => finish(`安装进程启动失败：${error.message}`))
-  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败�������������退出码 ${code}），请查看上方日志`))
+  child.once("exit", (code) => finish(code === 0 ? "安装完成，正在启动视觉服务…" : `安装失败���������������退出码 ${code}），请查看上方日志`))
   return { started: true, message: "已开始安装视觉环境，首次需要下载 PyTorch 与模型权重，可能需要数分钟到数十分钟" }
 }
 
@@ -494,9 +495,11 @@ function workerZones() {
 }
 
 /** 每路通道沉淀出的补充词 / 记忆锚点 / 触发策略；没有学习内容的通道不下发。 */
-function workerLearning(): Record<string, WorkerLearning> {
+function workerLearning(channelRules: Record<string, WorkerChannelRules>): Record<string, WorkerLearning> {
   const out: Record<string, WorkerLearning> = {}
   for (const [streamId, learning] of Object.entries(loadAllLearning())) {
+    // 没有任何启用规则的通道不再下发历史反哺词条，避免遗留词条继续进入推理词表
+    if ((channelRules[streamId]?.ruleIds.length ?? 0) === 0) continue
     if (learning.tags.length > 0 || learning.anchor) out[streamId] = toWorkerLearning(learning)
   }
   return out
@@ -515,6 +518,8 @@ function workerRulePipelines() {
 }
 
 function buildPayload(config: VisionConfig) {
+  const streamIds = monitoredStreamIds()
+  const channelRules = workerChannelRules(streamIds)
   return {
     enabled: config.enabled,
     sampleFps: config.sampleFps,
@@ -524,10 +529,11 @@ function buildPayload(config: VisionConfig) {
     minConsecutiveFrames: config.minConsecutiveFrames,
     cooldownSeconds: config.cooldownSeconds,
     staticRecheckSec: config.staticRecheckSeconds,
-    channelVocabulary: channelVocabularies(monitoredStreamIds()),
+    channelVocabulary: channelVocabularies(streamIds),
+    channelRules,
     zones: workerZones(),
-    streamIds: monitoredStreamIds(),
-    learning: workerLearning(),
+    streamIds,
+    learning: workerLearning(channelRules),
     rulePipelines: workerRulePipelines(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),

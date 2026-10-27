@@ -162,7 +162,7 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
         <Field orientation="horizontal" className="w-auto">
           <Switch id="channel-replace" checked={replace} onCheckedChange={setReplace} disabled={busy} />
           <FieldLabel htmlFor="channel-replace" className="text-xs font-normal text-muted-foreground">
-            替换本通道现有词表
+            替换本���道现有词表
           </FieldLabel>
         </Field>
         {data.configured ? (
@@ -213,9 +213,9 @@ function ChannelEditor({ channelId, channelName }: { channelId: string; channelN
           </h4>
           <Badge
             variant="outline"
-            className={cn("text-[10px]", data.source === "channel" ? "border-primary/40 bg-primary/10 text-primary" : "text-muted-foreground")}
+            className={cn("text-[10px]", data.source === "rules" ? "border-primary/40 bg-primary/10 text-primary" : "text-muted-foreground")}
           >
-            {data.source === "channel" ? "本通道专属词表" : "未配置 · 仅人员锚点基线"}
+            {data.source === "rules" ? `由 ${data.binding.rules.length} 条启用规则派生` : "无启用规则 · 仅人员锚点基线"}
           </Badge>
         </div>
         {tags.length === 0 ? (

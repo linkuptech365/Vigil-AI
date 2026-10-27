@@ -174,6 +174,12 @@ class PipelineItem(BaseModel):
     throttling: Throttling = Field(default_factory=Throttling)
 
 
+class ChannelRulesItem(BaseModel):
+    ruleIds: list[str] = Field(default_factory=list)
+    classes: list[str] = Field(default_factory=list)
+    wildcard: bool = False
+
+
 class ReloadRequest(BaseModel):
     enabled: bool = True
     sampleFps: float = 2.0
@@ -185,6 +191,7 @@ class ReloadRequest(BaseModel):
     staticRecheckSec: float = 10.0
     vocabulary: list[VocabItem] = Field(default_factory=list)
     channelVocabulary: dict[str, list[VocabItem]] = Field(default_factory=dict)
+    channelRules: dict[str, ChannelRulesItem] = Field(default_factory=dict)
     zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
     learning: dict[str, LearningItem] = Field(default_factory=dict)
@@ -213,6 +220,8 @@ class Config:
     zones: list[dict[str, Any]] = field(default_factory=list)
     learning: dict[str, dict[str, Any]] = field(default_factory=dict)
     pipelines: list[dict[str, Any]] = field(default_factory=list)
+    # 通道 -> {"rules": [规则 id], "classes": {规则要素类别}, "wildcard": bool}；没有启用规则的通道不会出现在 active_sids 里
+    channel_rules: dict[str, dict[str, Any]] = field(default_factory=dict)
     audit_mode: bool = False
     audit_url: str = ""
     hits_url: str = ""
@@ -1181,6 +1190,9 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
     conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
     predict_floor = min(conf_floor, RAW_DIAG_FLOOR)
+    if RT.channel_source.get(sid) == "no-rules":
+        # 没有启用规则的通道：词表为空即不检测，不回退基线（否则会对无规则通道白白推理并产生命中）
+        return []
     prompts = prompts_of(sid)
     roles = roles_of(sid)
     if not prompts:
@@ -2405,6 +2417,14 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         audit_url=req.auditUrl.strip(),
         hits_url=req.hitsUrl.strip(),
         low_light_mode=req.lowLightMode if req.lowLightMode in LOW_LIGHT_MODES else "adaptive",
+        channel_rules={
+            sid: {
+                "rules": [r for r in item.ruleIds if r],
+                "classes": {c for c in (norm_class(x) for x in item.classes) if c},
+                "wildcard": item.wildcard,
+            }
+            for sid, item in req.channelRules.items()
+        },
         zones=[
             {
                 "id": z.id,
@@ -2468,11 +2488,32 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
     channel_labels: dict[str, dict[str, str]] = {}
     channel_source: dict[str, str] = {}
     # 每路通道各自一份词表上下文：专属词表（没有则用默认词表）+ 该通道自己的二级反哺词条，互不串味
+    # 词表严格派生自规则：没有启用规则（或规则没有任何检测要素）的通道词表物理为空，不做推理；
+    # 通道词表里不属于规则要素的词条（孤儿词条）在这里再剔除一遍，即便上游误下发也进不了 set_classes
+    active_sids = {
+        sid
+        for sid, item in cfg.channel_rules.items()
+        if item["rules"] and (item["classes"] or item["wildcard"])
+    }
     for sid in dict.fromkeys([*cfg.stream_ids, *req.channelVocabulary.keys(), *req.learning.keys()]):
         own = req.channelVocabulary.get(sid)
-        if own:
+        if sid not in active_sids:
+            prompts, roles, labels = [], {}, {}
+            channel_source[sid] = "no-rules"
+            if own or sid in req.learning:
+                log(f"[{sid}] 无启用规则，丢弃 {len(own or [])} 条通道词条与反哺词条，该通道不做推理")
+        elif own:
             prompts, roles, labels = build_context(own)
-            channel_source[sid] = "channel"
+            allowed = cfg.channel_rules[sid]["classes"]
+            dropped = [p for p, r in roles.items() if r != ROLE_ANCHOR and norm_class(p) not in allowed]
+            if cfg.channel_rules[sid]["wildcard"]:
+                dropped = []
+            if dropped:
+                log(f"[{sid}] 剔除 {len(dropped)} 条不属于任何启用规则的词条：{dropped}")
+                prompts = [p for p in prompts if p not in dropped]
+                roles = {p: r for p, r in roles.items() if p not in dropped}
+                labels = {p: lb for p, lb in labels.items() if p not in dropped}
+            channel_source[sid] = "rules"
         else:
             prompts, roles, labels = [], {}, {}
             channel_source[sid] = "pipeline-only"
@@ -2485,6 +2526,8 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
             wanted.append("person")
         targets = cfg.stream_ids if "ALL" in pipe["channels"] else [s for s in pipe["channels"] if s in channel_contexts]
         for sid in targets:
+            if sid not in active_sids:
+                continue
             if sid not in channel_contexts:
                 channel_contexts[sid], channel_roles[sid], channel_labels[sid] = [], {}, {}
                 channel_source[sid] = "pipeline-only"
@@ -2499,6 +2542,8 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
                 lowered[cls] = cls
     learned_conf: dict[tuple[str, str], float] = {}
     for sid, item in req.learning.items():
+        if sid not in active_sids:
+            continue
         tag_count = 0
         prompts, roles, labels = channel_contexts[sid], channel_roles[sid], channel_labels[sid]
         for tag in item.tags[:MAX_LEARNED_TAGS]:
@@ -2540,6 +2585,11 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
     else:
         ok, message = False, RT.reason
     RT.last_reload_ms = round((time.perf_counter() - started) * 1000, 1)
+    for sid in cfg.stream_ids:
+        if sid in active_sids:
+            log(f"[{sid}] 规则派生词表：{channel_contexts.get(sid, [])}（规则 {cfg.channel_rules[sid]['rules']}）")
+        else:
+            log(f"[{sid}] 没有可用的规则检测要素，通道不推理")
     log(
         f"配置已受理（{RT.last_reload_ms}ms）：仅按通道词表 · "
         f"{len(channel_contexts)} 路独立词表上下文 · {len(cfg.stream_ids)} 路通道 · {message}"
