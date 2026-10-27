@@ -31,7 +31,13 @@ export function LearningPanel() {
     try {
       const next = await sendJson<Tier1LearningResponse>(VISION_ENDPOINTS.learning, "POST", { streamId: cameraId, action })
       await mutate(next, { revalidate: false })
-      if (action === "merge") await globalMutate((key) => typeof key === "string" && key.includes("channel-config"))
+      if (action === "merge") {
+  await globalMutate(
+  (key) => typeof key === "string" && key.includes("channel-config"),
+  (current: unknown) => (next.channelConfig && current ? next.channelConfig : current),
+  { revalidate: true },
+  )
+  }
       const title =
         action === "reset"
           ? "已恢复初始词表并清除记忆锚点"

@@ -468,4 +468,6 @@ export interface Tier1LearningResponse {
   reload?: { ok: boolean; reloadMs: number; message: string }
   /** 执行 merge 后的并入统计 */
   merge?: { added: number; skipped: number; reenabled: number; total: number }
-}
+  /** merge 后该通道最新的专属词表配置，前端直接写入缓存，无需再等一次请求 */
+  channelConfig?: import("@/lib/vigil/channel-perception").ChannelConfigResponse
+  }

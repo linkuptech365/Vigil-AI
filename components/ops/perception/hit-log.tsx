@@ -85,7 +85,7 @@ export function HitLog() {
         ? "该通道尚未被视觉服务接入"
         : !stream.online
           ? `通道离线${stream.error ? `：${stream.error}` : ""}`
-          : `帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 人员 ${stream.persons} · 词表目标 ${stream.subjects}${stream.rawTop && !stream.rawTop.vocabSynced ? " · 词表未同步到模型" : ""}`
+          : `帧缓冲 ${stream.ringFrames} 帧 · ${stream.zones > 0 ? `${stream.zones} 个围栏` : "全局检测模式（未配置围栏）"} · 人员 ${stream.persons} · 命中主体 ${stream.subjects} · 模型词表 ${stream.rawTop ? `${stream.rawTop.channelVocabCount} 条` : "未知"}${stream.rawTop && stream.rawTop.channelVocabCount === 0 ? "（空，已回退基线）" : ""}${stream.rawTop && !stream.rawTop.vocabSynced ? " · 词表未同步到模型" : ""}`
 
   return (
     <Card className="gap-0 py-0">

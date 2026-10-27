@@ -85,6 +85,11 @@ RAW_DIAG_FLOOR = min(0.25, max(0.01, float(os.environ.get("VIGIL_RAW_DIAG_FLOOR"
 RAW_TOP_N = 8
 # 夜视 / 红外 / 逆光画面纹理对比度极低，开放词汇模型的响应会整体偏弱：平均亮度低于该值时先做 CLAHE 局部对比度增强再推理
 LOW_LIGHT_LUMA = float(os.environ.get("VIGIL_LOW_LIGHT_LUMA", "80") or 80)
+# 低照度增强模式：off 不增强；adaptive 仅对暗区做轻量 gamma 提亮（保持整体分布接近预训练）；clahe 旧版全画幅 CLAHE
+LOW_LIGHT_MODES = ("off", "adaptive", "clahe")
+# 兜底基线：通道词表被读成空列表时回退使用（与服务端 BASELINE_VOCABULARY 一致）
+FALLBACK_PROMPTS = ["person"]
+FALLBACK_ROLES = {"person": ROLE_ANCHOR}
 # 补救重推理：本帧没有任何词条通过门槛时，用增强图 + 更高输入分辨率再推理一次，并把主体/场景物类词条的门槛放宽到该值；设为 0 关闭
 RESCUE_CONF = max(0.0, min(0.5, float(os.environ.get("VIGIL_RESCUE_CONF", "0.15") or 0)))
 RESCUE_IMGSZ = 960
@@ -188,6 +193,7 @@ class ReloadRequest(BaseModel):
     triggerUrl: str = ""
     auditMode: bool = False
     auditUrl: str = ""
+    lowLightMode: str = "adaptive"
 
 
 @dataclass
@@ -208,6 +214,7 @@ class Config:
     pipelines: list[dict[str, Any]] = field(default_factory=list)
     audit_mode: bool = False
     audit_url: str = ""
+    low_light_mode: str = "adaptive"
 
 
 @dataclass
@@ -800,6 +807,7 @@ def apply_classes(prompts: list[str]) -> tuple[bool, str]:
         with RT.model_lock:
             if not restore_classes(prompts):
                 started = time.perf_counter()
+                log(f"model.set_classes({len(prompts)}): {list(prompts)}")
                 # set_classes 会原地修改传入列表，必须传副本
                 RT.model.set_classes(list(prompts))
                 elapsed = time.perf_counter() - started
@@ -904,6 +912,19 @@ def labels_of(sid: str) -> dict[str, str]:
     return RT.channel_labels.get(sid, RT.default_labels)
 
 
+_EMPTY_VOCAB_WARNED: dict[str, float] = {}
+
+
+def warn_empty_vocab(sid: str) -> None:
+    """通道词表为空（多半是通道 ID 与下发词表的键不一致）：每 30 秒告警一次并列出已知键，随后回退基线。"""
+    now = time.time()
+    if now - _EMPTY_VOCAB_WARNED.get(sid, 0.0) < 30:
+        return
+    _EMPTY_VOCAB_WARNED[sid] = now
+    known = ", ".join(f"{key}({len(value)})" for key, value in RT.channel_model_contexts.items()) or "无"
+    log(f"[警告] 通道 {sid!r} 读取到空词表，已回退基线 {FALLBACK_PROMPTS}。已下发的通道词表键：{known}")
+
+
 def distinct_contexts() -> list[list[str]]:
     seen: list[list[str]] = []
     for prompts in [RT.default_prompts, *RT.channel_model_contexts.values()]:
@@ -958,7 +979,7 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
     frame_note = (
         f"输入 {frame['width']}x{frame['height']} 经 BGR 直送、imgsz={frame['imgsz']}，亮度 {frame['luma']:.0f}"
         + ("、近灰度(红外/夜视)" if frame["grayscale"] else "")
-        + ("、已做 CLAHE 低照度增强" if frame["enhanced"] else "")
+        + (f"、已做低照度增强({frame.get('enhanceMode', 'adaptive')})" if frame["enhanced"] else "、未做增强")
         + ("、已触发补救重推理(imgsz=%d, 门槛放宽到 %.2f)" % (RESCUE_IMGSZ, RESCUE_CONF) if frame["rescued"] else "")
     )
     if not top:
@@ -996,11 +1017,22 @@ def frame_profile(image: np.ndarray) -> tuple[float, bool]:
     return luma, chroma < 8.0
 
 
-def enhance_low_light(image: np.ndarray) -> np.ndarray:
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    l_channel = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(l_channel)
-    return cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+def enhance_low_light(image: np.ndarray, mode: str = "adaptive") -> np.ndarray:
+    if mode == "clahe":
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        l_channel = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(l_channel)
+        return cv2.cvtColor(cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+    # adaptive：只抬暗区。亮度 <= 阈值的像素按 gamma 提亮，亮区（灯、反光）原样保留，不做局部直方图拉伸，
+    # 不放大地砖/传感器噪点，也不破坏深灰毛发的纹理对比。
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    mean = float(gray.mean())
+    gamma = min(2.0, max(1.0, math.log(0.4) / math.log(max(mean, 8.0) / 255.0)))
+    table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255.0 for i in range(256)], dtype=np.float32)
+    lifted = table[image]
+    weight = np.clip((200.0 - gray.astype(np.float32)) / 200.0, 0.0, 1.0)[:, :, None]
+    blended = image.astype(np.float32) * (1.0 - weight) + lifted * weight
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 def parse_result(
@@ -1058,12 +1090,24 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     prompts = prompts_of(sid)
     roles = roles_of(sid)
     if not prompts:
-        return []
+        warn_empty_vocab(sid)
+        prompts, roles = list(FALLBACK_PROMPTS), dict(FALLBACK_ROLES)
     height, width = image.shape[:2]
     luma, grayscale = frame_profile(image)
-    enhanced = luma < LOW_LIGHT_LUMA or grayscale
-    source = enhance_low_light(image) if enhanced else image
-    frame = {"width": width, "height": height, "imgsz": INFER_IMGSZ, "luma": round(luma, 1), "grayscale": grayscale, "enhanced": enhanced, "rescued": False}
+    mode = RT.cfg.low_light_mode
+    # 近灰度（红外/夜视）本身不代表需要增强，只有整体偏暗才提亮
+    enhanced = mode != "off" and luma < LOW_LIGHT_LUMA
+    source = enhance_low_light(image, mode) if enhanced else image
+    frame = {
+        "width": width,
+        "height": height,
+        "imgsz": INFER_IMGSZ,
+        "luma": round(luma, 1),
+        "grayscale": grayscale,
+        "enhanced": enhanced,
+        "enhanceMode": mode if enhanced else "off",
+        "rescued": False,
+    }
     # 同一把锁内切换词表并推理，保证本帧只用本通道的词表做文本-图像内积
     with RT.model_lock:
         ok, _ = apply_classes(prompts)
@@ -1074,14 +1118,15 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         now = time.time()
         if RESCUE_CONF > 0 and not any(passes(d, low) for d in dets) and now - RT.rescue_last.get(sid, 0.0) >= RESCUE_INTERVAL_SECONDS:
             RT.rescue_last[sid] = now
-            rescue_source = source if enhanced else enhance_low_light(image)
+            # 补救必须换一路输入：主推理用了增强图就回退原图，用了原图就换增强图，避免对同一画面重复推理
+            rescue_source = image if enhanced else enhance_low_light(image, mode if mode != "off" else "adaptive")
             rescue_result = RT.model.predict(
                 rescue_source, conf=min(predict_floor, RESCUE_CONF), imgsz=RESCUE_IMGSZ, device=RT.device, verbose=False
             )[0]
             rescue_dets, rescue_raw = parse_result(rescue_result, roles, sid, low, conf_floor, rescue=True)
             if any(passes(d, low) for d in rescue_dets):
                 dets, raw = rescue_dets, rescue_raw
-                frame.update({"imgsz": RESCUE_IMGSZ, "enhanced": True, "rescued": True})
+                frame.update({"imgsz": RESCUE_IMGSZ, "enhanced": not enhanced, "enhanceMode": "off" if enhanced else (mode if mode != "off" else "adaptive"), "rescued": True})
     record_raw_output(sid, prompts, raw, predict_floor, frame)
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
     ids = tracker.update([d.box for d in persons], [d.conf for d in persons])
@@ -2261,6 +2306,7 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         trigger_url=req.triggerUrl.strip(),
         audit_mode=req.auditMode,
         audit_url=req.auditUrl.strip(),
+        low_light_mode=req.lowLightMode if req.lowLightMode in LOW_LIGHT_MODES else "adaptive",
         zones=[
             {
                 "id": z.id,

@@ -37,7 +37,12 @@ export interface VisionConfig {
   auditMode: boolean
   /** 非报警审计记录最多保留条数 */
   auditRetention: number
+  /** 低照度增强：off 关闭；adaptive 仅对暗区轻量提亮（默认）；clahe 全画幅直方图均衡（旧版） */
+  lowLightMode: LowLightMode
 }
+
+export type LowLightMode = "off" | "adaptive" | "clahe"
+export const LOW_LIGHT_MODES: readonly LowLightMode[] = ["off", "adaptive", "clahe"]
 
 /**
  * 未配置专属词表的通道使用的最小基线：只保留一个人员锚点用于分配 Track ID，
@@ -58,6 +63,7 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
   staticRecheckSeconds: 10,
   auditMode: false,
   auditRetention: DEFAULT_AUDIT_RETENTION,
+  lowLightMode: "adaptive",
 }
 
 /** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
@@ -164,6 +170,7 @@ export function sanitizeVisionConfig(input: unknown, base: VisionConfig = DEFAUL
     staticRecheckSeconds: clampNumber(raw.staticRecheckSeconds, 0, 300, base.staticRecheckSeconds),
     auditMode: typeof raw.auditMode === "boolean" ? raw.auditMode : base.auditMode,
     auditRetention: raw.auditRetention === undefined ? base.auditRetention : auditRetentionOf(raw.auditRetention),
+    lowLightMode: LOW_LIGHT_MODES.includes(raw.lowLightMode as LowLightMode) ? (raw.lowLightMode as LowLightMode) : base.lowLightMode,
   }
 }
 

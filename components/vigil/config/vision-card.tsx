@@ -222,6 +222,27 @@ export function VisionCard() {
         <Separator />
 
         <FieldGroup>
+          <Field className="sm:max-w-xs">
+            <FieldLabel htmlFor="vision-lowlight">低照度增强</FieldLabel>
+            <select
+              id="vision-lowlight"
+              value={draft.lowLightMode}
+              onChange={(e) => patch({ lowLightMode: e.target.value as VisionConfig["lowLightMode"] })}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="adaptive">自适应（仅提亮暗区，推荐）</option>
+              <option value="off">关闭（直接使用原图）</option>
+              <option value="clahe">CLAHE（全画幅，可能吞掉暗色毛发）</option>
+            </select>
+          </Field>
+          <FieldDescription>
+            夜视画面偏暗时对模型输入做补偿。自适应模式只对暗区做 gamma 提亮，亮区与整体分布保持不变；检出异常时可先关闭对比。
+          </FieldDescription>
+        </FieldGroup>
+
+        <Separator />
+
+        <FieldGroup>
           <Field orientation="horizontal">
             <Switch id="vision-audit" checked={draft.auditMode} onCheckedChange={(auditMode) => patch({ auditMode })} />
             <FieldLabel htmlFor="vision-audit">链路审计模式（逐帧记录一级门禁决策，含被拦截的帧）</FieldLabel>

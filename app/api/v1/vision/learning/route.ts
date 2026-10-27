@@ -1,3 +1,4 @@
+import { buildChannelConfig } from "@/lib/ops/server/channel-perception"
 import { jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
 import { loadAllLearning, mergeLearnedIntoChannelVocabulary, resetTier1Learning, rollbackTier1Learning } from "@/lib/ops/server/tier1-feedback"
 import { getStream } from "@/lib/storage/streams-store"
@@ -38,6 +39,7 @@ export async function POST(request: Request) {
       learning: loadAllLearning(),
       reload: outcome.reload ?? undefined,
       merge: { added: outcome.added, skipped: outcome.skipped, reenabled: outcome.reenabled, total: outcome.total },
+    channelConfig: buildChannelConfig(streamId),
     }
     return jsonOk(response)
   }
