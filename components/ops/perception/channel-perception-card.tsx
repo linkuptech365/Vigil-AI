@@ -25,6 +25,7 @@ import {
 } from "@/lib/vigil/channel-perception"
 import { visionRoleLabel } from "@/lib/vigil/vision"
 import { cn } from "@/lib/utils"
+import { NegativeAnchorsPanel } from "./negative-anchors-panel"
 import { usePerception } from "./perception-provider"
 
 type CompileState = { tag: CompiledTag; state: "new" | "existing" }
@@ -316,7 +317,10 @@ export function ChannelPerceptionCard() {
           </Select>
         </Field>
         {current ? (
-          <ChannelEditor key={current.id} channelId={current.id} channelName={current.name} />
+          <>
+            <ChannelEditor key={current.id} channelId={current.id} channelName={current.name} />
+            <NegativeAnchorsPanel key={`anchors-${current.id}`} channelId={current.id} channelName={current.name} />
+          </>
         ) : (
           <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <CircleAlert className="size-4" aria-hidden="true" />
