@@ -35,6 +35,14 @@ export interface StreamLastAnalysis {
   alertId?: string
 }
 
+/** 通道负样本锚点：bbox 为归一化坐标 [ymin, xmin, ymax, xmax]（0.0 ~ 1.0） */
+export interface NegativeAnchor {
+  id: string
+  label: string
+  bbox: [number, number, number, number]
+  createdAt: string
+}
+
 export interface StreamMeta {
   id: string
   name: string
@@ -45,6 +53,8 @@ export interface StreamMeta {
   autoPatrol: boolean
   createdAt: string
   lastAnalysis?: StreamLastAnalysis
+  /** 负样本锚点；旧数据没有该字段，读取时按空数组处理 */
+  negativeAnchors?: NegativeAnchor[]
 }
 
 export interface StreamView {

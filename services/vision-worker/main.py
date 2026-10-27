@@ -198,6 +198,7 @@ class ReloadRequest(BaseModel):
     zones: list[ZoneItem] = Field(default_factory=list)
     streamIds: list[str] = Field(default_factory=list)
     learning: dict[str, LearningItem] = Field(default_factory=dict)
+    negativeAnchors: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     rulePipelines: list[PipelineItem] = Field(default_factory=list)
     go2rtcUrl: str = "http://127.0.0.1:1984"
     triggerUrl: str = ""
@@ -1455,7 +1456,7 @@ def explore_suspects(
     sid: str, dets: list[Det], shape: tuple[int, int], st: StreamState, relation_keys: set[str]
 ) -> list[Suspect]:
     """冷启动探索：通道还没有学到 spatial_hotspot 锚点时，行为主体（如猫）在同一区域连续停留，
-    即使伴生物体（喂食器）没被检出，也允许发起一次二级研判，让 VLM 去确认并反哺锚点。
+    即���伴生物体（喂食器）没被检出，也允许发起一次二级研判，让 VLM 去确认并反哺锚点。
 
     只在"词表里配了伴生物体但本帧没有配对成功"时补位；已有关系疑似或已学到锚点的主体不重复触发。
     主体中心位移超过 EXPLORE_LINGER 视为离开该区域，停留计数重新开始。

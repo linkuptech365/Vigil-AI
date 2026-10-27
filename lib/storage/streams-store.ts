@@ -11,6 +11,7 @@ import {
   type CaseAction,
   type EvidenceIntegrity,
   type EvidenceSeal,
+  type NegativeAnchor,
   type StreamAlert,
   type StreamAnalysisRecord,
   type StreamLastAnalysis,
@@ -75,6 +76,36 @@ function isStreamMeta(value: unknown): value is StreamMeta {
   return typeof item.id === "string" && typeof item.name === "string" && typeof item.source === "string"
 }
 
+export const MAX_NEGATIVE_ANCHORS = 50
+
+/** 校验归一化 bbox [ymin, xmin, ymax, xmax]：4 个有限数，落在 0~1，且 min < max。 */
+export function parseNormalizedBbox(value: unknown): [number, number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 4) return null
+  const nums = value.map((item) => (typeof item === "number" && Number.isFinite(item) ? item : NaN))
+  if (nums.some((n) => Number.isNaN(n) || n < 0 || n > 1)) return null
+  const [ymin, xmin, ymax, xmax] = nums
+  if (ymin >= ymax || xmin >= xmax) return null
+  return [ymin, xmin, ymax, xmax]
+}
+
+function normalizeNegativeAnchors(value: unknown): NegativeAnchor[] {
+  if (!Array.isArray(value)) return []
+  const out: NegativeAnchor[] = []
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue
+    const raw = item as Record<string, unknown>
+    const bbox = parseNormalizedBbox(raw.bbox)
+    if (typeof raw.id !== "string" || !bbox) continue
+    out.push({
+      id: raw.id,
+      label: typeof raw.label === "string" ? raw.label : "",
+      bbox,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+    })
+  }
+  return out
+}
+
 function seedStreams(): StreamMeta[] {
   if (!findDemoVideo()) return []
   return [
@@ -104,6 +135,7 @@ export function loadStreams(): StreamMeta[] {
       zone: item.zone || STREAM_ZONES[5],
       builtin: item.builtin === true,
       autoPatrol: item.autoPatrol === true,
+      negativeAnchors: normalizeNegativeAnchors(item.negativeAnchors),
     }))
   }
   if (!demo) return list.filter((item) => !item.builtin)
@@ -126,6 +158,37 @@ export function patchStream(id: string, patch: Partial<Pick<StreamMeta, "autoPat
   streams[index] = { ...streams[index], ...patch }
   writeStreams(streams)
   return streams[index]
+}
+
+export type AddAnchorResult =
+  | { ok: true; anchor: NegativeAnchor; anchors: NegativeAnchor[] }
+  | { ok: false; reason: "STREAM_NOT_FOUND" | "LIMIT_REACHED" }
+
+/** 读-改-写同步完成（无 await），同一进程内不会交错，等价于原子追加。 */
+export function addNegativeAnchor(streamId: string, input: { label: string; bbox: [number, number, number, number] }): AddAnchorResult {
+  const streams = loadStreams()
+  const index = streams.findIndex((stream) => stream.id === streamId)
+  if (index < 0) return { ok: false, reason: "STREAM_NOT_FOUND" }
+  const current = streams[index].negativeAnchors ?? []
+  if (current.length >= MAX_NEGATIVE_ANCHORS) return { ok: false, reason: "LIMIT_REACHED" }
+  const anchor: NegativeAnchor = { id: `na-${randomUUID().slice(0, 12)}`, label: input.label, bbox: input.bbox, createdAt: new Date().toISOString() }
+  const anchors = [...current, anchor]
+  streams[index] = { ...streams[index], negativeAnchors: anchors }
+  writeStreams(streams)
+  return { ok: true, anchor, anchors }
+}
+
+/** 返回 null 表示通道不存在；removed=false 表示锚点不存在。 */
+export function removeNegativeAnchor(streamId: string, anchorId: string): { removed: boolean; anchors: NegativeAnchor[] } | null {
+  const streams = loadStreams()
+  const index = streams.findIndex((stream) => stream.id === streamId)
+  if (index < 0) return null
+  const current = streams[index].negativeAnchors ?? []
+  const anchors = current.filter((anchor) => anchor.id !== anchorId)
+  if (anchors.length === current.length) return { removed: false, anchors }
+  streams[index] = { ...streams[index], negativeAnchors: anchors }
+  writeStreams(streams)
+  return { removed: true, anchors }
 }
 
 export function recordAnalysis(id: string, analysis: StreamLastAnalysis) {

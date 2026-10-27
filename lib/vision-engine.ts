@@ -505,6 +505,18 @@ function workerLearning(channelRules: Record<string, WorkerChannelRules>): Recor
   return out
 }
 
+/** 每路被监控通道的负样本锚点；没有锚点的通道不下发。 */
+function workerNegativeAnchors(streamIds: string[]): Record<string, Array<{ id: string; label: string; bbox: [number, number, number, number] }>> {
+  const wanted = new Set(streamIds)
+  const out: Record<string, Array<{ id: string; label: string; bbox: [number, number, number, number] }>> = {}
+  for (const stream of loadStreams()) {
+    const anchors = stream.negativeAnchors ?? []
+    if (!wanted.has(stream.id) || anchors.length === 0) continue
+    out[stream.id] = anchors.map(({ id, label, bbox }) => ({ id, label, bbox }))
+  }
+  return out
+}
+
 /** 只下发启用且配置了通用管道的规则；boundChannels ��定管道在哪些通道上生效（ALL = 全部）。 */
 function workerRulePipelines() {
   return loadRules()
@@ -534,6 +546,7 @@ function buildPayload(config: VisionConfig) {
     zones: workerZones(),
     streamIds,
     learning: workerLearning(channelRules),
+    negativeAnchors: workerNegativeAnchors(streamIds),
     rulePipelines: workerRulePipelines(),
     go2rtcUrl: GO2RTC_URL,
     triggerUrl: triggerUrl(),
