@@ -39,6 +39,8 @@ export interface VisionConfig {
   auditRetention: number
   /** 低照度增强：off 关闭；adaptive 仅对暗区轻量提亮（默认）；clahe 全画幅直方图均衡（旧版） */
   lowLightMode: LowLightMode
+  /** 调试：绕过规则派生词表，向所有通道强制注入通用基线词表，并在 Worker 控制台输出每帧输入形状 / 像素范围 / 推理耗时 */
+  debugForceBaseline: boolean
 }
 
 export type LowLightMode = "off" | "adaptive" | "clahe"
@@ -64,6 +66,7 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
   auditMode: false,
   auditRetention: DEFAULT_AUDIT_RETENTION,
   lowLightMode: "adaptive",
+  debugForceBaseline: false,
 }
 
 /** 仅作异常保护（防止误操作写入海量词条）；日常使用可视为不设上限。 */
@@ -171,6 +174,7 @@ export function sanitizeVisionConfig(input: unknown, base: VisionConfig = DEFAUL
     auditMode: typeof raw.auditMode === "boolean" ? raw.auditMode : base.auditMode,
     auditRetention: raw.auditRetention === undefined ? base.auditRetention : auditRetentionOf(raw.auditRetention),
     lowLightMode: LOW_LIGHT_MODES.includes(raw.lowLightMode as LowLightMode) ? (raw.lowLightMode as LowLightMode) : base.lowLightMode,
+    debugForceBaseline: typeof raw.debugForceBaseline === "boolean" ? raw.debugForceBaseline : base.debugForceBaseline,
   }
 }
 

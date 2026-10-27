@@ -76,9 +76,16 @@ export function deriveVocabulary(channelId: string, rules: InspectionRule[] = lo
   const byKey = new Map(stored.map((tag) => [normalizeClass(tag.promptEn), tag]))
   const tags: CompiledTag[] = []
   for (const entry of binding.classes) {
-    const tag = byKey.get(entry.promptEn)
-    if (!tag) continue
-    entry.inVocabulary = true
+    const stored = byKey.get(entry.promptEn)
+    // 规则引用的类别即使没有已编译词条，也必须进入推理词表，否则会被静默丢弃导致一级模型“没有这个词”
+    const tag: CompiledTag = stored ?? {
+      id: `rule-${entry.promptEn.replace(/[^a-z0-9]+/g, "-")}`,
+      labelZh: entry.promptEn,
+      promptEn: entry.promptEn,
+      role: entry.promptEn === "person" ? "anchor_person" : entry.kind === "subject" ? "subject_target" : "context_object",
+      enabled: true,
+    }
+    entry.inVocabulary = Boolean(stored)
     entry.labelZh = tag.labelZh || entry.promptEn
     tags.push(tag)
   }

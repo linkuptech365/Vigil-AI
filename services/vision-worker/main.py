@@ -88,6 +88,8 @@ LOW_LIGHT_LUMA = float(os.environ.get("VIGIL_LOW_LIGHT_LUMA", "80") or 80)
 # 低照度增强模式：off 不增强；adaptive 仅对暗区做轻量 gamma 提亮（保持整体分布接近预训练）；clahe 旧版全画幅 CLAHE
 LOW_LIGHT_MODES = ("off", "adaptive", "clahe")
 # 兜底基线：通道词表被读成空列表时回退使用（与服务端 BASELINE_VOCABULARY 一致）
+# 调试用强制基线词表：全部用 ROLE_PIPE，只出检测框，不参与既有的 PPE/人员判定
+DEBUG_BASELINE_PROMPTS = ["person", "cat", "dog", "bowl", "pet food bowl", "pet feeder", "feeder"]
 FALLBACK_PROMPTS = ["person"]
 FALLBACK_ROLES = {"person": ROLE_ANCHOR}
 # 补救重推理：本帧没有任何词条通过门槛时，用增强图 + 更高输入分辨率再推理一次，并把主体/场景物类词条的门槛放宽到该值；设为 0 关闭
@@ -202,6 +204,7 @@ class ReloadRequest(BaseModel):
     auditUrl: str = ""
     hitsUrl: str = ""
     lowLightMode: str = "adaptive"
+    debugForceBaseline: bool = False
 
 
 @dataclass
@@ -226,6 +229,7 @@ class Config:
     audit_url: str = ""
     hits_url: str = ""
     low_light_mode: str = "adaptive"
+    debug_force_baseline: bool = False
 
 
 @dataclass
@@ -1003,7 +1007,7 @@ def motion_ratio(prev: np.ndarray | None, image: np.ndarray) -> tuple[float | No
 # Tier-1：检测、门控
 # --------------------------------------------------------------------------- #
 def prompts_of(sid: str) -> list[str]:
-    """该通道专属的检测词表；没有全局词表可回落，未知通道返回空词表。"""
+    """该通道专属的检测词��；没有全局词表可回落，未知通道返回空词表。"""
     return RT.channel_model_contexts.get(sid, RT.default_prompts)
 
 
@@ -1085,6 +1089,12 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
         + (f"、已做低照度增强({frame.get('enhanceMode', 'adaptive')})" if frame["enhanced"] else "、未做增强")
         + ("、已触发补救重推理(imgsz=%d, 门槛放宽到 %.2f)" % (RESCUE_IMGSZ, RESCUE_CONF) if frame["rescued"] else "")
     )
+    probe = frame.get("probe")
+    if probe:
+        frame_note += (
+            f"；[调试·强制基线词表] shape={probe['shape']} 像素 {probe['min']}~{probe['max']} 均值 {probe['mean']} 推理 {probe['ms']}ms"
+            + ("，画面近乎纯色" if probe["blank"] else "")
+        )
     if not top:
         detail = f"{vocab_note}；{frame_note}；模型无任何特征响应（全词表 conf≥{predict_floor:.2f} 均无框）。通道词表：{', '.join(prompts[:12])}"
     else:
@@ -1190,14 +1200,19 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
     # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
     conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
     predict_floor = min(conf_floor, RAW_DIAG_FLOOR)
-    if RT.channel_source.get(sid) == "no-rules":
-        # 没有启用规则的通道：词表为空即不检测，不回退基线（否则会对无规则通道白白推理并产生命中）
-        return []
-    prompts = prompts_of(sid)
-    roles = roles_of(sid)
-    if not prompts:
-        warn_empty_vocab(sid)
-        prompts, roles = list(FALLBACK_PROMPTS), dict(FALLBACK_ROLES)
+    debug = RT.cfg.debug_force_baseline
+    if debug:
+        prompts = list(DEBUG_BASELINE_PROMPTS)
+        roles = {p: ROLE_PIPE for p in prompts}
+    else:
+        if RT.channel_source.get(sid) == "no-rules":
+            # 没有启用规则的通道：词表为空即不检测，不回退基线（否则会对无规则通道白白推理并产生命中）
+            return []
+        prompts = prompts_of(sid)
+        roles = roles_of(sid)
+        if not prompts:
+            warn_empty_vocab(sid)
+            prompts, roles = list(FALLBACK_PROMPTS), dict(FALLBACK_ROLES)
     height, width = image.shape[:2]
     luma, grayscale = frame_profile(image)
     mode = RT.cfg.low_light_mode
@@ -1219,7 +1234,25 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         ok, _ = apply_classes(prompts)
         if not ok:
             return []
+        predict_started = time.perf_counter()
         result = RT.model.predict(source, conf=predict_floor, imgsz=INFER_IMGSZ, device=RT.device, verbose=False)[0]
+        predict_ms = (time.perf_counter() - predict_started) * 1000.0
+        if debug:
+            pixel_min, pixel_max = int(source.min()), int(source.max())
+            frame["probe"] = {
+                "shape": list(source.shape),
+                "dtype": str(source.dtype),
+                "min": pixel_min,
+                "max": pixel_max,
+                "mean": round(float(source.mean()), 1),
+                "ms": round(predict_ms, 1),
+                "blank": pixel_max - pixel_min < 4,
+            }
+            log(
+                f"[debug-probe][{sid}] 输入 shape={tuple(source.shape)} dtype={source.dtype} 像素 min/max={pixel_min}/{pixel_max} "
+                f"mean={frame['probe']['mean']} 推理 {predict_ms:.0f}ms 词表({len(prompts)})={prompts} 原始框数={len(result.boxes) if result.boxes is not None else 0}"
+                + ("  [警告] 画面近乎纯色，疑似取帧异常" if frame["probe"]["blank"] else "")
+            )
         dets, raw = parse_result(result, roles, sid, low, conf_floor, rescue=False)
         now = time.time()
         if RESCUE_CONF > 0 and not any(passes(d, low) for d in dets) and now - RT.rescue_last.get(sid, 0.0) >= RESCUE_INTERVAL_SECONDS:
@@ -2110,7 +2143,7 @@ def _scan_stream(sid: str) -> None:
     st.last_motion_pct = ratio
     moving = ratio is None or ratio >= cfg.motion_pct
 
-    if RT.model_state != "ready" or RT.model is None or not prompts_of(sid):
+    if RT.model_state != "ready" or RT.model is None or not (prompts_of(sid) or cfg.debug_force_baseline):
         if moving:
             RT.stats.motion_only += 1
         else:
@@ -2417,6 +2450,7 @@ async def config_reload(req: ReloadRequest) -> dict[str, Any]:
         audit_url=req.auditUrl.strip(),
         hits_url=req.hitsUrl.strip(),
         low_light_mode=req.lowLightMode if req.lowLightMode in LOW_LIGHT_MODES else "adaptive",
+        debug_force_baseline=req.debugForceBaseline,
         channel_rules={
             sid: {
                 "rules": [r for r in item.ruleIds if r],
@@ -2618,7 +2652,7 @@ def fresh_view(sid: str, force: bool = False) -> dict[str, Any]:
     ratio, gray, mask = motion_ratio(st.preview_gray, image)
     st.preview_gray = gray
     dets: list[Det] = []
-    if RT.model_state == "ready" and RT.model is not None and prompts_of(sid):
+    if RT.model_state == "ready" and RT.model is not None and (prompts_of(sid) or RT.cfg.debug_force_baseline):
         if st.preview_tracker is None:
             st.preview_tracker = make_tracker()
         dets = detect(image, st.preview_tracker, sid)

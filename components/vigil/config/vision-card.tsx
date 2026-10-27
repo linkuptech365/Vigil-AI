@@ -244,6 +244,22 @@ export function VisionCard() {
 
         <FieldGroup>
           <Field orientation="horizontal">
+            <Switch
+              id="vision-debug-baseline"
+              checked={draft.debugForceBaseline}
+              onCheckedChange={(debugForceBaseline) => patch({ debugForceBaseline })}
+            />
+            <FieldLabel htmlFor="vision-debug-baseline">调试：强制全量基线词表 + 推理探针</FieldLabel>
+          </Field>
+          <FieldDescription>
+            临时绕过规则派生词表，向所有通道注入 person / cat / dog / bowl / pet food bowl / pet feeder / feeder，并在 Worker 控制台输出每帧输入 shape、像素 min/max 与推理耗时。仅出检测框、不参与报警判定；排查完毕请关闭。
+          </FieldDescription>
+        </FieldGroup>
+
+        <Separator />
+
+        <FieldGroup>
+          <Field orientation="horizontal">
             <Switch id="vision-audit" checked={draft.auditMode} onCheckedChange={(auditMode) => patch({ auditMode })} />
             <FieldLabel htmlFor="vision-audit">链路审计模式（逐帧记录一级门禁决策，含被拦截的帧）</FieldLabel>
           </Field>

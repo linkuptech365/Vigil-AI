@@ -541,6 +541,7 @@ function buildPayload(config: VisionConfig) {
     auditUrl: auditIngestUrl(),
     hitsUrl: hitsIngestUrl(),
     lowLightMode: config.lowLightMode,
+    debugForceBaseline: config.debugForceBaseline,
   }
 }
 
@@ -635,7 +636,7 @@ export async function getVisionInfo(): Promise<VisionInfo> {
   const fallback = !health && motionFallbackActive() ? motionFallbackSnapshot() : null
   if (fallback && info.status === "offline") {
     info.status = "degraded"
-    info.message = `${info.message}。Node 端已接管 Tier-0 帧差预筛：静止画面不再送审大模型，环境部署完成后自动升级为 YOLO-World + ByteTrack`
+    info.message = `${info.message}。Node 端已��管 Tier-0 帧差预筛：静止画面不再送审大模型，环境部署完成后自动升级为 YOLO-World + ByteTrack`
   }
   return {
     status: info.status,
