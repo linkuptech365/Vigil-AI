@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import useSWR from "swr"
-import { ChevronDown, History, ImageOff, Loader2, ShieldOff, Sparkles, Trash2 } from "lucide-react"
+import { ChevronDown, History, ImageOff, Loader2, Maximize2, Minimize2, ShieldOff, Sparkles, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -360,62 +360,95 @@ function RecordActions({ record }: { record: HitHistoryRecord }) {
   )
 }
 
-function RecordDetail({ record }: { record: HitHistoryRecord }) {
+function RecordDetail({ record, fullscreen }: { record: HitHistoryRecord; fullscreen: boolean }) {
+  const detectionsSection = (
+    <section className="flex flex-col gap-1.5">
+      <h4 className="text-xs font-medium">原始检测框（{record.rawDetections.length}）</h4>
+      {record.rawDetections.length === 0 ? (
+        <p className="text-xs text-muted-foreground">该帧没有保留原始检测框。</p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {record.rawDetections.map((det, index) => (
+            <li key={`${det.prompt}-${index}`} className="flex flex-wrap items-center gap-2 text-xs">
+              <Badge variant="outline" className={cn("text-[10px]", det.passed ? VERDICT_STYLE.pass : VERDICT_STYLE.info)}>
+                {det.passed ? "达标" : "低于门槛"}
+              </Badge>
+              <span>{det.label}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {det.prompt} · {visionRoleLabel(det.role)} · {(det.confidence * 100).toFixed(1)}%
+                {det.trackId !== null ? ` · 轨迹 #${det.trackId}` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+
+  const gatesSection = (
+    <section className="flex flex-col gap-1.5">
+      <h4 className="text-xs font-medium">逐级门禁结果</h4>
+      {record.decisions.length === 0 ? (
+        <p className="text-xs text-muted-foreground">没有规则参与该帧的门禁判定。</p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {record.decisions.map((decision) => (
+            <li key={decision.ruleId} className="rounded-md border border-border bg-card p-2">
+              <p className="mb-1 text-xs font-medium">{decision.ruleName}</p>
+              <ul className="flex flex-col gap-1">
+                {decision.gates.map((step, index) => (
+                  <li key={`${step.gate}-${index}`} className="flex items-start gap-2 text-xs">
+                    <Badge variant="outline" className={cn("shrink-0 text-[10px]", VERDICT_STYLE[step.verdict])}>
+                      {VERDICT_LABEL[step.verdict]}
+                    </Badge>
+                    <span className="shrink-0 font-medium">{step.gate}</span>
+                    <span className="text-muted-foreground">{step.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+
+  if (fullscreen) {
+    return (
+      <div className="grid grid-cols-1 gap-6 border-t border-border bg-muted/30 px-4 py-4 lg:grid-cols-12">
+        <div className="flex flex-col gap-3 lg:col-span-7">
+          <FrameWithBoxes record={record} />
+        </div>
+        <div className="flex flex-col gap-4 lg:col-span-5">
+          {detectionsSection}
+          {gatesSection}
+          <RecordActions record={record} />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-3 border-t border-border bg-muted/30 px-4 py-3">
       <FrameWithBoxes record={record} />
-      <section className="flex flex-col gap-1.5">
-        <h4 className="text-xs font-medium">原始检测框（{record.rawDetections.length}）</h4>
-        {record.rawDetections.length === 0 ? (
-          <p className="text-xs text-muted-foreground">该帧没有保留原始检测框。</p>
-        ) : (
-          <ul className="flex flex-col gap-1">
-            {record.rawDetections.map((det, index) => (
-              <li key={`${det.prompt}-${index}`} className="flex flex-wrap items-center gap-2 text-xs">
-                <Badge variant="outline" className={cn("text-[10px]", det.passed ? VERDICT_STYLE.pass : VERDICT_STYLE.info)}>
-                  {det.passed ? "达标" : "低于门槛"}
-                </Badge>
-                <span>{det.label}</span>
-                <span className="font-mono text-[10px] text-muted-foreground">
-                  {det.prompt} · {visionRoleLabel(det.role)} · {(det.confidence * 100).toFixed(1)}%
-                  {det.trackId !== null ? ` · 轨迹 #${det.trackId}` : ""}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section className="flex flex-col gap-1.5">
-        <h4 className="text-xs font-medium">逐级门禁结果</h4>
-        {record.decisions.length === 0 ? (
-          <p className="text-xs text-muted-foreground">没有规则参与该帧的门禁判定。</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {record.decisions.map((decision) => (
-              <li key={decision.ruleId} className="rounded-md border border-border bg-card p-2">
-                <p className="mb-1 text-xs font-medium">{decision.ruleName}</p>
-                <ul className="flex flex-col gap-1">
-                  {decision.gates.map((step, index) => (
-                    <li key={`${step.gate}-${index}`} className="flex items-start gap-2 text-xs">
-                      <Badge variant="outline" className={cn("shrink-0 text-[10px]", VERDICT_STYLE[step.verdict])}>
-                        {VERDICT_LABEL[step.verdict]}
-                      </Badge>
-                      <span className="shrink-0 font-medium">{step.gate}</span>
-                      <span className="text-muted-foreground">{step.detail}</span>
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      {detectionsSection}
+      {gatesSection}
       <RecordActions record={record} />
     </div>
   )
 }
 
-function RecordRow({ record, open, onToggle }: { record: HitHistoryRecord; open: boolean; onToggle: () => void }) {
+function RecordRow({
+  record,
+  open,
+  onToggle,
+  fullscreen,
+}: {
+  record: HitHistoryRecord
+  open: boolean
+  onToggle: () => void
+  fullscreen: boolean
+}) {
   const status = hitStatusOf(record)
   const top = record.tags.reduce<{ label: string; confidence: number } | null>(
     (best, tag) => (!best || tag.confidence > best.confidence ? tag : best),
@@ -468,7 +501,7 @@ function RecordRow({ record, open, onToggle }: { record: HitHistoryRecord; open:
         </div>
         {blockReason ? <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">{blockReason}</p> : null}
       </button>
-      {open ? <RecordDetail record={record} /> : null}
+      {open ? <RecordDetail record={record} fullscreen={fullscreen} /> : null}
     </li>
   )
 }
@@ -489,6 +522,7 @@ export function HitHistorySheet() {
   const [expanded, setExpanded] = React.useState<string | null>(null)
   const [confirming, setConfirming] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
+  const [isFullscreen, setIsFullscreen] = React.useState(false)
 
   const summary = useSWR<HitHistoryResponse>(historyUrl(null, "all", 1), getJson, { refreshInterval: 5000, keepPreviousData: true })
   const list = useSWR<HitHistoryResponse>(
@@ -527,6 +561,7 @@ export function HitHistorySheet() {
         if (!next) {
           setConfirming(false)
           setMessage(null)
+          setIsFullscreen(false)
         }
       }}
     >
@@ -536,12 +571,40 @@ export function HitHistorySheet() {
           历史命中明细（共 {total}/{retention} 条）
         </Button>
       </SheetTrigger>
-      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-2xl">
-        <SheetHeader className="gap-1 border-b px-4 py-3">
-          <SheetTitle className="text-sm">历史命中明细</SheetTitle>
-          <SheetDescription className="text-xs leading-relaxed">
-            当前保留最近 {total} 条（上限绑定自审计设置：{retention} 条，超出后按先进先出自动淘汰最旧记录及其截屏）。不论是否报警、被哪一级门禁拦截，只要产生初筛命中均会留存。
-          </SheetDescription>
+      <SheetContent
+        className={cn(
+          "flex flex-col gap-0 p-0 transition-all duration-300",
+          isFullscreen
+            ? "data-[side=right]:w-screen data-[side=right]:max-w-none data-[side=right]:sm:max-w-none"
+            : "data-[side=right]:w-full data-[side=right]:sm:max-w-2xl",
+        )}
+        onEscapeKeyDown={(event) => {
+          if (isFullscreen) {
+            event.preventDefault()
+            setIsFullscreen(false)
+          }
+        }}
+      >
+        <SheetHeader className="gap-1 border-b px-4 py-3 pr-14">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex flex-col gap-1">
+              <SheetTitle className="text-sm">历史命中明细</SheetTitle>
+              <SheetDescription className="text-xs leading-relaxed">
+                当前保留最近 {total} 条（上限绑定自审计设置：{retention} 条，超出后按先进先出自动淘汰最旧记录及其截屏）。不论是否报警、被哪一级门禁拦截，只要产生初筛命中均会留存。
+              </SheetDescription>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              onClick={() => setIsFullscreen((current) => !current)}
+              title={isFullscreen ? "退出全屏" : "全屏显示"}
+            >
+              {isFullscreen ? <Minimize2 className="size-4" aria-hidden="true" /> : <Maximize2 className="size-4" aria-hidden="true" />}
+              <span className="sr-only">{isFullscreen ? "退出全屏" : "全屏显示"}</span>
+            </Button>
+          </div>
         </SheetHeader>
         <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">
           <div className="flex items-center gap-1" role="group" aria-label="命中状态筛选">
@@ -607,6 +670,7 @@ export function HitHistorySheet() {
                   record={record}
                   open={expanded === record.id}
                   onToggle={() => setExpanded((current) => (current === record.id ? null : record.id))}
+                  fullscreen={isFullscreen}
                 />
               ))}
             </ul>
