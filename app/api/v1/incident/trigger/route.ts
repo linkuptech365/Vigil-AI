@@ -50,6 +50,9 @@ export async function POST(request: Request) {
       edge: { trackId, edgeConfidence, label: typeof body?.label === "string" ? body.label.slice(0, 60) : undefined },
       explore: parseExploreHint(body),
       ruleId: typeof body?.ruleId === "string" && body.ruleId ? body.ruleId.slice(0, 64) : undefined,
+      ruleIds: Array.isArray(body?.ruleIds)
+        ? [...new Set((body.ruleIds as unknown[]).filter((id): id is string => typeof id === "string" && id.length > 0).map((id) => id.slice(0, 64)))].slice(0, 16)
+        : undefined,
       shadowReview: body?.shadowReview === true,
       requestHost: request.headers.get("host"),
       signal: request.signal,

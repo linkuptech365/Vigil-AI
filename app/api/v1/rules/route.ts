@@ -1,9 +1,8 @@
 import type { CreateRuleRequest, CreateRuleResponse, RulesListResponse } from "@/lib/ops/rules-api-types"
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
 import { parsePipeline } from "@/lib/ops/rule-pipeline"
-import { ALL_CHANNELS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSeverity } from "@/lib/ops/rules-types"
-import { createCustomRule, listRules } from "@/lib/ops/server/rule-engine"
+import { createCustomRule, isKnownChannel, listRules } from "@/lib/ops/server/rule-engine"
 import { isRecord, jsonError, jsonOk, readJsonBody, requiredString } from "@/lib/ops/server/rule-http"
 
 export const runtime = "nodejs"
@@ -47,7 +46,7 @@ export async function POST(request: Request) {
       rawBound.length > 0 &&
       rawBound.every(
         (channel) =>
-          typeof channel === "string" && (ALL_CHANNELS.includes(channel) || SCOPE_BINDINGS.includes(channel))
+          typeof channel === "string" && (isKnownChannel(channel) || SCOPE_BINDINGS.includes(channel))
       )
     if (!valid) {
       return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是非空数组，元素为机位 ID 或 ALL / LOCAL")

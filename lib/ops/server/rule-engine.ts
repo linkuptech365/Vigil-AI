@@ -42,6 +42,7 @@ import {
 import { GMP_CLEANROOM_RULES } from "@/lib/ops/gmp-cleanroom-rules"
 import { isDemoEnabled } from "@/lib/storage/demo-store"
 import { loadRules, seedRules, writeRules } from "@/lib/storage/rules-store"
+import { loadStreams } from "@/lib/storage/streams-store"
 import { extractTags, matchScenario, tagLabel } from "./rule-semantic"
 
 /* ---------------------------------------------------------------- constants */
@@ -218,7 +219,7 @@ function windowKey(channelId: string, ruleId: string) {
 /* -------------------------------------------------------------- rule access */
 
 export function isKnownChannel(channelId: string) {
-  return ALL_CHANNELS.includes(channelId)
+  return ALL_CHANNELS.includes(channelId) || loadStreams().some((stream) => stream.id === channelId)
 }
 
 export function listRules(): InspectionRule[] {

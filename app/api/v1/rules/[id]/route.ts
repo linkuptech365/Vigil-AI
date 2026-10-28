@@ -2,9 +2,9 @@ import type { DeleteRuleResponse, UpdateRuleRequest, UpdateRuleResponse } from "
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
 import { parsePipeline } from "@/lib/ops/rule-pipeline"
 import { pushConfig } from "@/lib/vision-engine"
-import { ALL_CHANNELS, COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
+import { COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
 import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
-import { deleteRule, listRules, updateRule } from "@/lib/ops/server/rule-engine"
+import { deleteRule, isKnownChannel, listRules, updateRule } from "@/lib/ops/server/rule-engine"
 import { isRecord, jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
 
 export const runtime = "nodejs"
@@ -51,7 +51,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       Array.isArray(boundChannels) &&
       boundChannels.every(
         (channel) =>
-          typeof channel === "string" && (ALL_CHANNELS.includes(channel) || SCOPE_BINDINGS.includes(channel))
+          typeof channel === "string" && (isKnownChannel(channel) || SCOPE_BINDINGS.includes(channel))
       )
     if (!valid) {
       return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是机位 ID 或 ALL / LOCAL 的数组")

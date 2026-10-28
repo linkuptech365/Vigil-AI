@@ -18,7 +18,8 @@ import { Slider } from "@/components/ui/slider"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { SCOPE_BINDINGS, bindingLabel } from "@/lib/ops/rule-binding"
-import { ACTION_LABEL, ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
+import { ACTION_LABEL, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
+import { BindableChannelItems } from "./bindable-channel-items"
 import type { RuleActionKey } from "@/lib/ops/rules-types"
 import { useRules } from "./rules-provider"
 
@@ -127,11 +128,7 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
               {bindingLabel(scope)} ({scope})
             </ToggleGroupItem>
           ))}
-          {ALL_CHANNELS.map((channel) => (
-            <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs">
-              {channel}
-            </ToggleGroupItem>
-          ))}
+          <BindableChannelItems />
         </ToggleGroup>
         <p className="text-xs text-muted-foreground">
           ALL 对所有视频源生效；LOCAL 仅用于本地视频；也可只勾选指定机位。

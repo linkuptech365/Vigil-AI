@@ -210,6 +210,9 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       )
     }
   }
+  console.info(
+    `[stream-analysis] 规则装配 stream=${meta.id} bound=[${boundRules.map((rule) => rule.id).join(",")}] requested=[${requested.join(",")}] scoped=[${scopedRules.map((rule) => rule.id).join(",")}]`
+  )
   const promptRules: VlmPromptRule[] = scopedRules.map((rule) => {
     const vlm = pipelineVlmContext(rule.pipeline)
     const base = ruleDescription(rule)
@@ -365,7 +368,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
       : shadowed
         ? "规则开启静默存疑审计，边缘置信度处于模糊区间：复核结论已留痕，未产生正式告警"
         : hit
-        ? `防抖冷却窗口（${verdict.suppression?.windowSeconds ?? "-"} 秒）内重复触发，已折叠进既有事件证据链，不重复发告警`
+        ? `防抖冷却窗口（${verdict.suppression?.windowSeconds ?? "-"} 秒）内重复触发，已折叠进既有事件证据链，不重复��告警`
         : verdict.excluded
           ? `二级复核命中排他反例：${verdict.excluded.reason}${verdict.excluded.action ? `（动作：${verdict.excluded.action}）` : ""}，已拦截`
           : verdict.shadowReview

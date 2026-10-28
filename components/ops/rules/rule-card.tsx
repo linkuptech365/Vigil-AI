@@ -19,7 +19,8 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { SCOPE_BINDINGS, bindingLabel, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
-import { ALL_CHANNELS, COOLDOWN_OPTIONS, SCHEDULE_LABEL, SEVERITY_LABEL } from "@/lib/ops/rules-data"
+import { COOLDOWN_OPTIONS, SCHEDULE_LABEL, SEVERITY_LABEL } from "@/lib/ops/rules-data"
+import { BindableChannelItems } from "./bindable-channel-items"
 import type {
   InspectionRule,
   InspectionRuleType,
@@ -271,11 +272,7 @@ export function RuleCard({ rule }: { rule: InspectionRule }) {
                   {bindingLabel(scope)} ({scope})
                 </ToggleGroupItem>
               ))}
-              {ALL_CHANNELS.map((channel) => (
-                <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs">
-                  {channel}
-                </ToggleGroupItem>
-              ))}
+              <BindableChannelItems />
             </ToggleGroup>
             <p className="text-[10px] text-muted-foreground/70">
               ALL 覆盖实时通道与本地视频；LOCAL 仅用于本地导入/检索目录视频
