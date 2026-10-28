@@ -12,6 +12,9 @@ import {
   type LocalSlice,
 } from "@/lib/ops/local-slice"
 import type { VlmCandidate } from "@/lib/ops/rag-types"
+import { bindsSource, isGeometricOnlyRule } from "@/lib/ops/rule-binding"
+import type { RulesListResponse } from "@/lib/ops/rules-api-types"
+import type { InspectionRule } from "@/lib/ops/rules-types"
 import type {
   VlmAnalyzeRequest,
   VlmFinalResult,
@@ -36,6 +39,19 @@ async function fetchCandidates(url: string): Promise<CandidatesResponse> {
   const response = await fetch(url, { cache: "no-store" })
   if (!response.ok) throw new Error(`候选列表加载失败（HTTP ${response.status}）`)
   return (await response.json()) as CandidatesResponse
+}
+
+async function fetchRules(url: string): Promise<RulesListResponse> {
+  const response = await fetch(url, { cache: "no-store" })
+  if (!response.ok) throw new Error(`规则列表加载失败（HTTP ${response.status}）`)
+  return (await response.json()) as RulesListResponse
+}
+
+export interface RuleOption {
+  id: string
+  name: string
+  /** 纯几何规则由一级引擎判定，不送大模型，界面置灰不可选 */
+  geometric: boolean
 }
 
 const NO_MODEL: VlmModelConfig = {
@@ -78,6 +94,11 @@ interface VlmContextValue {
   /** 从 0 开始的关键帧下标；null 表示模型尚未给出证据帧 */
   evidenceFrames: number[] | null
   result: VlmReasoningResult | null
+  /** 当前候选所属通道下已启用的规则（含纯几何规则，供置灰展示） */
+  ruleOptions: RuleOption[]
+  ruleOptionsLoading: boolean
+  selectedRuleIds: string[]
+  setSelectedRuleIds: (ids: string[]) => void
   run: () => void
 }
 
@@ -230,6 +251,31 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
     : (candidates.find((item) => item.alertId === clipId) ?? candidates[0] ?? null)
   const selectionId = activeLocal?.id ?? activeCandidate?.alertId ?? null
 
+  const { data: rulesData, isLoading: ruleOptionsLoading } = useSWR("/api/v1/rules", fetchRules, { revalidateOnFocus: true })
+  const ruleOptions = React.useMemo<RuleOption[]>(() => {
+    if (!activeCandidate) return []
+    const source = { kind: "channel", channelId: activeCandidate.channelId } as const
+    return (rulesData?.rules ?? [])
+      .filter((rule: InspectionRule) => rule.enabled && bindsSource(rule, source))
+      .map((rule) => ({ id: rule.id, name: rule.name, geometric: isGeometricOnlyRule(rule) }))
+  }, [rulesData, activeCandidate])
+
+  const [ruleSelection, setRuleSelection] = React.useState<Record<string, string[]>>({})
+  const selectedRuleIds = React.useMemo(() => {
+    if (!activeCandidate) return []
+    const selectable = new Set(ruleOptions.filter((rule) => !rule.geometric).map((rule) => rule.id))
+    const stored = ruleSelection[activeCandidate.alertId]
+    if (stored) return stored.filter((id) => selectable.has(id))
+    return selectable.has(activeCandidate.ruleId) ? [activeCandidate.ruleId] : []
+  }, [activeCandidate, ruleOptions, ruleSelection])
+  const setSelectedRuleIds = React.useCallback(
+    (ids: string[]) => {
+      if (!activeCandidate) return
+      setRuleSelection((prev) => ({ ...prev, [activeCandidate.alertId]: ids }))
+    },
+    [activeCandidate]
+  )
+
   const localFrames = React.useMemo(() => activeLocal?.chunk.frames ?? [], [activeLocal])
   const activeLocalId = activeLocal?.id ?? null
   const needsRecapture =
@@ -351,6 +397,9 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
     } else if (!activeCandidate) {
       toast.error("没有可研判的候选", { description: "一级初筛尚未产生已落库的命中告警。" })
       return
+    } else if (selectedRuleIds.length === 0) {
+      toast.error("请先选择生效规则", { description: "在「生效规则」下拉框中至少勾选一条语义规则，纯几何规则不送大模型。" })
+      return
     }
     const candidate = activeCandidate
 
@@ -450,7 +499,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
 
     const streaming = request
       ? streamVlmAnalyze(request, handleChunk, controller.signal)
-      : streamAlertAnalyze(candidate!.alertId, profile.id, handleChunk, controller.signal)
+      : streamAlertAnalyze(candidate!.alertId, profile.id, selectedRuleIds, handleChunk, controller.signal)
 
     streaming
       .then(() => {
@@ -464,7 +513,7 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
           description: error instanceof Error ? error.message : "未知错误",
         })
       })
-  }, [activeCandidate, activeLocal, model, profiles, getLocalPromptRules, updateChunk, localFramesError, refreshCandidates])
+  }, [activeCandidate, activeLocal, model, profiles, getLocalPromptRules, updateChunk, localFramesError, refreshCandidates, selectedRuleIds])
 
   const showStored = phase === "idle" && !result && !!stored
   const shownResult = result ?? (showStored ? stored.result : null)
@@ -498,6 +547,10 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       metrics: shownMetrics,
       evidenceFrames: shownEvidence,
       result: shownResult,
+      ruleOptions,
+      ruleOptionsLoading,
+      selectedRuleIds,
+      setSelectedRuleIds,
       run,
     }),
     [
@@ -521,6 +574,10 @@ export function VlmProvider({ children }: { children: React.ReactNode }) {
       shownMetrics,
       shownEvidence,
       shownResult,
+      ruleOptions,
+      ruleOptionsLoading,
+      selectedRuleIds,
+      setSelectedRuleIds,
       run,
     ]
   )

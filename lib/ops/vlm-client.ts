@@ -91,10 +91,11 @@ export function streamVlmAnalyze(
 export function streamAlertAnalyze(
   alertId: string,
   modelProfileId: string,
+  ruleIds: string[],
   onChunk: (chunk: VlmStreamChunk) => void,
   signal?: AbortSignal
 ) {
-  return streamSse(`/api/v1/vlm/candidates/${encodeURIComponent(alertId)}/analyze`, { modelProfileId }, onChunk, signal)
+  return streamSse(`/api/v1/vlm/candidates/${encodeURIComponent(alertId)}/analyze`, { modelProfileId, ruleIds }, onChunk, signal)
 }
 
 async function streamSse(

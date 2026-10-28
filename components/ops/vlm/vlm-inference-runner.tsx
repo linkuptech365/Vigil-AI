@@ -1,11 +1,19 @@
 "use client"
 
 import * as React from "react"
-import { BrainCircuit, Play, RotateCcw } from "lucide-react"
+import { BrainCircuit, ChevronDown, ListChecks, Play, RotateCcw } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   Select,
   SelectContent,
@@ -327,6 +335,71 @@ function LocalFrameStrip() {
   )
 }
 
+function RuleSelector({ disabled }: { disabled: boolean }) {
+  const { activeCandidate, ruleOptions, ruleOptionsLoading, selectedRuleIds, setSelectedRuleIds } = useVlm()
+  if (!activeCandidate) return null
+
+  const selected = ruleOptions.filter((rule) => selectedRuleIds.includes(rule.id))
+  const label =
+    selected.length === 0
+      ? ruleOptionsLoading
+        ? "正在加载规则…"
+        : "未选择规则"
+      : `已选规则: ${selected[0].name}${selected.length > 1 ? ` 等 (${selected.length}条)` : " (1条)"}`
+
+  const toggle = (id: string, checked: boolean) =>
+    setSelectedRuleIds(checked ? [...new Set([...selectedRuleIds, id])] : selectedRuleIds.filter((item) => item !== id))
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          aria-label="选择本次研判生效的规则"
+          className={cn("w-full justify-between xl:w-64", selected.length === 0 && "text-muted-foreground")}
+        >
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ListChecks className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{label}</span>
+          </span>
+          <ChevronDown className="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-80">
+        <DropdownMenuLabel className="text-xs">
+          {activeCandidate.channelName} 已启用的规则
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {ruleOptions.length === 0 ? (
+          <p className="px-2 py-3 text-xs text-muted-foreground">
+            {ruleOptionsLoading ? "正在加载…" : "该通道没有已启用并绑定的规则，请先到规则库绑定。"}
+          </p>
+        ) : (
+          ruleOptions.map((rule) => (
+            <DropdownMenuCheckboxItem
+              key={rule.id}
+              checked={!rule.geometric && selectedRuleIds.includes(rule.id)}
+              disabled={rule.geometric}
+              onSelect={(event) => event.preventDefault()}
+              onCheckedChange={(checked) => toggle(rule.id, checked === true)}
+            >
+              <span className="flex min-w-0 flex-col">
+                <span className="truncate">{rule.name}</span>
+                <span className="font-mono text-[10px] text-muted-foreground">
+                  {rule.id}
+                  {rule.geometric ? " · 纯几何规则，不送大模型" : ""}
+                </span>
+              </span>
+            </DropdownMenuCheckboxItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export function VlmInferenceRunner() {
   const {
     models,
@@ -342,10 +415,11 @@ export function VlmInferenceRunner() {
     activeLocal,
     localFramesLoading,
     phase,
+    selectedRuleIds,
     run,
   } = useVlm()
   const busy = phase === "thinking" || phase === "streaming"
-  const hasSelection = !!activeCandidate || !!activeLocal
+  const hasSelection = (!!activeCandidate && selectedRuleIds.length > 0) || !!activeLocal
 
   return (
     <Card className="gap-0 py-0">
@@ -407,6 +481,7 @@ export function VlmInferenceRunner() {
               )}
             </SelectContent>
           </Select>
+          <RuleSelector disabled={busy} />
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <MetricsBadge />

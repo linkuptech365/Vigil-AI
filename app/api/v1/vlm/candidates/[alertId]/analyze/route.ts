@@ -1,4 +1,4 @@
-import { isGeometricOnlyRule, matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import { bindsSource, isGeometricOnlyRule, matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
 import type { InspectionRule } from "@/lib/ops/rules-types"
 import { pipelineVlmContext } from "@/lib/ops/rule-pipeline"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
@@ -42,6 +42,33 @@ function toPromptRule(rule: InspectionRule, streamId: string): VlmPromptRule {
  * 取不到（或命中的是纯几何规则）时，仅取该告警所属通道当前已启用、绑定且需要 VLM 的规则。
  * 不再退回告警快照或任何内置默认规则；一个都没有时返回空数组，由调用方报错。
  */
+type SelectedRules = { ok: true; rules: VlmPromptRule[] } | { ok: false; message: string }
+
+/**
+ * 用户在前端手工指定了规则：严格只使用这些规则，不做任何猜测或补全。
+ * 每条都必须存在、已启用、绑定到该告警所属通道，且不是纯几何规则，否则整体拒绝。
+ */
+function resolveSelectedRules(alert: StreamAlert, ruleIds: string[]): SelectedRules {
+  const all = loadRules()
+  const source = { kind: "channel", channelId: alert.streamId } as const
+  const picked: InspectionRule[] = []
+  for (const id of ruleIds) {
+    const rule = all.find((item) => item.id === id)
+    if (!rule) return { ok: false, message: `所选规则 ${id} 不存在，可能已被删除` }
+    if (!rule.enabled) return { ok: false, message: `规则「${rule.name}」已被停用，请重新选择` }
+    if (!bindsSource(rule, source)) return { ok: false, message: `规则「${rule.name}」未绑定通道「${alert.streamName}」` }
+    if (isGeometricOnlyRule(rule)) return { ok: false, message: `规则「${rule.name}」是纯几何规则，不能送大模型研判` }
+    picked.push(rule)
+  }
+  return { ok: true, rules: picked.map((rule) => toPromptRule(rule, alert.streamId)) }
+}
+
+function parseRuleIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const ids = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+  return ids.length > 0 ? [...new Set(ids)] : null
+}
+
 function buildRules(alert: StreamAlert): VlmPromptRule[] {
   const rules = loadRules()
   const hit = rules.find((item) => item.id === alert.ruleId)
@@ -97,7 +124,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ ale
   const alert = getAlert(alertId)
   if (!alert) return fail("告警不存在或已过保留期被清理", 404, "ALERT_NOT_FOUND")
 
-  const body = (await request.json().catch(() => null)) as { modelProfileId?: unknown } | null
+  const body = (await request.json().catch(() => null)) as { modelProfileId?: unknown; ruleIds?: unknown } | null
   const profileId = typeof body?.modelProfileId === "string" ? body.modelProfileId.trim() : ""
   const profile = profileId ? getProfile(profileId) : null
   if (!profile) return fail("模型档案不存在，请到配置中心检查模型网关", 400, "MODEL_NOT_FOUND")
@@ -107,7 +134,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ ale
   const keyframes = loadKeyframes(alert)
   if (keyframes.length === 0) return fail("该告警的证据帧已丢失或已过保留期，无法进行二级研判", 409, "NO_VALID_IMAGE_FRAMES")
 
-  const rules = buildRules(alert)
+  const requestedRuleIds = parseRuleIds(body?.ruleIds)
+  let rules: VlmPromptRule[]
+  if (requestedRuleIds) {
+    const selected = resolveSelectedRules(alert, requestedRuleIds)
+    if (!selected.ok) return fail(selected.message, 400, "INVALID_RULE_SELECTION")
+    rules = selected.rules
+  } else {
+    rules = buildRules(alert)
+  }
   if (rules.length === 0) {
     return fail(`通道「${alert.streamName}」没有可用于二级研判的已启用语义规则（纯几何规则不送大模型），请先在规则库为该通道绑定规则`, 409, "NO_RULES")
   }
