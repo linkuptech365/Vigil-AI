@@ -77,6 +77,18 @@ export function hitFrameUrl(id: string) {
   return `${HIT_HISTORY_ENDPOINTS.history}/${encodeURIComponent(id)}/frame`
 }
 
+/**
+ * 这条命中在一级触发时实际关联的规则 ID：优先取通过（或待确认 / 已升级）的规则；
+ * 全部被拦截时，取至少通过了 Gate 1 主体检出的规则（Gate 1 主体缺失说明规则与该画面无关）。
+ * 都没有时返回空数组，由服务端回落到通道已绑定的语义规则。
+ */
+export function hitRuleIds(record: Pick<HitHistoryRecord, "decisions">): string[] {
+  const decisions = (record.decisions ?? []).filter((decision) => decision.ruleId)
+  const passed = decisions.filter((decision) => decision.outcome !== "block")
+  const related = passed.length > 0 ? passed : decisions.filter((decision) => decision.dropCode !== "GATE_1_SUBJECT_MISSING")
+  return [...new Set(related.map((decision) => decision.ruleId))]
+}
+
 export function hitStatusOf(record: Pick<HitHistoryRecord, "gate">): HitHistoryStatus {
   return HIT_STATUS_OF_GATE[record.gate] ?? "passed"
 }

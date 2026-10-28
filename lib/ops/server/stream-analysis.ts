@@ -49,6 +49,8 @@ export interface AnalyzeStreamOptions {
   explore?: ExploreHint
   /** 由规则管道门禁放行的事件：只用该规则研判，避免无关规则抢占结论 */
   ruleId?: string
+  /** 手动送审：该命中在一级触发时关联的规则；只装配其中已启用、绑定本通道的语义规则，不混入其它规则 */
+  ruleIds?: string[]
   /** 管道开启「静默存疑审计」且边缘置信度不足：命中也只记审计，不发正式告警 */
   shadowReview?: boolean
   /** VLM 调用流水归因；缺省时 edge 来源记为「一级告警上报」，其余记为「定时巡检漏斗」 */
@@ -190,9 +192,17 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
 
   const tuning = learnedRuleTuning(meta.id)
   const boundRules = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id }).filter((rule) => !isGeometricOnlyRule(rule))
-  const scopedRules = options.ruleId && boundRules.some((rule) => rule.id === options.ruleId)
-    ? boundRules.filter((rule) => rule.id === options.ruleId)
-    : boundRules
+  const requestedIds = options.ruleIds?.length ? new Set(options.ruleIds) : null
+  const hitRules = requestedIds ? boundRules.filter((rule) => requestedIds.has(rule.id)) : []
+  if (requestedIds && hitRules.length === 0) {
+    console.warn(`[stream-analysis] 命中关联规则 ${[...requestedIds].join(",")} 均不可送 VLM（已停用/未绑定/纯几何），改用通道 ${meta.id} 绑定的语义规则`)
+  }
+  const scopedRules =
+    hitRules.length > 0
+      ? hitRules
+      : options.ruleId && boundRules.some((rule) => rule.id === options.ruleId)
+        ? boundRules.filter((rule) => rule.id === options.ruleId)
+        : boundRules
   const promptRules: VlmPromptRule[] = scopedRules.map((rule) => {
     const vlm = pipelineVlmContext(rule.pipeline)
     const base = ruleDescription(rule)
@@ -207,7 +217,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
     }
   })
   if (promptRules.length === 0) {
-    throw new StreamAnalysisError("该通道没有生效的稽查规则，请在规则库中把规则绑定到「全部视频源」", 409, "NO_RULES")
+    throw new StreamAnalysisError("该通道没有生效的稽查规则，请在规则库中把规则���定到「全部视频源」", 409, "NO_RULES")
   }
 
   const count = Math.min(MAX_FRAMES, Math.max(1, options.frameCount ?? 4))

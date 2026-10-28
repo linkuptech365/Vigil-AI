@@ -19,6 +19,7 @@ import {
   HIT_HISTORY_ENDPOINTS,
   HIT_STATUS_LABEL,
   hitFrameUrl,
+  hitRuleIds,
   hitStatusOf,
   type HitHistoryRecord,
   type HitHistoryResponse,
@@ -195,7 +196,7 @@ function NegativeAnchorPicker({ record }: { record: HitHistoryRecord }) {
       markedDetections.add(detectionKey(record.id, selected))
       setMarked((current) => new Set(current).add(selected))
       setPicking(false)
-      toast.success("已加入负样本抑制库，后续同位置静态伪影将被静默过滤")
+      toast.success("已加入负样本抑制库，后续同位置静态伪影将��静默过滤")
     } catch (error) {
       toast.error(`加入负样本失败：${errorMessage(error)}`)
     } finally {
@@ -294,6 +295,7 @@ function ManualReviewPanel({ record }: { record: HitHistoryRecord }) {
       const data = await postJson<Partial<ManualAnalysis>>(`/api/v1/streams/${encodeURIComponent(record.streamId)}/analyze`, {
         trigger: "manual",
         evidenceFrames: [hitFrameUrl(record.id)],
+        ruleIds: hitRuleIds(record),
       })
       const next: ManualAnalysis = {
         verdict: data.verdict === "alert" ? "alert" : "safe",

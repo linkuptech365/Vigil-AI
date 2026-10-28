@@ -43,7 +43,10 @@ async function resolveEvidenceFrame(raw: string, request: Request): Promise<stri
 
 export async function POST(request: Request, { params }: { params: Promise<{ streamId: string }> }) {
   const { streamId } = await params
-  const body = (await request.json().catch(() => ({}))) as { modelProfileId?: unknown; frameCount?: unknown; evidenceFrames?: unknown }
+  const body = (await request.json().catch(() => ({}))) as { modelProfileId?: unknown; frameCount?: unknown; evidenceFrames?: unknown; ruleIds?: unknown }
+  const ruleIds = Array.isArray(body.ruleIds)
+    ? [...new Set(body.ruleIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()))]
+    : undefined
 
   let providedFrames: string[] | undefined
   if (body.evidenceFrames !== undefined) {
@@ -65,6 +68,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ str
       trigger: "manual",
       frameCount: typeof body.frameCount === "number" ? body.frameCount : 4,
       providedFrames,
+      ruleIds,
       modelProfileId: typeof body.modelProfileId === "string" ? body.modelProfileId : undefined,
       requestHost: request.headers.get("host"),
       signal: request.signal,
