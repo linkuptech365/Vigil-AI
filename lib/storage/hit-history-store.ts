@@ -29,13 +29,16 @@ export function hitFramesDir() {
   return path.join(dataDir(), "audit", "hit-frames")
 }
 
-function framePath(id: string) {
-  return path.join(hitFramesDir(), `${id}.jpg`)
+const MAX_EARLIER_FRAMES = 3
+
+function framePath(id: string, earlierIndex?: number) {
+  return path.join(hitFramesDir(), earlierIndex ? `${id}_${earlierIndex}.jpg` : `${id}.jpg`)
 }
 
 function removeFrame(id: string) {
   if (!SAFE_ID.test(id)) return
   fs.rmSync(framePath(id), { force: true })
+  for (let i = 1; i <= MAX_EARLIER_FRAMES; i += 1) fs.rmSync(framePath(id, i), { force: true })
 }
 
 function ensureLoaded() {
@@ -85,6 +88,8 @@ export interface HitIngestItem {
   record: HitHistoryRecord
   /** 触发帧 JPEG；缺省表示该条是对既有记录的更新或帧编码失败 */
   frame?: Buffer
+  /** 触发帧之前的连续帧（从旧到新） */
+  earlierFrames?: Buffer[]
 }
 
 export interface HitUpdateItem {
@@ -97,19 +102,28 @@ export function ingestHitRecords(items: HitIngestItem[], updates: HitUpdateItem[
   if (!items.length && !updates.length) return
   ensureLoaded()
   const index = new Map(state.records.map((record) => [record.id, record]))
-  for (const { record, frame } of items) {
+  for (const { record, frame, earlierFrames } of items) {
     let hasFrame = false
+    let savedEarlier = 0
     if (frame && SAFE_ID.test(record.id)) {
       try {
         fs.mkdirSync(hitFramesDir(), { recursive: true })
         fs.writeFileSync(framePath(record.id), frame)
         hasFrame = true
+        for (const buffer of (earlierFrames ?? []).slice(0, MAX_EARLIER_FRAMES)) {
+          fs.writeFileSync(framePath(record.id, savedEarlier + 1), buffer)
+          savedEarlier += 1
+        }
       } catch {
-        hasFrame = false
+        // 前序帧写入失败不影响已落盘的触发帧；hasFrame 保持当前值
       }
     }
     const existing = index.get(record.id)
-    const next: HitHistoryRecord = { ...record, hasFrame: hasFrame || existing?.hasFrame === true }
+    const next: HitHistoryRecord = {
+      ...record,
+      hasFrame: hasFrame || existing?.hasFrame === true,
+      earlierFrames: savedEarlier || existing?.earlierFrames || undefined,
+    }
     if (existing) Object.assign(existing, next)
     else {
       state.records.push(next)
@@ -154,10 +168,11 @@ export function queryHitRecords(query: HitHistoryQuery): HitHistoryResponse {
   }
 }
 
-export function readHitFrame(id: string): Buffer | null {
+export function readHitFrame(id: string, earlierIndex?: number): Buffer | null {
   if (!SAFE_ID.test(id)) return null
+  if (earlierIndex !== undefined && !(Number.isInteger(earlierIndex) && earlierIndex >= 1 && earlierIndex <= MAX_EARLIER_FRAMES)) return null
   try {
-    return fs.readFileSync(framePath(id))
+    return fs.readFileSync(framePath(id, earlierIndex))
   } catch {
     return null
   }

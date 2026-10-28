@@ -4,13 +4,43 @@ import type { NormalizedInput } from "./vlm-shared"
 /** 规则库里没有任何业务内容时，指令里的占位符。 */
 const NO_RULE_ID = "NONE"
 
+/**
+ * 规则文本里同一句话被重复写入（整段重复 N 次、或同一句多次出现）时折叠成一次，
+ * 避免 Prompt 被堆叠膨胀而浪费 Token、稀释真正的判定依据。
+ */
+export function collapseRepeatedText(text: string): string {
+  let value = text.trim()
+  const whole = value.match(/^([\s\S]{4,}?)(?:\s*\1)+$/)
+  if (whole) value = whole[1].trim()
+  const seen = new Set<string>()
+  return value
+    .split(/(?<=[。；;！!？?\n])/)
+    .filter((segment) => {
+      const key = segment.trim().toLowerCase()
+      if (!key) return true
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .join("")
+    .trim()
+}
+
 function formatRule(rule: VlmPromptRule, index: number) {
-  const exclusions = rule.exclusions?.filter(Boolean) ?? []
+  const seenExclusions = new Set<string>()
+  const exclusions = (rule.exclusions ?? [])
+    .map((item) => collapseRepeatedText(item))
+    .filter((item) => {
+      const key = item.toLowerCase()
+      if (!item || seenExclusions.has(key)) return false
+      seenExclusions.add(key)
+      return true
+    })
   return [
     `[规则序号 ${index + 1}]`,
     `- 规则编号: ${rule.id}`,
     `- 规则名称: ${rule.name}`,
-    `- 语义判定依据: ${rule.description}`,
+    `- 语义判定依据: ${collapseRepeatedText(rule.description)}`,
     `- 置信度阈值要求: ≥ ${rule.sensitivity}`,
     `- 告警等级: ${rule.severity}`,
     exclusions.length
@@ -19,8 +49,21 @@ function formatRule(rule: VlmPromptRule, index: number) {
   ].join("\n")
 }
 
+/** 每条生效规则在 Prompt 中严格只出现一次：按规则编号去重，编号不同但名称与判定依据完全一致的也视为同一条。 */
+export function dedupePromptRules(rules: VlmPromptRule[]): VlmPromptRule[] {
+  const ids = new Set<string>()
+  const contents = new Set<string>()
+  return rules.filter((rule) => {
+    const content = `${rule.name.trim()}|${collapseRepeatedText(rule.description).toLowerCase()}`
+    if (ids.has(rule.id) || contents.has(content)) return false
+    ids.add(rule.id)
+    contents.add(content)
+    return true
+  })
+}
+
 export function buildRulesBlock(rules: VlmPromptRule[]) {
-  return rules.map(formatRule).join("\n\n")
+  return dedupePromptRules(rules).map(formatRule).join("\n\n")
 }
 
 /**

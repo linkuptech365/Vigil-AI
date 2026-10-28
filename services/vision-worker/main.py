@@ -629,6 +629,29 @@ def hit_frame_b64(image: np.ndarray) -> tuple[str, int, int] | None:
         return None
 
 
+HIT_EARLIER_FRAMES = 3
+
+
+def hit_earlier_frames(sid: str) -> list[str]:
+    """触发帧之前的连续帧（从旧到新，不含触发帧本身），供手动送审还原时序动作。"""
+    st = RT.streams.get(sid)
+    if st is None:
+        return []
+    out: list[str] = []
+    # ring 的最后一张就是当前触发帧，已经单独上报，这里只取它之前的
+    for raw in list(st.ring)[-(HIT_EARLIER_FRAMES + 1):-1]:
+        try:
+            decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if decoded is None:
+                continue
+            frame = hit_frame_b64(decoded)
+            if frame:
+                out.append(frame[0])
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def hit_record_push(ctx: dict[str, Any], sid: str, raw: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> None:
     hit = ctx.get("hit")
     if hit is None or not RT.cfg.hits_url:
@@ -659,6 +682,9 @@ def hit_record_push(ctx: dict[str, Any], sid: str, raw: list[dict[str, Any]], de
         frame = hit_frame_b64(image)
         if frame:
             record["frame"], record["frameWidth"], record["frameHeight"] = frame
+    earlier = hit_earlier_frames(sid)
+    if earlier:
+        record["frames"] = earlier
     HIT_QUEUE.append(record)
 
 

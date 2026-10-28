@@ -63,7 +63,15 @@ function sanitizeNew(raw: Record<string, unknown>): HitIngestItem | null {
     const buffer = Buffer.from(raw.frame, "base64")
     if (buffer.length > 0 && buffer.length <= MAX_FRAME_BYTES) frame = buffer
   }
-  return { record, frame }
+  const earlierFrames: Buffer[] = []
+  if (frame && Array.isArray(raw.frames)) {
+    for (const item of raw.frames.slice(0, 3)) {
+      if (typeof item !== "string" || item.length === 0 || item.length >= MAX_FRAME_BYTES * 1.4) continue
+      const buffer = Buffer.from(item, "base64")
+      if (buffer.length > 0 && buffer.length <= MAX_FRAME_BYTES) earlierFrames.push(buffer)
+    }
+  }
+  return { record, frame, earlierFrames: earlierFrames.length ? earlierFrames : undefined }
 }
 
 /** Worker 批量上报命中记录；不依赖「链路审计模式」开关，容量由审计保留条数在落盘时强制。 */

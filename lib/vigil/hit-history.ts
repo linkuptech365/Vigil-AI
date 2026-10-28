@@ -51,6 +51,8 @@ export interface HitHistoryRecord {
   anchor?: boolean
   /** 触发帧截屏（服务端以文件保存，通过 hitFrameUrl 读取） */
   hasFrame: boolean
+  /** 触发帧之前保存的连续帧数量（从旧到新编号 1..N），缺省为 0 */
+  earlierFrames?: number
   frameWidth: number
   frameHeight: number
   /** 与截屏同一帧的原始检测框（含未达门槛的候选），0-1000 归一化 */
@@ -73,8 +75,15 @@ export interface HitHistoryResponse {
   records: HitHistoryRecord[]
 }
 
-export function hitFrameUrl(id: string) {
-  return `${HIT_HISTORY_ENDPOINTS.history}/${encodeURIComponent(id)}/frame`
+export function hitFrameUrl(id: string, earlierIndex?: number) {
+  const base = `${HIT_HISTORY_ENDPOINTS.history}/${encodeURIComponent(id)}/frame`
+  return earlierIndex ? `${base}?n=${earlierIndex}` : base
+}
+
+/** 手动送审用的时序帧：前序帧（旧→新）+ 触发帧，共 1~4 张。 */
+export function hitEvidenceFrameUrls(record: Pick<HitHistoryRecord, "id" | "earlierFrames">): string[] {
+  const earlier = Math.max(0, Math.min(3, record.earlierFrames ?? 0))
+  return [...Array.from({ length: earlier }, (_, i) => hitFrameUrl(record.id, i + 1)), hitFrameUrl(record.id)]
 }
 
 /**

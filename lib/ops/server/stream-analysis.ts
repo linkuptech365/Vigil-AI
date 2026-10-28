@@ -196,7 +196,12 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   // 只要调用方指明了规则，就只允许「已启用 + 绑定本通道 + 非纯几何」的那几条进入 Prompt，绝不回退到全部绑定规则。
   const requested = [...new Set([...(options.ruleIds ?? []), ...(options.ruleId ? [options.ruleId] : [])])]
   let scopedRules = boundRules
-  if (requested.length > 0) {
+  if (requested.length === 0) {
+    // 未指定规则时，显式绑定到本通道的规则优先；只有本通道没有任何显式绑定时才使用「全部视频源」规则，
+    // 避免绑定 ALL 的烟火等规则混入只关心猫进食的通道
+    const explicit = boundRules.filter((rule) => rule.boundChannels?.includes(meta.id))
+    if (explicit.length > 0) scopedRules = explicit
+  } else {
     const requestedIds = new Set(requested)
     scopedRules = boundRules.filter((rule) => requestedIds.has(rule.id))
     if (scopedRules.length === 0) {
@@ -372,7 +377,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
         : verdict.excluded
           ? `二级复核命中排他反例：${verdict.excluded.reason}${verdict.excluded.action ? `（动作：${verdict.excluded.action}）` : ""}，已拦截`
           : verdict.shadowReview
-            ? "置信度处于边缘区间或交互介质辨识不足，记为存疑审计，未产生正式告警"
+            ? "置信度处于边���区间或交互介质辨识不足，记为存疑审计，未产生正式告警"
             : verdict.belowThreshold
               ? "命中规则但置信度低于规则灵敏度阈值，未触发告警"
               : "大模型复核后判定画面无违规",
