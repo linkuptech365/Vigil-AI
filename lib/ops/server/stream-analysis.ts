@@ -192,17 +192,24 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
 
   const tuning = learnedRuleTuning(meta.id)
   const boundRules = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id }).filter((rule) => !isGeometricOnlyRule(rule))
-  const requestedIds = options.ruleIds?.length ? new Set(options.ruleIds) : null
-  const hitRules = requestedIds ? boundRules.filter((rule) => requestedIds.has(rule.id)) : []
-  if (requestedIds && hitRules.length === 0) {
-    console.warn(`[stream-analysis] 命中关联规则 ${[...requestedIds].join(",")} 均不可送 VLM（已停用/未绑定/纯几何），改用通道 ${meta.id} 绑定的语义规则`)
+  // 自动触发（options.ruleId）与手动送审（options.ruleIds）统一走同一套白名单：
+  // 只要调用方指明了规则，就只允许「已启用 + 绑定本通道 + 非纯几何」的那几条进入 Prompt，绝不回退到全部绑定规则。
+  const requested = [...new Set([...(options.ruleIds ?? []), ...(options.ruleId ? [options.ruleId] : [])])]
+  let scopedRules = boundRules
+  if (requested.length > 0) {
+    const requestedIds = new Set(requested)
+    scopedRules = boundRules.filter((rule) => requestedIds.has(rule.id))
+    if (scopedRules.length === 0) {
+      console.warn(
+        `[stream-analysis] 指定规则 ${requested.join(",")} 在通道 ${meta.id} 上不可送 VLM（已停用/未绑定/纯几何），已阻断本次研判，不回退到通道全部规则`
+      )
+      throw new StreamAnalysisError(
+        `指定规则 ${requested.join("、")} 在通道「${meta.name}」上不可用于大模型研判（已停用、未绑定本通道或为纯几何规则），已阻断本次研判`,
+        409,
+        "RULE_NOT_ELIGIBLE"
+      )
+    }
   }
-  const scopedRules =
-    hitRules.length > 0
-      ? hitRules
-      : options.ruleId && boundRules.some((rule) => rule.id === options.ruleId)
-        ? boundRules.filter((rule) => rule.id === options.ruleId)
-        : boundRules
   const promptRules: VlmPromptRule[] = scopedRules.map((rule) => {
     const vlm = pipelineVlmContext(rule.pipeline)
     const base = ruleDescription(rule)
