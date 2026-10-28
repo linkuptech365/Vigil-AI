@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 
-import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import { isGeometricOnlyRule, matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
 import { pipelineVlmContext } from "@/lib/ops/rule-pipeline"
 import type { VlmFinalResult, VlmKeyframeInput, VlmMetrics, VlmPromptRule, VlmVerdict } from "@/lib/ops/vlm-api-types"
 import { MIN_VALID_BASE64_CHARS } from "@/lib/ops/server/frame-extractor"
@@ -189,7 +189,7 @@ async function runAnalysis_(options: AnalyzeStreamOptions): Promise<AnalyzeStrea
   const profile = resolveProfile(options.modelProfileId)
 
   const tuning = learnedRuleTuning(meta.id)
-  const boundRules = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id })
+  const boundRules = matchRulesForSource(loadRules(), { kind: "channel", channelId: meta.id }).filter((rule) => !isGeometricOnlyRule(rule))
   const scopedRules = options.ruleId && boundRules.some((rule) => rule.id === options.ruleId)
     ? boundRules.filter((rule) => rule.id === options.ruleId)
     : boundRules

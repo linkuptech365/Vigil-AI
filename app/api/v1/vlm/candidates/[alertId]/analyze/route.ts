@@ -1,4 +1,5 @@
-import { ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import { isGeometricOnlyRule, matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import type { InspectionRule } from "@/lib/ops/rules-types"
 import { pipelineVlmContext } from "@/lib/ops/rule-pipeline"
 import { getProfile, resolveEndpointUrl } from "@/lib/ops/server/model-profiles"
 import { indexAlertNow } from "@/lib/ops/server/rag-indexer"
@@ -15,45 +16,63 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
+const MAX_EVIDENCE_FRAMES = 6
+
 function fail(message: string, status: number, code?: string) {
   return Response.json({ status: "error", message, ...(code ? { error: code } : {}) }, { status, headers: { "Cache-Control": "no-store" } })
 }
 
-/** 规则优先取规则库当前定义；规则已被删除或改名时，退回告警留存的快照，保证历史告警仍可复判。 */
-function buildRules(alert: StreamAlert): { rules: VlmPromptRule[]; source: AlertVlmAnalysis["ruleSource"] } {
-  const rule = loadRules().find((item) => item.id === alert.ruleId)
-  if (!rule) {
-    return {
-      source: "alert_snapshot",
-      rules: [
-        {
-          id: alert.ruleId,
-          name: alert.ruleName,
-          description: `${alert.ruleName}。一级初筛留存结论：${alert.summary}`,
-          sensitivity: 0.6,
-          severity: alert.severity,
-          cooldownSeconds: 60,
-        },
-      ],
-    }
-  }
-  const tuning = learnedRuleTuning(alert.streamId)
+function toPromptRule(rule: InspectionRule, streamId: string): VlmPromptRule {
+  const tuning = learnedRuleTuning(streamId)
   const vlm = pipelineVlmContext(rule.pipeline)
   const base = ruleDescription(rule)
   return {
-    source: "rule_library",
-    rules: [
-      {
-        id: rule.id,
-        name: rule.name,
-        description: vlm.intent ? `${base}\n核心违规意图：${vlm.intent}` : base,
-        sensitivity: Math.min(0.98, Math.round((ruleSensitivity(rule) + (tuning.sensitivityBoost[rule.id] ?? 0)) * 100) / 100),
-        severity: rule.severity,
-        cooldownSeconds: rule.cooldownSeconds,
-        exclusions: [...new Set([...(rule.exclusions ?? []), ...vlm.exclusions, ...tuning.exclusions])],
-      },
-    ],
+    id: rule.id,
+    name: rule.name,
+    description: vlm.intent ? `${base}\n核心违规意图：${vlm.intent}` : base,
+    sensitivity: Math.min(0.98, Math.round((ruleSensitivity(rule) + (tuning.sensitivityBoost[rule.id] ?? 0)) * 100) / 100),
+    severity: rule.severity,
+    cooldownSeconds: rule.cooldownSeconds,
+    exclusions: [...new Set([...(rule.exclusions ?? []), ...vlm.exclusions, ...tuning.exclusions])],
   }
+}
+
+/**
+ * 二级研判只带真实规则：先按告警的 ruleId 反查命中的规则；
+ * 取不到（或命中的是纯几何规则）时，仅取该告警所属通道当前已启用、绑定且需要 VLM 的规则。
+ * 不再退回告警快照或任何内置默认规则；一个都没有时返回空数组，由调用方报错。
+ */
+function buildRules(alert: StreamAlert): VlmPromptRule[] {
+  const rules = loadRules()
+  const hit = rules.find((item) => item.id === alert.ruleId)
+  const scoped =
+    hit && !isGeometricOnlyRule(hit)
+      ? [hit]
+      : matchRulesForSource(rules, { kind: "channel", channelId: alert.streamId }).filter((rule) => !isGeometricOnlyRule(rule))
+  return scoped.map((rule) => toPromptRule(rule, alert.streamId))
+}
+
+/** 按序号读取完整时序证据帧；元数据缺失的帧再按磁盘文件补齐，避免只送一张静态图。 */
+function loadKeyframes(alert: StreamAlert): VlmKeyframeInput[] {
+  const meta = new Map(alert.frames.map((frame) => [frame.index, frame]))
+  const indexes = [...new Set([...meta.keys(), ...Array.from({ length: MAX_EVIDENCE_FRAMES }, (_, i) => i + 1)])]
+    .filter((index) => index >= 1 && index <= MAX_EVIDENCE_FRAMES)
+    .sort((a, b) => a - b)
+  const firstAt = alert.frames[0] ? new Date(alert.frames[0].capturedAt).getTime() : 0
+  const keyframes: VlmKeyframeInput[] = []
+  for (const index of indexes) {
+    const buffer = readEvidenceFrame(alert.id, index)
+    if (!buffer) continue
+    const frame = meta.get(index)
+    const seconds = frame ? Math.max(0, (new Date(frame.capturedAt).getTime() - firstAt) / 1000) : (keyframes.at(-1)?.timestampSec ?? 0) + 0.7
+    keyframes.push({
+      index,
+      timestampSec: seconds,
+      timecode: frame?.timecode ?? `00:${String(Math.floor(seconds)).padStart(2, "0")}.${String(Math.round((seconds % 1) * 1000)).padStart(3, "0")}`,
+      imageUrl: `data:image/jpeg;base64,${buffer.toString("base64")}`,
+    })
+  }
+  return keyframes
 }
 
 function deriveChain(reasoning: string, fallback: string) {
@@ -85,21 +104,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ ale
   const readiness = profileReadiness({ ...profile, hasKey: profile.apiKey.length > 0 })
   if (!readiness.ready) return fail(`模型「${profile.name}」尚未就绪：${readiness.reason}`, 400, "MODEL_NOT_READY")
 
-  const keyframes: VlmKeyframeInput[] = []
-  const firstAt = alert.frames[0] ? new Date(alert.frames[0].capturedAt).getTime() : 0
-  for (const frame of alert.frames) {
-    const buffer = readEvidenceFrame(alert.id, frame.index)
-    if (!buffer) continue
-    keyframes.push({
-      index: frame.index,
-      timestampSec: Math.max(0, (new Date(frame.capturedAt).getTime() - firstAt) / 1000),
-      timecode: frame.timecode,
-      imageUrl: `data:image/jpeg;base64,${buffer.toString("base64")}`,
-    })
-  }
+  const keyframes = loadKeyframes(alert)
   if (keyframes.length === 0) return fail("该告警的证据帧已丢失或已过保留期，无法进行二级研判", 409, "NO_VALID_IMAGE_FRAMES")
 
-  const { rules, source } = buildRules(alert)
+  const rules = buildRules(alert)
+  if (rules.length === 0) {
+    return fail(`通道「${alert.streamName}」没有可用于二级研判的已启用语义规则（纯几何规则不送大模型），请先在规则库为该通道绑定规则`, 409, "NO_RULES")
+  }
+  const source: AlertVlmAnalysis["ruleSource"] = "rule_library"
   const abort = new AbortController()
   request.signal.addEventListener("abort", () => abort.abort(), { once: true })
 

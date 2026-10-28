@@ -24,6 +24,12 @@ export function ruleDescription(rule: Pick<InspectionRule, "name" | "prompt" | "
   return (rule.prompt ?? rule.logic ?? "").trim() || rule.name
 }
 
+/** 纯几何确定性规则（电子围栏/绊线）由一级感知引擎判定，不应作为 Prompt 下发给 VLM。 */
+export function isGeometricOnlyRule(rule: Pick<InspectionRule, "type" | "logic" | "prompt">) {
+  if (rule.type === "GEOMETRIC") return true
+  return !rule.prompt?.trim() && /不调用大模型/.test(rule.logic ?? "")
+}
+
 export function bindsSource(rule: Pick<InspectionRule, "boundChannels">, source: RuleSource) {
   if (rule.boundChannels.includes(SOURCE_ALL)) return true
   return source.kind === "local"
