@@ -1,5 +1,5 @@
 import type { Tier1Feedback, Tier1TriggerPolicy } from "@/lib/ops/types"
-import { PROMPT_PATTERN, type VocabularyItem } from "@/lib/vigil/vision"
+import { normalizeLearnedPrompt, PROMPT_PATTERN, type VocabularyItem } from "@/lib/vigil/vision"
 
 /** 单通道最多自扩充的候选词数量，避免词表膨胀拖慢 YOLO-World 推理。 */
 export const MAX_LEARNED_TAGS = 6
@@ -224,7 +224,12 @@ export function mergeTier1Feedback(
   let skippedDuplicate = 0
   let skippedByCap = 0
   for (const item of feedback.recommended_tags ?? []) {
-    const key = item.tag.toLowerCase()
+    const normalized = normalizeLearnedPrompt(item.tag)
+    if (!normalized) {
+      skippedDuplicate += 1
+      continue
+    }
+    const key = normalized
     if (known.has(key)) {
       skippedDuplicate += 1
       continue
@@ -235,7 +240,7 @@ export function mergeTier1Feedback(
     }
     known.add(key)
     const learned: LearnedTag = {
-      promptEn: item.tag,
+      promptEn: normalized,
       labelZh: item.zh_name,
       role: item.role,
       confidence: item.confidence_threshold,

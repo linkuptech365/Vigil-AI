@@ -73,6 +73,40 @@ export const DEFAULT_VISION_CONFIG: VisionConfig = {
 export const MAX_VOCABULARY = 300
 export const PROMPT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ,'\-/]{1,63}$/
 
+/** 自动沉淀的一级词条上限：1~3 个英文单词，保证是高通用性的核心名词短语。 */
+export const MAX_LEARNED_PROMPT_WORDS = 3
+
+const COLOR_WORDS = [
+  "red", "orange", "yellow", "green", "blue", "purple", "violet", "pink", "brown", "black", "white", "gray", "grey",
+  "silver", "golden", "gold", "beige", "cream", "dark", "light", "bright", "colorful", "transparent", "translucent",
+]
+const MATERIAL_WORDS = [
+  "plastic", "stainless", "steel", "metal", "metallic", "wooden", "wood", "glass", "ceramic", "rubber", "leather",
+  "fabric", "cotton", "paper", "cardboard", "aluminum", "iron", "silicone", "porcelain", "bamboo",
+]
+const FILLER_WORDS = ["a", "an", "the", "small", "large", "big", "tiny", "automatic", "electric", "round", "square", "open", "closed"]
+const MODIFIER_WORDS = new Set([...COLOR_WORDS, ...MATERIAL_WORDS, ...FILLER_WORDS])
+/** 连字符复合修饰词：open-top、u-shaped、dark-colored、wall-mounted 等整体丢弃。 */
+const COMPOUND_MODIFIER = /-(shaped|colored|coloured|style|styled|type|mounted|like|top|made)$/
+
+/**
+ * 把二级 VLM 反哺的检测词收敛成核心名词短语：去掉颜色/材质/形状等长定语，只保留末尾至多 MAX_LEARNED_PROMPT_WORDS 个词。
+ * 清洗后为空或不符合 PROMPT_PATTERN 时返回 null（调用方应丢弃该词条）。纯通用规则，不含任何具体类别词。
+ */
+export function normalizeLearnedPrompt(input: string): string | null {
+  const tokens = input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s'-]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.replace(/^-+|-+$/g, ""))
+    .filter(Boolean)
+  const kept = tokens.filter((token) => !MODIFIER_WORDS.has(token) && !COMPOUND_MODIFIER.test(token))
+  // 清洗后一个词都不剩，说明原词条本身就是修饰词，不做强行保留
+  if (kept.length === 0) return null
+  const phrase = kept.slice(-MAX_LEARNED_PROMPT_WORDS).join(" ")
+  return PROMPT_PATTERN.test(phrase) ? phrase : null
+}
+
 function clampNumber(value: unknown, min: number, max: number, fallback: number) {
   const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN
   if (!Number.isFinite(number)) return fallback

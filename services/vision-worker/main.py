@@ -97,6 +97,12 @@ FALLBACK_ROLES = {"person": ROLE_ANCHOR}
 RESCUE_CONF = max(0.0, min(0.5, float(os.environ.get("VIGIL_RESCUE_CONF", "0.15") or 0)))
 RESCUE_IMGSZ = 960
 RESCUE_INTERVAL_SECONDS = 6.0  # 同一通道两次补救之间的最小间隔，避免空画面持续翻倍 CPU 开销
+# 关联客体（ROLE_CONTEXT）对行为主体只是弱先验：主体自己过了门槛后，客体只需达到该值就可参与空间关系判定
+CONTEXT_WEAK_CONF = min(0.30, max(0.05, float(os.environ.get("VIGIL_CONTEXT_WEAK_CONF", "0.10") or 0.10)))
+# 主体滑动保持：主体在 COAST_SECONDS 秒内或连续 COAST_FRAMES 次推理漏检时，沿用上一次有效框；超过 COAST_HARD_SECONDS 一律丢弃
+COAST_SECONDS = max(0.0, float(os.environ.get("VIGIL_COAST_SECONDS", "1.5") or 1.5))
+COAST_FRAMES = max(0, int(float(os.environ.get("VIGIL_COAST_FRAMES", "3") or 3)))
+COAST_HARD_SECONDS = max(COAST_SECONDS, float(os.environ.get("VIGIL_COAST_HARD_SECONDS", "6.0") or 6.0))
 INFER_IMGSZ = 640
 SMOKING_KEYWORDS = ("吸烟", "抽烟", "smok", "cigarette")
 # 吸烟类规则的冷却上限（秒）：排查"无命中无告警"期间避免冷却锁吞掉真实事件；设为 0 关闭该上限
@@ -244,6 +250,74 @@ class Det:
     box: tuple[float, float, float, float]
     track_id: int | None = None
     floor: float | None = None  # VLM 反哺词条自带的置信度门槛，优先于全局 confidenceLow
+    coasting: bool = False  # 本帧未检出，沿用滑动窗口内最近一次有效框
+
+
+class DetList(list):
+    """detect() 的返回值：本体仍是 list[Det]，另外携带只供关系判定使用的两类附加候选。
+
+    weak_contexts：低于常规门槛、但达到弱先验门槛的关联客体（不参与绘制/命中标签）；
+    coasted_subjects：本帧漏检、由滑动保持器补回的行为主体。
+    """
+
+    def __init__(self, items: Any = ()) -> None:
+        super().__init__(items)
+        self.weak_contexts: list[Det] = []
+        self.coasted_subjects: list[Det] = []
+
+
+class SubjectCoastingTracker:
+    """通用的非锚点主体轻量滑动保持器：只依赖角色元数据，不关心具体类别。
+
+    只有 ROLE_ANCHOR 接入了 ByteTrack，其余 ROLE_SUBJECT 在低头/弯腰/形变时容易单帧漏检并打断连续帧门控。
+    这里按（通道, 词条）记录最近一次有效检出框；漏检时在窗口内沿用旧框，窗口超时后自动丢弃。
+    """
+
+    def __init__(self, seconds: float, frames: int, hard_seconds: float) -> None:
+        self.seconds = seconds
+        self.frames = frames
+        self.hard_seconds = hard_seconds
+        self.lock = threading.Lock()
+        self.records: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def update(self, sid: str, subject_prompts: list[str], dets: list[Det], low: float, now: float) -> list[Det]:
+        seen: dict[str, Det] = {}
+        for det in dets:
+            if det.role == ROLE_SUBJECT and passes(det, low):
+                best = seen.get(det.prompt)
+                if best is None or det.conf > best.conf:
+                    seen[det.prompt] = det
+        coasted: list[Det] = []
+        with self.lock:
+            for prompt in subject_prompts:
+                key = (sid, prompt)
+                live = seen.get(prompt)
+                if live is not None:
+                    self.records[key] = {"box": live.box, "conf": live.conf, "floor": live.floor, "ts": now, "missed": 0}
+                    continue
+                record = self.records.get(key)
+                if record is None:
+                    continue
+                record["missed"] += 1
+                age = now - record["ts"]
+                if age > self.hard_seconds or not (age <= self.seconds or record["missed"] <= self.frames):
+                    del self.records[key]
+                    continue
+                coasted.append(
+                    Det(prompt=prompt, role=ROLE_SUBJECT, conf=record["conf"], box=record["box"], floor=record["floor"], coasting=True)
+                )
+        return coasted
+
+    def clear(self, sid: str | None = None) -> None:
+        with self.lock:
+            if sid is None:
+                self.records.clear()
+            else:
+                for key in [k for k in self.records if k[0] == sid]:
+                    del self.records[key]
+
+
+COASTING = SubjectCoastingTracker(COAST_SECONDS, COAST_FRAMES, COAST_HARD_SECONDS)
 
 
 @dataclass
@@ -1113,14 +1187,37 @@ def passes(det: Det, low: float) -> bool:
     return det.conf >= threshold_of(det.role, det.floor, low)
 
 
-def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], predict_floor: float, frame: dict[str, Any]) -> None:
+def subject_response_note(prompts: list[str], roles: dict[str, str], raw: list[dict[str, Any]], predict_floor: float) -> str:
+    """当前通道词表里所有 ROLE_SUBJECT 词条在本帧的模型底层响应：未达 predict_floor 的标 `<floor`，否则给出原始浮点值。"""
+    best: dict[str, float] = {}
+    for item in raw:
+        if item["role"] == ROLE_SUBJECT:
+            best[item["prompt"]] = max(best.get(item["prompt"], 0.0), float(item["conf"]))
+    parts = [
+        f"{prompt}={best[prompt]:.3f}" if prompt in best else f"{prompt}<{predict_floor:.2f}"
+        for prompt in prompts
+        if roles.get(prompt) == ROLE_SUBJECT
+    ]
+    return ", ".join(parts)
+
+
+def record_raw_output(
+    sid: str,
+    prompts: list[str],
+    raw: list[dict[str, Any]],
+    predict_floor: float,
+    frame: dict[str, Any],
+    roles: dict[str, str] | None = None,
+) -> None:
     """记录模型原始 Top 检出（含低置信度候选）：区分「被置信度拦截」与「根本没有特征响应」，并附带送入模型的画面诊断。"""
+    subject_note = subject_response_note(prompts, roles or {}, raw, predict_floor)
     raw.sort(key=lambda item: -item["conf"])
     top = raw[:RAW_TOP_N]
     synced = list(RT.classes_applied) == list(prompts)
     RT.raw_top[sid] = {
         "at": now_iso(),
         "predictFloor": predict_floor,
+        "subjects": subject_note,
         "vocabSynced": synced,
         "appliedCount": len(RT.classes_applied),
         "channelVocabCount": len(prompts),
@@ -1144,15 +1241,16 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
     dropped_count = int(frame.get("droppedUnmappedCount", 0))
     dropped_names = frame.get("droppedNames") or []
     frame_note += f"；raw_box_count={raw_box_count}，dropped_unmapped_count={dropped_count}"
+    subject_tail = f"；主体角色响应: {subject_note}" if subject_note else ""
     if not top and raw_box_count == 0:
         detail = (
-            f"[Gate 0] 模型底层无任何框响应 (conf≥{predict_floor:.2f})；{vocab_note}；{frame_note}。"
+            f"[Gate 0] 模型底层无任何框响应 (conf≥{predict_floor:.2f}){subject_tail}；{vocab_note}；{frame_note}。"
             f"通道词表：{', '.join(prompts[:12])}"
         )
     elif not top:
         detail = (
             f"[Gate 0] 模型检出 {raw_box_count} 个候选，但均因类名不在 roles 映射中被丢弃；"
-            f"被丢弃类名：{', '.join(dropped_names) or '（空类名）'}；{vocab_note}；{frame_note}。"
+            f"被丢弃类名：{', '.join(dropped_names) or '（空类名）'}{subject_tail}；{vocab_note}；{frame_note}。"
             f"通道词表：{', '.join(prompts[:12])}"
         )
         log(f"[Gate 0][{sid}] 检出 {raw_box_count} 个候选均被 roles 映射丢弃：{dropped_names}；roles={sorted(RT.classes_applied)[:12]}")
@@ -1162,6 +1260,9 @@ def record_raw_output(sid: str, prompts: list[str], raw: list[dict[str, Any]], p
             for item in top
         ]
         detail = f"{vocab_note}；{frame_note}；模型原始 Top{len(top)}（predict≥{predict_floor:.2f}）：" + ", ".join(parts)
+        if subject_note:
+            blocked = [f"{item['prompt']}:{item['conf']:.2f}<{item['threshold']:.2f}" for item in top if not item["passed"]]
+            detail = f"[Gate 0] 主体角色响应: {subject_note}, 候选拦截: [{', '.join(blocked)}]；" + detail
     gate_trace(sid, "_raw", "模型原始输出", "[Gate 0 - Raw]", "info", detail)
     audit_note(gate0=detail[:380], raw_top=top)
 
@@ -1176,13 +1277,17 @@ def gate0_reason(sid: str) -> str:
     tail = "；已做低照度增强" if frame.get("enhanced") else ""
     if frame.get("rescued"):
         tail += "；已补救重推理"
+    note = info.get("subjects") or ""
     if not top:
         raw_box_count = int(frame.get("rawBoxCount", 0))
+        subject_tail = f"；主体角色响应: {note}" if note else ""
         if raw_box_count > 0:
             names = "、".join(frame.get("droppedNames") or []) or "空类名"
-            return f"[Gate 0] 模型检出 {raw_box_count} 个候选，但均因类名不在 roles 映射中被丢弃（{names}）{tail}"
-        return f"[Gate 0] 模型底层无任何框响应 (conf≥{info['predictFloor']:.2f}){tail}"
+            return f"[Gate 0] 模型检出 {raw_box_count} 个候选，但均因类名不在 roles 映射中被丢弃（{names}）{subject_tail}{tail}"
+        return f"[Gate 0] 模型底层无任何框响应 (conf≥{info['predictFloor']:.2f}){subject_tail}{tail}"
     parts = [f"{item['prompt']} {item['conf']:.2f}<{item['threshold']:.2f}" for item in top[:3] if not item["passed"]]
+    if note:
+        return f"[Gate 0] 主体角色响应: {note}, 候选拦截: [{', '.join(parts)}]{tail}"
     return "Gate 0：候选均被置信度门槛拦截（" + "，".join(parts) + "）" + tail
 
 
@@ -1234,7 +1339,8 @@ def parse_result(
     dets: list[Det] = []
     raw: list[dict[str, Any]] = []
     boxes = result.boxes
-    stats: dict[str, Any] = {"rawBoxCount": 0, "droppedUnmappedCount": 0, "droppedNames": []}
+    weak: list[Det] = []
+    stats: dict[str, Any] = {"rawBoxCount": 0, "droppedUnmappedCount": 0, "droppedNames": [], "weak": weak}
     if boxes is None or len(boxes) == 0:
         return dets, raw, stats
     stats["rawBoxCount"] = len(boxes)
@@ -1266,16 +1372,19 @@ def parse_result(
                 "box": [round(x1 / width * 1000), round(y1 / height * 1000), round(x2 / width * 1000), round(y2 / height * 1000)],
             }
         )
-        if conf < (min(conf_floor, RESCUE_CONF) if rescue else conf_floor):
-            continue
-        if floor is not None and conf < floor:
+        admitted = conf >= (min(conf_floor, RESCUE_CONF) if rescue else conf_floor) and not (floor is not None and conf < floor)
+        if not admitted:
+            # 关联客体只作弱先验：不进入常规检出，但留给关系判定在主体已达标时使用
+            if role == ROLE_CONTEXT and conf >= CONTEXT_WEAK_CONF:
+                weak.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2)))
             continue
         dets.append(Det(prompt=prompt, role=role, conf=conf, box=(x1, y1, x2, y2), floor=floor))
     stats["droppedNames"] = [f"{name!r}×{count}" for name, count in dropped_names.items()]
     return dets, raw, stats
 
 
-def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
+def detect(image: np.ndarray, tracker: Any, sid: str = "", coast: bool = False) -> list[Det]:
+    """coast=True 仅由巡检主循环传入：预览/单次检测不推进滑动保持器的漏检计数。"""
     low = RT.cfg.low
     # 进入门禁的候选底线：不高于 0.25，且不高于开放词汇门槛
     conf_floor = max(0.05, min(0.25, low, OPEN_VOCAB_MIN_CONF))
@@ -1318,6 +1427,7 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
         result = RT.model.predict(source, conf=predict_floor, imgsz=INFER_IMGSZ, device=RT.device, verbose=False)[0]
         predict_ms = (time.perf_counter() - predict_started) * 1000.0
         dets, raw, stats = parse_result(result, roles, sid, low, conf_floor, rescue=False)
+        weak_contexts: list[Det] = stats["weak"]
         frame["rawBoxCount"] = stats["rawBoxCount"]
         frame["droppedUnmappedCount"] = stats["droppedUnmappedCount"]
         frame["droppedNames"] = stats["droppedNames"]
@@ -1338,7 +1448,7 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
             log(
                 f"[debug-probe][通道 {sid}] 输入 shape={tuple(source.shape)} dtype={source.dtype} 像素 min/max={pixel_min}/{pixel_max} "
                 f"mean={frame['probe']['mean']} 推理 {predict_ms:.0f}ms 已注入词表({len(applied)})={applied}"
-                f"{'' if applied == list(prompts) else ' [警告] 与期望基线词表不一致'} "
+                f"{'' if applied == list(prompts) else ' [警告] 与期望基线���表不一致'} "
                 f"raw_box_count={stats['rawBoxCount']} dropped_unmapped_count={stats['droppedUnmappedCount']} "
                 f"保留候选={len(raw)}"
                 + (f" 被丢弃类名={stats['droppedNames']}" if stats["droppedNames"] else "")
@@ -1355,16 +1465,22 @@ def detect(image: np.ndarray, tracker: Any, sid: str = "") -> list[Det]:
             rescue_dets, rescue_raw, rescue_stats = parse_result(rescue_result, roles, sid, low, conf_floor, rescue=True)
             if any(passes(d, low) for d in rescue_dets):
                 dets, raw = rescue_dets, rescue_raw
+                weak_contexts = rescue_stats["weak"]
                 frame["rawBoxCount"] = rescue_stats["rawBoxCount"]
                 frame["droppedUnmappedCount"] = rescue_stats["droppedUnmappedCount"]
                 frame["droppedNames"] = rescue_stats["droppedNames"]
                 frame.update({"imgsz": RESCUE_IMGSZ, "enhanced": not enhanced, "enhanceMode": "off" if enhanced else (mode if mode != "off" else "adaptive"), "rescued": True})
-    record_raw_output(sid, prompts, raw, predict_floor, frame)
+    record_raw_output(sid, prompts, raw, predict_floor, frame, roles)
     persons = [d for d in dets if d.role == ROLE_ANCHOR]
     ids = tracker.update([d.box for d in persons], [d.conf for d in persons])
     for d, track_id in zip(persons, ids):
         d.track_id = track_id
-    return dets
+    result_dets = DetList(dets)
+    result_dets.weak_contexts = weak_contexts
+    if coast and not debug:
+        subject_prompts = [p for p in prompts if roles.get(p) == ROLE_SUBJECT]
+        result_dets.coasted_subjects = COASTING.update(sid, subject_prompts, dets, low, time.time())
+    return result_dets
 
 
 def inside(inner: Det, outer: Det) -> bool:
@@ -1445,18 +1561,23 @@ def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
     词表里没有任何启用的关联物体时，行为主体一出现即判为疑似（等价于违规目标）。
     """
     low = RT.cfg.low
-    subjects = [d for d in dets if d.role == ROLE_SUBJECT and passes(d, low)]
+    live = [d for d in dets if d.role == ROLE_SUBJECT and passes(d, low)]
+    live_prompts = {d.prompt for d in live}
+    coasted = [d for d in getattr(dets, "coasted_subjects", []) if d.prompt not in live_prompts]
+    subjects = live + coasted
     if not subjects:
         return []
-    contexts = [d for d in dets if d.role == ROLE_CONTEXT and passes(d, low)]
+    # 主体已过自身门槛后，关联客体只作弱先验：常规达标的客体 + 弱先验客体（>= CONTEXT_WEAK_CONF）都可参与空间关系
+    contexts = [d for d in dets if d.role == ROLE_CONTEXT and passes(d, low)] + list(getattr(dets, "weak_contexts", []))
     context_configured = any(r == ROLE_CONTEXT and p in prompts_of(sid) for p, r in roles_of(sid).items())
     best: dict[str, Suspect] = {}
     for subject in subjects:
         key = f"rel:{subject.prompt}"
+        subject_name = label_of(subject.prompt, sid) + ("（滑动保持）" if subject.coasting else "")
         if not context_configured:
             candidate = Suspect(
                 key=key, track_id=None, conf=round(subject.conf, 3),
-                reasons=[f"画面中检出行为主体：{label_of(subject.prompt, sid)}（{subject.conf:.2f}）"],
+                reasons=[f"画面中检出行为主体：{subject_name}（{subject.conf:.2f}）"],
             )
         else:
             candidate = None
@@ -1464,13 +1585,15 @@ def relation_suspects(dets: list[Det], sid: str = "") -> list[Suspect]:
                 score = proximity(subject, other)
                 if score is None:
                     continue
-                conf = min(subject.conf, other.conf)
+                # 客体置信度不再拖拽主体：加权后以主体为主（0.7 / 0.3）
+                conf = 0.7 * subject.conf + 0.3 * other.conf
                 if candidate is not None and conf <= candidate.conf:
                     continue
                 relation = f"重叠（IOU {score:.2f}）" if score > 0 else "靠近"
+                weak_note = "（弱先验）" if not passes(other, low) else ""
                 candidate = Suspect(
                     key=key, track_id=None, conf=round(conf, 3),
-                    reasons=[f"{label_of(subject.prompt, sid)} 与 {label_of(other.prompt, sid)} 空间{relation}"],
+                    reasons=[f"{subject_name} 与 {label_of(other.prompt, sid)}{weak_note} 空间{relation}"],
                 )
             if candidate is None:
                 continue
@@ -2337,7 +2460,7 @@ def _scan_stream(sid: str) -> None:
 
     if st.tracker is None:
         st.tracker = make_tracker()
-    dets = detect(image, st.tracker, sid)
+    dets = detect(image, st.tracker, sid, coast=True)
     st.last_infer_ts = now
     RT.stats.tier1_inferred += 1
     suspects, passed, persons = evaluate(dets, sid)
