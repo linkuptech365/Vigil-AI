@@ -89,7 +89,7 @@ function projectCooldowns(snapshot: TimedSnapshot | undefined, now: number): Rec
 interface RulesContextValue {
   rules: InspectionRule[]
   rulesError: boolean
-  updateRule: (id: string, patch: RulePatch) => Promise<void>
+  updateRule: (id: string, patch: RulePatch) => Promise<boolean>
   addCustomRule: (input: CustomRuleInput) => Promise<boolean>
   deleteRule: (id: string) => Promise<boolean>
   resetRules: () => Promise<boolean>

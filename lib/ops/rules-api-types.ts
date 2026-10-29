@@ -192,7 +192,11 @@ export interface CreateRuleResponse extends RulesListResponse {
   rule: InspectionRule
 }
 
+export const RULE_NAME_MAX = 60
+
 export interface UpdateRuleRequest {
+  /** 规则名称；去除首尾空白后必须为 1~RULE_NAME_MAX 个字符 */
+  name?: string
   enabled?: boolean
   severity?: RuleSeverity
   cooldownSeconds?: number

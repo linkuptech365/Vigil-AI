@@ -287,6 +287,10 @@ export function updateRule(ruleId: string, patch: UpdateRuleRequest): Inspection
   if (!current) return null
 
   const rule = cloneRule(current)
+  if (patch.name !== undefined) {
+    rule.name = patch.name
+    if (rule.pipeline) rule.pipeline = { ...rule.pipeline, name: patch.name }
+  }
   if (patch.enabled !== undefined) rule.enabled = patch.enabled
   if (patch.severity !== undefined) rule.severity = patch.severity
   if (patch.cooldownSeconds !== undefined) rule.cooldownSeconds = patch.cooldownSeconds

@@ -1,4 +1,9 @@
-import type { DeleteRuleResponse, UpdateRuleRequest, UpdateRuleResponse } from "@/lib/ops/rules-api-types"
+import {
+  RULE_NAME_MAX,
+  type DeleteRuleResponse,
+  type UpdateRuleRequest,
+  type UpdateRuleResponse,
+} from "@/lib/ops/rules-api-types"
 import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
 import { parsePipeline } from "@/lib/ops/rule-pipeline"
 import { pushConfig } from "@/lib/vision-engine"
@@ -23,6 +28,16 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
   const patch: UpdateRuleRequest = {}
   const { enabled, severity, cooldownSeconds, schedule, boundChannels } = body.value
+
+  const { name } = body.value
+  if (name !== undefined) {
+    const text = typeof name === "string" ? name.trim() : ""
+    if (text.length === 0) return jsonError(400, "INVALID_REQUEST", "规则名称不能为空")
+    if (text.length > RULE_NAME_MAX) {
+      return jsonError(400, "INVALID_REQUEST", `规则名称不能超过 ${RULE_NAME_MAX} 个字符`)
+    }
+    patch.name = text
+  }
 
   if (enabled !== undefined) {
     if (typeof enabled !== "boolean") return jsonError(400, "INVALID_REQUEST", "enabled 必须是布尔值")
@@ -110,7 +125,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   if (!rule) return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
 
   // 管道、启用状态、绑定通道变化后立即热更新到视觉 Worker；内容未变化时会被去重跳过
-  if (patch.pipeline !== undefined || patch.enabled !== undefined || patch.boundChannels !== undefined) {
+  if (
+    patch.pipeline !== undefined ||
+    patch.enabled !== undefined ||
+    patch.boundChannels !== undefined ||
+    patch.name !== undefined
+  ) {
     await pushConfig().catch(() => null)
   }
 

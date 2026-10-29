@@ -41,7 +41,7 @@ export async function getJson<T>(url: string): Promise<T> {
   return parse<T>(response)
 }
 
-export async function sendJson<T>(url: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
+export async function sendJson<T>(url: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
   let response: Response
   try {
     response = await fetch(url, {

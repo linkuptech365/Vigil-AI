@@ -4,7 +4,8 @@ import * as React from "react"
 import useSWR from "swr"
 import { toast } from "sonner"
 
-import { errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
+import type { RulesListResponse } from "@/lib/ops/rules-api-types"
+import { RULES_ENDPOINT, errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
 import type {
   AnalyzeStreamResponse,
   EngineInfo,
@@ -48,6 +49,8 @@ export function useStreams() {
     refreshInterval: 3000,
     keepPreviousData: true,
   })
+
+  const { data: rulesData } = useSWR<RulesListResponse>(RULES_ENDPOINT, getJson)
 
   const [analyzingIds, setAnalyzingIds] = React.useState<ReadonlySet<string>>(new Set())
 
@@ -164,7 +167,16 @@ export function useStreams() {
   )
 
   const streams = data?.streams ?? []
-  const alerts: StreamAlert[] = alertData?.alerts ?? []
+  const rawAlerts = alertData?.alerts
+  const alerts = React.useMemo<StreamAlert[]>(() => {
+    if (!rawAlerts) return []
+    if (!rulesData) return rawAlerts
+    const currentNames = new Map(rulesData.rules.map((rule) => [rule.id, rule.name]))
+    return rawAlerts.map((alert) => {
+      const name = currentNames.get(alert.ruleId)
+      return name && name !== alert.ruleName ? { ...alert, ruleName: name } : alert
+    })
+  }, [rawAlerts, rulesData])
   const records: StreamAnalysisRecord[] = alertData?.records ?? []
 
   return {

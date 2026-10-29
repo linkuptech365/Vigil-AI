@@ -1,11 +1,14 @@
 "use client"
 
 import * as React from "react"
-import { ChevronDown, Quote, Ruler } from "lucide-react"
+import { Check, ChevronDown, Loader2, Pencil, Quote, Ruler } from "lucide-react"
+import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Field, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { RULE_NAME_MAX } from "@/lib/ops/rules-api-types"
 import {
   Select,
   SelectContent,
@@ -46,6 +49,113 @@ const SEVERITY_META: Record<RuleSeverity, { label: string; className: string }> 
 const MIN_DESCRIPTION = 4
 const MAX_DESCRIPTION = 400
 const MAX_VISIBLE_TAGS = 4
+
+type NameSaveState = "idle" | "saving" | "saved"
+
+function NameEditor({
+  rule,
+  inputId,
+  onSave,
+}: {
+  rule: InspectionRule
+  inputId: string
+  onSave: (name: string) => Promise<boolean>
+}) {
+  const [draft, setDraft] = React.useState(rule.name)
+  const [state, setState] = React.useState<NameSaveState>("idle")
+  const [empty, setEmpty] = React.useState(false)
+  const resetTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  React.useEffect(() => {
+    setDraft(rule.name)
+  }, [rule.name])
+
+  React.useEffect(
+    () => () => {
+      if (resetTimer.current) clearTimeout(resetTimer.current)
+    },
+    []
+  )
+
+  const commit = async () => {
+    const text = draft.trim()
+    if (text.length === 0) {
+      setDraft(rule.name)
+      setEmpty(true)
+      toast.error("规则名称不能为空", { description: "已恢复为原名称" })
+      return
+    }
+    setEmpty(false)
+    if (text === rule.name) {
+      setDraft(text)
+      return
+    }
+    setState("saving")
+    const ok = await onSave(text)
+    if (!ok) {
+      setDraft(rule.name)
+      setState("idle")
+      return
+    }
+    setDraft(text)
+    setState("saved")
+    if (resetTimer.current) clearTimeout(resetTimer.current)
+    resetTimer.current = setTimeout(() => setState("idle"), 1800)
+  }
+
+  return (
+    <Field className="gap-1.5">
+      <div className="flex items-center justify-between">
+        <FieldLabel htmlFor={inputId} className="flex items-center gap-1.5 text-xs">
+          <Pencil className="size-3.5 text-primary" aria-hidden="true" />
+          规则名称 (Rule Name)
+        </FieldLabel>
+        <span role="status" aria-live="polite" className="flex h-4 items-center gap-1 text-[10px]">
+          {state === "saving" && (
+            <>
+              <Loader2 className="size-3 animate-spin text-muted-foreground" aria-hidden="true" />
+              <span className="text-muted-foreground">保存中</span>
+            </>
+          )}
+          {state === "saved" && (
+            <>
+              <Check className="size-3 text-success" aria-hidden="true" />
+              <span className="text-success">已保存</span>
+            </>
+          )}
+        </span>
+      </div>
+      <Input
+        id={inputId}
+        value={draft}
+        disabled={state === "saving"}
+        maxLength={RULE_NAME_MAX}
+        placeholder="请输入规则名称"
+        aria-invalid={empty}
+        onChange={(event) => {
+          setDraft(event.target.value)
+          if (empty) setEmpty(false)
+        }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return
+          if (event.key === "Enter") {
+            event.preventDefault()
+            event.currentTarget.blur()
+          } else if (event.key === "Escape") {
+            setDraft(rule.name)
+            setEmpty(false)
+            event.currentTarget.blur()
+          }
+        }}
+        className="h-8 text-sm"
+      />
+      <p className={cn("text-[10px]", empty ? "text-destructive" : "text-muted-foreground/70")}>
+        {empty ? "规则名称不能为空" : "失焦或按 Enter 自动保存，Esc 取消"}
+      </p>
+    </Field>
+  )
+}
 
 function DescriptionEditor({
   rule,
@@ -163,6 +273,7 @@ export function RuleCard({ rule }: { rule: InspectionRule }) {
     severity: `${baseId}-severity`,
     cooldown: `${baseId}-cooldown`,
     schedule: `${baseId}-schedule`,
+    name: `${baseId}-name`,
     description: `${baseId}-description`,
     sensitivity: `${baseId}-sensitivity`,
     panel: `${baseId}-panel`,
@@ -240,6 +351,12 @@ export function RuleCard({ rule }: { rule: InspectionRule }) {
 
       {expanded && (
         <div id={ids.panel} className="flex flex-col gap-4 border-t border-border/60 p-3">
+          <NameEditor
+            rule={rule}
+            inputId={ids.name}
+            onSave={(name) => updateRule(rule.id, { name })}
+          />
+
           <DescriptionEditor
             key={`${rule.id}:${ruleDescription(rule)}`}
             rule={rule}

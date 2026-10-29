@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import useSWR from "swr"
+import useSWR, { useSWRConfig } from "swr"
 import { toast } from "sonner"
 
 import type {
@@ -12,6 +12,7 @@ import type {
 } from "@/lib/ops/rules-api-types"
 import { RULES_ENDPOINT, errorMessage, getJson, sendJson } from "@/lib/ops/rules-client"
 import type { InspectionRule, RuleActionKey } from "@/lib/ops/rules-types"
+import { STREAM_ALERTS_ENDPOINT } from "@/components/vigil/streams/use-streams"
 import { loadStoredRules, saveStoredRules } from "@/lib/ops/storage/audit-storage"
 import type { RulePipelineConfig } from "@/lib/ops/types"
 
@@ -56,6 +57,7 @@ function notifySaved() {
  * 顶部「规则工作室」弹窗与「规则与防抖引擎」标签页共用同一个 SWR 键，任何一处修改即时同步到另一处。
  */
 export function useServerRules() {
+  const { mutate: mutateGlobal } = useSWRConfig()
   const { data, error, mutate } = useSWR<RulesListResponse>(RULES_ENDPOINT, getJson)
   const [cached, setCached] = React.useState<InspectionRule[] | null>(null)
 
@@ -70,11 +72,11 @@ export function useServerRules() {
   const rules = data?.rules ?? cached ?? NO_RULES
 
   const updateRule = React.useCallback(
-    async (id: string, patch: RulePatch) => {
+    async (id: string, patch: RulePatch): Promise<boolean> => {
       try {
         await mutate(
           async () => {
-            const response = await sendJson<UpdateRuleResponse>(`${RULES_ENDPOINT}/${id}`, "PUT", patch)
+            const response = await sendJson<UpdateRuleResponse>(`${RULES_ENDPOINT}/${id}`, "PATCH", patch)
             return { rules: response.rules }
           },
           {
@@ -88,12 +90,15 @@ export function useServerRules() {
             revalidate: false,
           }
         )
+        if (patch.name !== undefined) await mutateGlobal((key) => key === STREAM_ALERTS_ENDPOINT)
         notifySaved()
+        return true
       } catch (caught) {
         toast.error("规则保存失败，已回滚", { description: errorMessage(caught) })
+        return false
       }
     },
-    [mutate]
+    [mutate, mutateGlobal]
   )
 
   const addCustomRule = React.useCallback(
