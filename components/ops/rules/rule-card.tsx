@@ -20,10 +20,10 @@ import {
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { SCOPE_BINDINGS, bindingLabel, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import { bindingLabel, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
 import { COOLDOWN_OPTIONS, SCHEDULE_LABEL, SEVERITY_LABEL } from "@/lib/ops/rules-data"
-import { BindableChannelItems } from "./bindable-channel-items"
+import { RuleScopePicker } from "./rule-scope-picker"
+import { useChannelNames } from "./use-channel-names"
 import type {
   InspectionRule,
   InspectionRuleType,
@@ -242,20 +242,21 @@ function ChannelTags({ channels }: { channels: string[] }) {
   if (channels.length === 0) {
     return <span className="text-[11px] text-warning">未绑定通道，不会触发</span>
   }
+  const { names } = useChannelNames()
   const visible = channels.slice(0, MAX_VISIBLE_TAGS)
   const rest = channels.length - visible.length
   return (
     <ul className="flex flex-wrap items-center gap-1" aria-label="绑定通道">
       {visible.map((channel) => (
         <li key={channel}>
-          <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px] font-normal text-muted-foreground">
-            {bindingLabel(channel)}
+          <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal text-muted-foreground">
+            {bindingLabel(channel, names)}
           </Badge>
         </li>
       ))}
       {rest > 0 && (
         <li>
-          <Badge variant="outline" className="h-5 px-1.5 font-mono text-[10px] font-normal text-muted-foreground">
+          <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-normal text-muted-foreground">
             +{rest}
           </Badge>
         </li>
@@ -373,26 +374,14 @@ export function RuleCard({ rule }: { rule: InspectionRule }) {
 
           <Field className="gap-1.5">
             <FieldLabel className="text-xs">绑定通道</FieldLabel>
-            <ToggleGroup
-              type="multiple"
-              variant="outline"
-              size="sm"
-              spacing={1}
-              disabled={!rule.enabled}
+            <RuleScopePicker
               value={rule.boundChannels}
-              onValueChange={(value) => updateRule(rule.id, { boundChannels: value })}
-              aria-label={`${rule.id} 绑定通道`}
-              className="flex-wrap justify-start"
-            >
-              {SCOPE_BINDINGS.map((scope) => (
-                <ToggleGroupItem key={scope} value={scope} className="text-xs">
-                  {bindingLabel(scope)} ({scope})
-                </ToggleGroupItem>
-              ))}
-              <BindableChannelItems />
-            </ToggleGroup>
+              disabled={!rule.enabled}
+              onChange={(boundChannels) => void updateRule(rule.id, { boundChannels })}
+              label={`${rule.name} 绑定通道`}
+            />
             <p className="text-[10px] text-muted-foreground/70">
-              ALL 覆盖实时通道与本地视频；LOCAL 仅用于本地导入/检索目录视频
+              「全部视频源」覆盖实时通道与本地视频；「本地视频」仅用于本地导入/检索目录视频
             </p>
           </Field>
 

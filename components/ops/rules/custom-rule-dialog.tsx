@@ -16,10 +16,8 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Slider } from "@/components/ui/slider"
 import { Textarea } from "@/components/ui/textarea"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { SCOPE_BINDINGS, bindingLabel } from "@/lib/ops/rule-binding"
 import { ACTION_LABEL, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
-import { BindableChannelItems } from "./bindable-channel-items"
+import { RuleScopePicker } from "./rule-scope-picker"
 import type { RuleActionKey } from "@/lib/ops/rules-types"
 import { useRules } from "./rules-provider"
 
@@ -45,7 +43,7 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
   const [bound, setBound] = React.useState<string[]>(["ALL"])
   const [submitting, setSubmitting] = React.useState(false)
 
-  const valid = name.trim().length >= 2 && prompt.trim().length >= 8
+  const valid = name.trim().length >= 2 && prompt.trim().length >= 8 && bound.length > 0
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -114,25 +112,7 @@ function CustomRuleForm({ onDone }: { onDone: () => void }) {
 
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 text-sm font-medium">适用范围 (Bound Scope)</legend>
-        <ToggleGroup
-          type="multiple"
-          variant="outline"
-          size="sm"
-          value={bound}
-          onValueChange={(next) => setBound(next.length ? next : ["ALL"])}
-          className="flex-wrap justify-start"
-          aria-label="规则适用范围"
-        >
-          {SCOPE_BINDINGS.map((scope) => (
-            <ToggleGroupItem key={scope} value={scope} className="text-xs">
-              {bindingLabel(scope)} ({scope})
-            </ToggleGroupItem>
-          ))}
-          <BindableChannelItems />
-        </ToggleGroup>
-        <p className="text-xs text-muted-foreground">
-          ALL 对所有视频源生效；LOCAL 仅用于本地视频；也可只勾选指定机位。
-        </p>
+        <RuleScopePicker value={bound} onChange={setBound} />
       </fieldset>
 
       <fieldset className="flex flex-col gap-3">

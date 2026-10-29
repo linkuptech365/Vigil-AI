@@ -14,10 +14,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { SCOPE_BINDINGS, SOURCE_ALL, bindingLabel } from "@/lib/ops/rule-binding"
-import { ALL_CHANNELS } from "@/lib/ops/rules-data"
+import { SOURCE_ALL, bindingLabel } from "@/lib/ops/rule-binding"
 import type { InspectionRule } from "@/lib/ops/rules-types"
 import { CustomRuleDialog } from "./custom-rule-dialog"
+import { useChannelNames } from "./use-channel-names"
 import { LoadGmpPresetButton, ResetRulesButton } from "./rule-danger-actions"
 import { RuleCard } from "./rule-card"
 import { useRules } from "./rules-provider"
@@ -61,12 +61,7 @@ export function RuleStudioView() {
     }
   }, [rules])
 
-  const channelOptions = React.useMemo(() => {
-    const extra = rules
-      .flatMap((rule) => rule.boundChannels)
-      .filter((id) => !SCOPE_BINDINGS.includes(id) && !ALL_CHANNELS.includes(id))
-    return [...ALL_CHANNELS, ...Array.from(new Set(extra)).sort()]
-  }, [rules])
+  const { streams, names } = useChannelNames()
 
   const visibleRules = React.useMemo(
     () =>
@@ -123,9 +118,9 @@ export function RuleStudioView() {
             <SelectContent>
               <SelectGroup>
                 <SelectItem value={ALL_CHANNELS_VALUE}>全部通道</SelectItem>
-                {channelOptions.map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {bindingLabel(id)}
+                {streams.map((stream) => (
+                  <SelectItem key={stream.id} value={stream.id}>
+                    {stream.name}
                   </SelectItem>
                 ))}
               </SelectGroup>
@@ -135,7 +130,7 @@ export function RuleStudioView() {
 
         {channel !== ALL_CHANNELS_VALUE && (
           <p className="text-[11px] text-muted-foreground">
-            显示绑定 {channel} 或「全部视频源」的规则，共 {visibleRules.length} 条
+            显示绑定「{bindingLabel(channel, names)}」或「全部视频源」的规则，共 {visibleRules.length} 条
           </p>
         )}
 

@@ -78,6 +78,33 @@ export function writeRules(rules: InspectionRule[]) {
   }
 }
 
+function migrationsFilePath() {
+  return path.join(dataDir(), "rules-migrations.json")
+}
+
+/** 一次性数据迁移的完成标记，保证迁移只跑一次，之后用户手动改的绑定不会被重启覆盖。 */
+export function hasMigration(id: string) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(migrationsFilePath(), "utf8")) as { done?: unknown }
+    return Array.isArray(parsed.done) && parsed.done.includes(id)
+  } catch {
+    return false
+  }
+}
+
+export function markMigration(id: string) {
+  let done: string[] = []
+  try {
+    const parsed = JSON.parse(fs.readFileSync(migrationsFilePath(), "utf8")) as { done?: unknown }
+    if (Array.isArray(parsed.done)) done = parsed.done.filter((item): item is string => typeof item === "string")
+  } catch {
+    done = []
+  }
+  if (done.includes(id)) return
+  fs.mkdirSync(dataDir(), { recursive: true })
+  fs.writeFileSync(migrationsFilePath(), JSON.stringify({ done: [...done, id] }, null, 2), "utf8")
+}
+
 function backupBroken(file: string) {
   const backup = `${file}.broken-${Date.now()}`
   try {

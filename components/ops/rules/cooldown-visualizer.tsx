@@ -7,11 +7,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Spinner } from "@/components/ui/spinner"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { CAMERAS } from "@/lib/ops/data"
-import { ALL_CHANNELS } from "@/lib/ops/rules-data"
 import type { ChannelCooldown } from "@/lib/ops/rules-types"
 import { cn } from "@/lib/utils"
-import { isWindowActive, lastTriggerOffset, remainingSeconds, useRules } from "./rules-provider"
+import { idleCooldown, isWindowActive, lastTriggerOffset, remainingSeconds, useRules } from "./rules-provider"
+import { useChannelNames } from "./use-channel-names"
 
 const RING_RADIUS = 28
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
@@ -21,11 +20,6 @@ function formatClock(seconds: number) {
   const m = String(Math.floor(whole / 60)).padStart(2, "0")
   const s = String(whole % 60).padStart(2, "0")
   return `${m}:${s}`
-}
-
-function channelLabel(id: string) {
-  const camera = CAMERAS.find((c) => c.id === id)
-  return camera ? `${camera.code} ${camera.nameEn}` : id
 }
 
 function CountdownRing({ cooldown }: { cooldown: ChannelCooldown }) {
@@ -131,8 +125,10 @@ function PulseTimeline({ cooldown }: { cooldown: ChannelCooldown }) {
 }
 
 export function CooldownVisualizer() {
-  const { cooldowns, selectedChannel, setSelectedChannel, triggerOnce, runStorm, stormRunning } = useRules()
-  const cooldown = cooldowns[selectedChannel]
+  const { cooldowns, selectedChannel: pickedChannel, setSelectedChannel, triggerOnce, runStorm, stormRunning } = useRules()
+  const { streams } = useChannelNames()
+  const selectedChannel = streams.some((s) => s.id === pickedChannel) ? pickedChannel : (streams[0]?.id ?? "")
+  const cooldown = cooldowns[selectedChannel] ?? idleCooldown()
   const active = isWindowActive(cooldown)
   const ended = cooldown.incidentId !== null && !active
   const folded = cooldown.pulses.filter((p) => p.kind === "suppressed").length
@@ -158,14 +154,15 @@ export function CooldownVisualizer() {
           aria-label="选择观察通道"
           className="flex-wrap"
         >
-          {ALL_CHANNELS.map((id) => (
-            <ToggleGroupItem key={id} value={id} className="font-mono text-xs">
-              {channelLabel(id)}
-              {isWindowActive(cooldowns[id]) && (
+          {streams.map((stream) => (
+            <ToggleGroupItem key={stream.id} value={stream.id} className="text-xs">
+              {stream.name}
+              {cooldowns[stream.id] && isWindowActive(cooldowns[stream.id]) && (
                 <span className="size-1.5 rounded-full bg-warning" aria-label="冷却中" />
               )}
             </ToggleGroupItem>
           ))}
+          {streams.length === 0 && <span className="text-xs text-muted-foreground">尚未配置视频流</span>}
         </ToggleGroup>
 
         <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-background p-3">
@@ -247,13 +244,13 @@ export function CooldownVisualizer() {
           <Button
             type="button"
             variant="outline"
-            disabled={stormRunning}
+            disabled={stormRunning || !selectedChannel}
             onClick={() => triggerOnce(selectedChannel)}
           >
             <Crosshair data-icon="inline-start" />
             注入单次触发
           </Button>
-          <Button type="button" disabled={stormRunning} onClick={() => runStorm(selectedChannel)}>
+          <Button type="button" disabled={stormRunning || !selectedChannel} onClick={() => runStorm(selectedChannel)}>
             {stormRunning ? <Spinner data-icon="inline-start" /> : <CloudLightning data-icon="inline-start" />}
             {stormRunning ? "风暴注入中..." : "注入连续告警风暴 (Simulate Alert Storm)"}
           </Button>

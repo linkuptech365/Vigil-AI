@@ -1,30 +1,32 @@
 "use client"
 
-import useSWR from "swr"
-
 import { ToggleGroupItem } from "@/components/ui/toggle-group"
-import { STREAMS_ENDPOINT } from "@/components/vigil/streams/use-streams"
-import { getJson } from "@/lib/ops/rules-client"
-import { ALL_CHANNELS } from "@/lib/ops/rules-data"
-import type { StreamsResponse } from "@/lib/vigil/streams"
+import { STALE_CHANNEL_LABEL, SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
+import { useChannelNames } from "./use-channel-names"
 
 /**
- * 规则「绑定通道」候选项：内置机位 ID 之外，并入真实接入的通道 ID。
- * 规则按通道真实 ID 精确匹配，只列硬编码的 CAM-xx 会让规则永远绑不上真实通道。
+ * 规则「绑定通道」候选项：只来自 /api/v1/streams 的真实通道，界面只显示用户设置的名称，
+ * 底层值是真实 streamId。已绑定但通道已不存在的旧值显示为「已失效通道」，保留可取消勾选的入口。
  */
-export function BindableChannelItems() {
-  const { data } = useSWR<StreamsResponse>(STREAMS_ENDPOINT, getJson, { keepPreviousData: true })
-  const names = new Map((data?.streams ?? []).map((stream) => [stream.id, stream.name]))
-  const ids = [...ALL_CHANNELS, ...[...names.keys()].filter((id) => !ALL_CHANNELS.includes(id))]
+export function BindableChannelItems({ selected = [], disabled }: { selected?: readonly string[]; disabled?: boolean }) {
+  const { streams, names } = useChannelNames()
+  const stale = selected.filter((id) => !SCOPE_BINDINGS.includes(id) && !names.has(id))
 
   return (
     <>
-      {ids.map((channel) => (
-        <ToggleGroupItem key={channel} value={channel} className="font-mono text-xs" title={names.get(channel) ?? channel}>
-          {channel}
-          {names.get(channel) ? (
-            <span className="ml-1 font-sans text-muted-foreground">{names.get(channel)}</span>
-          ) : null}
+      {streams.map((stream) => (
+        <ToggleGroupItem key={stream.id} value={stream.id} disabled={disabled} className="text-xs">
+          {stream.name}
+        </ToggleGroupItem>
+      ))}
+      {stale.map((id) => (
+        <ToggleGroupItem
+          key={id}
+          value={id}
+          className="border-dashed text-xs text-muted-foreground"
+          title="该通道已被移除，取消勾选即可清理"
+        >
+          {STALE_CHANNEL_LABEL}
         </ToggleGroupItem>
       ))}
     </>

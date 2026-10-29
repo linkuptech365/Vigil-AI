@@ -13,7 +13,7 @@ import {
   getJson,
   sendJson,
 } from "@/lib/ops/rules-client"
-import { ALL_CHANNELS, DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
+import { DEFAULT_CUSTOM_PROMPT } from "@/lib/ops/rules-data"
 import type { ChannelCooldown, DeduplicationMetrics, InspectionRule } from "@/lib/ops/rules-types"
 
 import { type CustomRuleInput, type RulePatch, useServerRules } from "./use-server-rules"
@@ -56,16 +56,17 @@ async function fetchSnapshot(url: string): Promise<TimedSnapshot> {
   return { ...snapshot, receivedAt: Date.now() }
 }
 
-function idleCooldown(): ChannelCooldown {
+export function idleCooldown(): ChannelCooldown {
   return { incidentId: null, elapsed: 0, windowSeconds: DEFAULT_WINDOW_SECONDS, pulses: [] }
 }
 
 /** Projects the server's window state forward by the time elapsed since it was received. */
 function projectCooldowns(snapshot: TimedSnapshot | undefined, now: number): Record<string, ChannelCooldown> {
   const result: Record<string, ChannelCooldown> = {}
-  for (const channelId of ALL_CHANNELS) {
-    const status = snapshot?.channels[channelId]
-    if (!snapshot || !status) {
+  if (!snapshot) return result
+  for (const channelId of Object.keys(snapshot.channels)) {
+    const status = snapshot.channels[channelId]
+    if (!status) {
       result[channelId] = idleCooldown()
       continue
     }
@@ -117,7 +118,7 @@ export function useRules() {
 
 export function RulesProvider({ children }: { children: React.ReactNode }) {
   const { mutate: mutateGlobal } = useSWRConfig()
-  const [selectedChannel, setSelectedChannel] = React.useState("CAM-02")
+  const [selectedChannel, setSelectedChannel] = React.useState("")
   const [stormRunning, setStormRunning] = React.useState(false)
   const [customDialogOpen, setCustomDialogOpen] = React.useState(false)
   const [now, setNow] = React.useState(() => Date.now())

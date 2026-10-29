@@ -1,7 +1,14 @@
 import { CAMERAS } from "@/lib/ops/data"
 import type { RulePipelineConfig } from "@/lib/ops/types"
 import { INITIAL_ZONES } from "@/lib/ops/perception-data"
-import { SEVERITY_RANK, SOURCE_ALL, bindsSource, ruleSensitivity } from "@/lib/ops/rule-binding"
+import {
+  SCOPE_BINDINGS,
+  SEVERITY_RANK,
+  SOURCE_ALL,
+  bindsSource,
+  collapseBinding,
+  ruleSensitivity,
+} from "@/lib/ops/rule-binding"
 import type { RoiZone } from "@/lib/ops/perception-types"
 import type {
   AffinityFactor,
@@ -41,7 +48,7 @@ import {
 } from "./rule-geometry"
 import { GMP_CLEANROOM_RULES } from "@/lib/ops/gmp-cleanroom-rules"
 import { isDemoEnabled } from "@/lib/storage/demo-store"
-import { loadRules, seedRules, writeRules } from "@/lib/storage/rules-store"
+import { hasMigration, loadRules, markMigration, seedRules, writeRules } from "@/lib/storage/rules-store"
 import { loadStreams } from "@/lib/storage/streams-store"
 import { extractTags, matchScenario, tagLabel } from "./rule-semantic"
 
@@ -114,10 +121,87 @@ const EMPTY_METRICS: DeduplicationMetrics = {
   correlatedCount: 0,
 }
 
+const BINDING_MIGRATION_ID = "bind-by-stream-name-v1"
+
+/** 一次性纠正：规则 ID → 应严格绑定的通道名称（空数组表示取消全部覆盖）。 */
+const BINDING_FIXES: ReadonlyArray<{ ruleId: string; streamName: string | null }> = [
+  { ruleId: "RULE-CUSTOM-1792821549402", streamName: "2楼" },
+  { ruleId: "RULE-CUSTOM-1792996002802", streamName: "一楼" },
+  { ruleId: "RULE-04", streamName: null },
+]
+
+function sameBinding(a: readonly string[], b: readonly string[]) {
+  return a.length === b.length && a.every((item, index) => item === b[index])
+}
+
+/**
+ * 启动时规整历史绑定，返回是否有改动：
+ * 1. ALL 与具体通道并存的规则收敛为 ALL；
+ * 2. 非演示模式下，剔除指向已不存在通道（旧版 CAM-xx、已删除的机器 ID）的绑定；
+ * 3. 一次性按通道名称纠正已知串台规则，通过完成标记保证之后用户手动改的绑定不被覆盖。
+ */
+function migrateBindings(rules: InspectionRule[], demo: boolean): boolean {
+  const streams = loadStreams()
+  const streamIds = new Set(streams.map((stream) => stream.id))
+  let changed = false
+
+  for (const rule of rules) {
+    let next = collapseBinding(rule.boundChannels)
+    if (!demo && streamIds.size > 0) {
+      next = next.filter((id) => SCOPE_BINDINGS.includes(id) || streamIds.has(id))
+    }
+    if (!sameBinding(next, rule.boundChannels)) {
+      rule.boundChannels = next
+      changed = true
+    }
+  }
+
+  if (!hasMigration(BINDING_MIGRATION_ID) && streamIds.size > 0) {
+    let pending = false
+    for (const fix of BINDING_FIXES) {
+      const rule = rules.find((item) => item.id === fix.ruleId)
+      if (!rule) continue
+      let target: string[]
+      if (fix.streamName === null) {
+        if (!rule.boundChannels.includes(SOURCE_ALL)) continue
+        target = []
+      } else {
+        const stream = streams.find((item) => item.name.trim() === fix.streamName)
+        if (!stream) {
+          pending = true
+          continue
+        }
+        target = [stream.id]
+      }
+      if (!sameBinding(target, rule.boundChannels)) {
+        console.warn(`[rule-engine] 绑定迁移：${rule.id} ${JSON.stringify(rule.boundChannels)} -> ${JSON.stringify(target)}`)
+        rule.boundChannels = target
+        changed = true
+      }
+    }
+    if (!pending) {
+      try {
+        markMigration(BINDING_MIGRATION_ID)
+      } catch (error) {
+        console.error("[rule-engine] 写入迁移标记失败：", error)
+      }
+    }
+  }
+
+  return changed
+}
+
 function seedState(): EngineState {
   const demo = isDemoEnabled()
   const now = Date.now()
   const rules: InspectionRule[] = loadRules(demo ? seedRules() : [])
+  if (migrateBindings(rules, demo)) {
+    try {
+      writeRules(rules)
+    } catch (error) {
+      console.error("[rule-engine] 绑定迁移写盘失败，仅在内存中生效：", error)
+    }
+  }
 
   const windows = new Map<string, WindowState>()
   if (!demo) {
@@ -469,7 +553,10 @@ export function registerTrigger(
 export function getSnapshot(now = Date.now()): SuppressionSnapshot {
   const state = engine()
   const channels: Record<string, SuppressionStatus | null> = {}
-  for (const channelId of ALL_CHANNELS) {
+  const channelIds = new Set<string>(isDemoEnabled() ? ALL_CHANNELS : [])
+  for (const stream of loadStreams()) channelIds.add(stream.id)
+  for (const window of state.windows.values()) channelIds.add(window.channelId)
+  for (const channelId of channelIds) {
     let latest: WindowState | undefined
     for (const window of state.windows.values()) {
       if (window.channelId !== channelId) continue
@@ -762,6 +849,8 @@ function formatClock(ms: number) {
 }
 
 function cameraName(channelId: string) {
+  const stream = loadStreams().find((item) => item.id === channelId)
+  if (stream) return stream.name
   return CAMERAS.find((camera) => camera.id === channelId)?.name ?? channelId
 }
 

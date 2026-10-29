@@ -157,7 +157,7 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
   const [bound, setBound] = React.useState<string[]>(["ALL"])
   const [submitting, setSubmitting] = React.useState(false)
 
-  const valid = prompt.trim().length >= 8
+  const valid = prompt.trim().length >= 8 && bound.length > 0
 
   const submit = async () => {
     const text = prompt.trim()
@@ -195,9 +195,6 @@ function CustomRuleForm({ onCreated }: { onCreated: () => void }) {
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 text-sm font-medium">适用范围 (Bound Scope)</legend>
         <RuleScopePicker value={bound} onChange={setBound} />
-        <p className="text-xs text-muted-foreground">
-          ALL 对所有视频源生效；LOCAL 仅用于本地视频；也可只勾选指定机位。
-        </p>
       </fieldset>
 
       <fieldset className="flex flex-col gap-3">

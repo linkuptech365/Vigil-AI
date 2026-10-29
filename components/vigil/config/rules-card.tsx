@@ -11,12 +11,14 @@ import {
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
+import { useChannelNames } from "@/components/ops/rules/use-channel-names"
 import { useServerRules } from "@/components/ops/rules/use-server-rules"
 import { bindingLabel } from "@/lib/ops/rule-binding"
 import { SeverityBadge } from "../status-badges"
 
 export function RulesCard() {
   const { rules, updateRule } = useServerRules()
+  const { names } = useChannelNames()
 
   return (
     <Card>
@@ -40,8 +42,8 @@ export function RulesCard() {
                   </label>
                   <SeverityBadge severity={rule.severity} />
                   {rule.boundChannels.map((channel) => (
-                    <Badge key={channel} variant="outline" className="font-mono text-xs">
-                      {bindingLabel(channel)}
+                    <Badge key={channel} variant="outline" className="text-xs">
+                      {bindingLabel(channel, names)}
                     </Badge>
                   ))}
                 </div>

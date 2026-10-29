@@ -42,8 +42,35 @@ export function matchRulesForSource(rules: InspectionRule[], source: RuleSource)
   return rules.filter((rule) => rule.enabled && bindsSource(rule, source))
 }
 
-export function bindingLabel(channel: string) {
+/** 已失效绑定（通道被删除、或旧版硬编码 CAM-xx / 机器 ID）的统一展示文案，不暴露内部代号。 */
+export const STALE_CHANNEL_LABEL = "已失效通道"
+
+/** 通道 ID → 用户在监控流配置里设置的名称。 */
+export type ChannelNames = ReadonlyMap<string, string>
+
+/**
+ * 绑定项的唯一展示依据：范围取固定文案，通道一律取用户设置的名称；
+ * 找不到对应通道时显示「已失效通道」，绝不回显 CAM-01 或哈希 ID。
+ */
+export function bindingLabel(channel: string, names?: ChannelNames) {
   if (channel === SOURCE_ALL) return "全部视频源"
   if (channel === SOURCE_LOCAL) return "本地视频"
-  return channel
+  return names?.get(channel) ?? STALE_CHANNEL_LABEL
+}
+
+/**
+ * 绑定互斥规整：「全部视频源」与具体通道 / 本地视频不能并存。
+ * 新勾选 ALL 时清空其余；在 ALL 已存在时再勾选其他项，则自动取消 ALL。
+ */
+export function normalizeBinding(previous: readonly string[], next: readonly string[]): string[] {
+  const unique = Array.from(new Set(next))
+  if (!unique.includes(SOURCE_ALL)) return unique
+  if (unique.length === 1) return [SOURCE_ALL]
+  return previous.includes(SOURCE_ALL) ? unique.filter((item) => item !== SOURCE_ALL) : [SOURCE_ALL]
+}
+
+/** 服务端兜底：没有「上一状态」可参考时，ALL 与其他项并存一律收敛为 ALL。 */
+export function collapseBinding(channels: readonly string[]): string[] {
+  const unique = Array.from(new Set(channels))
+  return unique.includes(SOURCE_ALL) ? [SOURCE_ALL] : unique
 }
