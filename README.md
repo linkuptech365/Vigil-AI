@@ -1,246 +1,491 @@
 <div align="center">
 
-# Vigil-AI | 视频分析与智能预警平台 (OmniVision Sentinel)
+**English** | [简体中文](./README_zh.md)
 
-基于多模态大模型的视频监控分析与异常预警平台：边缘初筛、VLM 二级研判、规则防抖、处置与审计存证一体化。
+# Vigil-AI
 
+**A two-tier video audit engine: lightweight edge CV perception + vision-language causal reasoning.**
+
+Open-vocabulary detection and spatio-temporal gates run on the edge and filter out the vast majority of frames.
+Only the few that matter are escalated to a VLM, which judges cause and effect and produces auditable evidence.
+
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
+![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?logo=tailwindcss&logoColor=white)
-![Lucide](https://img.shields.io/badge/Icons-Lucide-F56565)
-![SWR](https://img.shields.io/badge/Data-SWR-000000)
-![VLM](https://img.shields.io/badge/VLM-Qwen2.5--VL%20%7C%20GPT--4o-7C3AED)
-![License](https://img.shields.io/badge/License-MIT-green)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Worker-009688?logo=fastapi&logoColor=white)
+![YOLO-World](https://img.shields.io/badge/YOLO--World-Open--Vocabulary-111F68)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+![go2rtc](https://img.shields.io/badge/go2rtc-RTSP%20%7C%20WebRTC%20%7C%20MSE-00ADD8)
 
 </div>
 
 ---
 
-## 目录
+## Table of Contents
 
-- [系统分层设计](#系统分层设计)
-- [生物医药洁净室 GMP 专项](#生物医药洁净室-gmp-专项)
-- [快速启动](#快速启动)
-- [环境变量](#环境变量)
-- [接口契约](#接口契约)
-- [项目结构](#项目结构)
+- [Why Vigil-AI](#why-vigil-ai)
+- [Architecture](#architecture)
+- [Feature Matrix](#feature-matrix)
+- [Quick Start](#quick-start)
+  - [Option A: Docker Compose (recommended for production)](#option-a-docker-compose-recommended-for-production)
+  - [Option B: Local development](#option-b-local-development)
+- [Configuration](#configuration)
+- [Usage Guide](#usage-guide)
+- [Best Practices](#best-practices)
+- [API Overview](#api-overview)
+- [Project Structure](#project-structure)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Security and Compliance Disclaimer](#security-and-compliance-disclaimer)
 - [License](#license)
 
 ---
 
-## 系统分层设计
+## Why Vigil-AI
 
-平台自下而上分为五层，每一层只向上游输出"更少但更有价值"的事件，以此控制推理成本与告警噪声。
+Sending every frame of every camera to a large model is slow and expensive; relying on a closed-set detector alone is brittle and cannot explain *why* something is a violation.
 
-| 层级 | 名称 | 核心能力 |
-| --- | --- | --- |
-| L1 | 接入层 (Ingestion) | 1~10 FPS 动态抽帧，每路通道保留 30 秒环形缓存 (Ring Buffer) |
-| L2 | 一级感知 (Tier-1 Perception) | YOLOv11 目标检测 + ByteTrack 多目标追踪，边缘初筛节省约 88% 推理 Token |
-| L3 | 二级认知 (Tier-2 VLM Cognition) | Qwen2.5-VL / GPT-4o 多模态研判，因果推理链与 Video-RAG 语义检索 |
-| L4 | 规则与防抖 (Rules & Anti-Flapping) | 60 秒冷却窗口去重、跨机位时空聚类并单 |
-| L5 | 处置与归档 (Dispatch & Archival) | GMP 偏差单 (Deviation) 与 CAPA 流程，SHA-256 校验的 ZIP 存证包 |
+Vigil-AI splits the problem in two:
 
-### L1 接入层
-
-- 运动增量低于阈值时降至 1 FPS，检测到运动后提升到 5~10 FPS，也可切换为固定 FPS。
-- 每路通道维护 30 秒环形切片缓存；事件触发时冻结缓存，防止证据被覆写。
-- 直播流支持 HLS、WHEP 与直连播放，拉流失败自动回退，并提供 QoS 采样面板。
-
-### L2 一级感知
-
-- 边缘侧使用 YOLO + ByteTrack 对目标做检测与追踪，仅将"值得研判"的关键帧上送。
-- 支持 ROI 多边形区域与单向绊线（Tripwire）几何判定。
-
-### L3 二级认知
-
-- 关键帧与规则场景提交到 `/api/v1/vlm/analyze`，以 SSE 流式返回研判结果。
-- 输出包含结论摘要、意图分析、严重等级、置信度、因果推理链与证据帧。
-- 未配置远端模型或远端不可用时，服务端自动使用离线兜底引擎，并在结果中标明来源。
-
-### L4 规则与防抖
-
-- 每条规则默认 60 秒冷却窗口：窗口内同通道同规则的重复触发折叠进已有工单。
-- 跨机位按时间、语义、拓扑三个维度计算亲和度，将同一事件的多路告警聚类为一张关联工单。
-- 规则库由服务端持有，支持启停、灵敏度、严重等级、冷却时长、排程与绑定通道。
-
-### L5 处置与归档
-
-- 偏差单与 CAPA（纠正与预防措施）审批流，状态与审计日志可追溯。
-- 存证包使用 Web Crypto 计算 SHA-256，并通过 `jszip` 在浏览器端生成 ZIP 下载。
-
----
-
-## 生物医药洁净室 GMP 专项
-
-针对疫苗生产等 GMP 洁净室场景，平台内置一套 4 个基准算例，可一键注入到检测队列，用于验证规则命中、研判报告与存证流程。
-
-| 算例 | 文件 | 绑定规则 | 预期结果 |
+| Tier | Runs on | Question it answers | Cost per frame |
 | --- | --- | --- | --- |
-| ESD Shoes Violation（防静电鞋违规） | `case_bio_01_esd_shoes_violation.mp4` | `RULE-BIO-01` | 命中：更衣室进入生产区未穿戴合规防静电鞋 |
-| Airlock Transfer Collision（气锁传递碰撞） | `case_bio_02_aseptic_transfer_collision.mp4` | `RULE-BIO-02` | 命中：传递窗异常碰撞与交叉污染风险 |
-| Class A Laminar Flow Touch（A 级层流区触碰） | `case_bio_03_class_a_zone_touch.mp4` | `RULE-BIO-03` | 命中：A 级核心区未授权触碰，阻断 |
-| Standard Aseptic Baseline（无菌规范基线） | `case_bio_04_standard_gmp_operation.mp4` | `RULE-BIO-04` | 不命中：规范作业对照组，用于验证无误报 |
+| **Tier-1** edge perception funnel | CPU / local GPU | "Is something *worth looking at* happening on this channel?" | Milliseconds, no tokens |
+| **Tier-2** VLM causal reasoning | Cloud or on-prem VLM | "Is it really a violation, and what is the cause and effect?" | Only on escalated frames |
 
-使用方式：
-
-1. 在 `/console` 的"检测队列"点击 **Load GMP Suite**，服务端会把算例写入 `/tmp/vigil-test` 并返回真实文件路径。
-2. 运行 AI 研判，查看研判报告与规则命中情况。
-3. 在 Ops 大屏的"审计与 CAPA"中处理偏差单，并导出 SHA-256 校验的 ZIP 存证包。
+Rules are bound **per channel (stream ID)**, so a "cat feeding" rule configured for the second floor can never fire on the first floor.
 
 ---
 
-## 快速启动
+## Architecture
 
-### 环境要求
+```mermaid
+flowchart LR
+    subgraph Sources["Video sources"]
+        NVR["NVR / IPC<br/>(RTSP main/sub stream)"]
+        FILE["Local video files"]
+    end
 
-- Node.js 20 及以上
-- pnpm 10（项目使用 `pnpm-lock.yaml`）
-- 构建时需能访问 `fonts.googleapis.com`（`next/font` 会下载 Geist 字体）
+    subgraph Edge["Tier-1 · Edge perception funnel (Python worker, 127.0.0.1:1985)"]
+        T0["Tier-0<br/>frame-difference filter"]
+        DET["YOLO-World<br/>open-vocabulary detection"]
+        TRK["ByteTrack (anchors)<br/>+ SubjectCoastingTracker"]
+        G0["Gate 0<br/>dynamic confidence + weak prior"]
+        G1["Gate 1<br/>subject / negative-sample suppression"]
+        G2["Gate 2<br/>pose and spatial relation"]
+        G3["Gate 3<br/>ROI / tripwire"]
+        DB["Consecutive-hit debounce<br/>+ cooldown lock"]
+        RB[("Ring buffer<br/>pre-roll frames")]
+        T0 --> DET --> TRK --> G0 --> G1 --> G2 --> G3 --> DB
+        DET -.-> RB
+    end
 
-### 本地开发
+    subgraph Gateway["Gateway · Next.js (:3000)"]
+        API["/api/v1/*"]
+        RULES["Per-channel rule library<br/>(bound by streamId)"]
+        LEARN["Tier-1 learning<br/>normalizeLearnedPrompt"]
+        UI["Ops dashboard + console"]
+    end
+
+    GO["go2rtc (embedded)<br/>RTSP / WebRTC / MSE"]
+
+    subgraph Cloud["Tier-2 · VLM causal reasoning"]
+        VLM["GPT-4o / GPT-6 Astra / Qwen2.5-VL<br/>or any OpenAI-compatible local VLM"]
+    end
+
+    NVR --> GO
+    FILE --> GO
+    GO -- "frame.jpeg" --> T0
+    DB -- "key frames + annotated snapshot" --> API
+    API --> RULES --> VLM
+    VLM -- "verdict + causal chain" --> API
+    VLM -- "new core nouns" --> LEARN -- "vocabulary feedback" --> DET
+    API --> UI
+    GO -- "MJPEG / snapshot proxy" --> UI
+```
+
+### Tier-1 · Edge Perception and Gate Funnel
+
+| Stage | What it does |
+| --- | --- |
+| **Open-vocabulary detection** | YOLO-World (`yolov8s-worldv2`) driven by a per-channel text vocabulary. The vocabulary is hot-swapped in memory without restarting the worker and without resetting tracks. Inference runs on CPU by default (PyTorch, with an adaptive FPS budget) and uses CUDA when available. |
+| **Tracking** | `ByteTrack` (via `supervision`, with an IoU fallback) assigns Track IDs to the anchor class (`person`). `SubjectCoastingTracker` covers non-person subjects whose shape changes a lot (a cat lowering its head to drink, curling up): a subject that disappears for a moment keeps its last valid box for `VIGIL_COAST_SECONDS` / `VIGIL_COAST_FRAMES`, and is dropped for good after `VIGIL_COAST_HARD_SECONDS`. |
+| **Gate 0** | Dynamic confidence floors. Open-vocabulary prompts use `min(global, VIGIL_OPEN_VOCAB_CONF)`. Once a **subject** passes its own floor, **context objects** (feeder, bowl, litter box ...) are downgraded to a *weak prior* and only need `VIGIL_CONTEXT_WEAK_CONF`, so a low-scored object can no longer block a confident subject. A rescue pass re-infers at a higher resolution when nothing passes. |
+| **Gate 1** | Subject presence and negative-sample suppression (known false-positive anchors are masked out). |
+| **Gate 2** | Pose and spatial-relation checks: subject-to-context distance or box overlap, hand-elevated, PPE presence, and so on. |
+| **Gate 3** | ROI polygons (electronic fences) and one-way tripwires. |
+| **Debounce and cooldown** | Minimum consecutive hit frames, cooldown lock, a static re-check interval, and a hit-history de-duplication window (`VIGIL_HIT_DEDUPE_SECONDS`). |
+| **Ring buffer** | Keeps the latest frames per channel so the escalated package contains the **pre-roll** (what led up to the trigger) as well as the trigger frame. |
+
+Every gate decision is written to a **gate trace** (`GET /api/v1/vision/gate-traces`), including the raw top-N model output, so you can always see *why* a frame was blocked.
+
+### Tier-2 · VLM Causal Reasoning
+
+- **Engines**: any OpenAI-compatible endpoint, including GPT-4o, GPT-6 Astra, Qwen2.5-VL, or an on-prem VLM. Profiles are managed in the console under *Model Gateway*; secrets stay server-side.
+- **Channel-level rules**: the rule library is keyed by **stream ID**, which removes cross-channel leakage. Rules support custom names, sensitivity, severity, cooldown, schedules, positive trigger prompts and **exclusion logic** (reverse causal conditions that veto a hit).
+- **Tier-1 learning feedback loop**: confirmed Tier-2 verdicts can propose new Tier-1 vocabulary. Every proposal goes through `normalizeLearnedPrompt`, which strips colours, materials and shape modifiers (`yellow open-top U-shaped litter box` becomes `litter box`), keeps 1 to 3 core nouns, and never removes the permanent `person` anchor.
+
+### Streaming and Distribution
+
+An embedded **go2rtc** process is started, supervised and restarted by the gateway. It ingests RTSP and serves RTSP, WebRTC and MSE. The browser never talks to go2rtc directly: snapshots and MJPEG are proxied through `:3000`, so a single port is enough (works well behind Tailscale or a reverse proxy).
+
+### Tech Stack
+
+Next.js (App Router) · React 19 · TypeScript · Tailwind CSS 4 · shadcn/ui · SWR · Python 3.11 · FastAPI / Uvicorn · Ultralytics YOLO-World · supervision (ByteTrack) · OpenCV · PyTorch · go2rtc · FFmpeg · Docker
+
+---
+
+## Feature Matrix
+
+| Area | Capability | Status |
+| --- | --- | --- |
+| Perception | Open-vocabulary detection (YOLO-World), per-channel vocabulary | Stable |
+| Perception | ByteTrack anchor tracking, `SubjectCoastingTracker` for non-person subjects | Stable |
+| Perception | Gate 0 to Gate 3 funnel, gate traces, raw-output diagnostics | Stable |
+| Perception | Low-light enhancement, rescue pass, adaptive CPU FPS budget | Stable |
+| Perception | ROI polygons and one-way tripwires | Stable |
+| Reasoning | VLM verdict with causal chain, SSE streaming | Stable |
+| Reasoning | Per-channel rule binding by stream ID, custom rule names, exclusion logic | Stable |
+| Reasoning | Tier-1 learning loop with prompt normalisation | Stable |
+| Reasoning | 60 s alert de-duplication window and cross-camera clustering | Stable |
+| Streaming | Embedded go2rtc, RTSP / WebRTC / MSE, same-origin MJPEG and snapshot proxy | Stable |
+| Operations | Hit-history drawer, manual multi-frame review, alert confirmation | Stable |
+| Operations | SHA-256 verified evidence package (ZIP) | Stable |
+| Deployment | Docker image with the vision environment baked in (zero cold start) | Stable |
+| Acceleration | OpenVINO export for Intel CPUs | Planned |
+
+---
+
+## Quick Start
+
+### Option A: Docker Compose (recommended for production)
+
+The image is built in four stages (`deps`, `builder`, `vision`, `runner`) and runs as the non-root user `nextjs`. The vision stage bakes Python 3.11, PyTorch (CPU by default), Ultralytics, the CLIP text encoder and the `yolov8s-worldv2.pt` weights into the image, so the container performs **no `pip install` and no model download at start-up**.
+
+**1. Prepare configuration**
+
+```bash
+git clone https://github.com/linkuptech365/Vigil-AI.git
+cd Vigil-AI
+cp .env.example .env        # every value has a safe default; set VIGIL_EDGE_TOKEN for production
+mkdir -p videos             # optional: put offline recordings here
+```
+
+**2. `docker-compose.yml`** (shipped in the repository)
+
+```yaml
+services:
+  vigil-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vigil-ai:latest
+    container_name: vigil-ai
+    ports:
+      - "3000:3000"            # gateway + UI + same-origin stream proxy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      VIGIL_ALLOWED_ROOTS: /data/videos:/tmp
+      VIGIL_DATA_DIR: /app/data
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./videos:/data/videos      # offline recordings
+      - vigil_storage:/tmp/vigil-test
+      - vigil_data:/app/data       # rules, streams, models, alerts, evidence
+    restart: unless-stopped
+
+volumes:
+  vigil_storage:
+  vigil_data:
+```
+
+> **About ports 1984 and 1985.** go2rtc (`127.0.0.1:1984`, RTSP `8554`, WebRTC `8555`) and the vision worker (`127.0.0.1:1985`) deliberately bind to the loopback interface inside the container and are reached only through the gateway. Publishing them with `-p 1984:1984 -p 1985:1985` would not work and would not be safe. Only `3000` needs to be published.
+
+> **Model weights.** To mount your own weights, add `- ./models:/app/models` and set `VIGIL_MODELS_DIR=/app/models` (the file must be named `yolov8s-worldv2.pt`). By default the baked-in copy under `/opt/vigil-vision/models` is used.
+>
+> **GPU hosts.** Build a CUDA image with `docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 -t vigil-ai:latest .`
+
+**3. Start, probe, operate**
+
+```bash
+docker compose up -d --build          # first build downloads PyTorch, CLIP and weights
+
+# Health probes
+curl http://localhost:3000/api/v1/health      # gateway: {"status":"healthy", ...}
+curl http://localhost:3000/api/v1/streams     # stream list + embedded engine status
+docker exec vigil-ai node -e "fetch('http://127.0.0.1:1985/health').then(r=>r.text()).then(console.log)"   # vision worker
+
+# Logs / restart / stop
+docker compose logs -f vigil-ai
+docker compose restart vigil-ai
+docker compose down                   # add -v to also delete the data volumes
+```
+
+The image ships a `HEALTHCHECK` against `/api/v1/health`; `docker ps` shows `healthy` once the gateway is up.
+
+**4. Install the streaming engine (first run only)**
+
+The `go2rtc` binary is not part of the image. Open the console, go to *Core Settings > Streams* and click **Install engine**, or run:
+
+```bash
+docker exec vigil-ai node scripts/setup-go2rtc.mjs
+```
+
+The binary is stored in `/app/bin` of the container. For fully offline hosts, set `GO2RTC_BIN` to a mounted binary instead.
+
+Then open <http://localhost:3000>.
+
+### Option B: Local development
+
+**Requirements:** Node.js >= 20, pnpm, Python 3.11 (3.9+ is tolerated), FFmpeg (a static build is bundled through `ffmpeg-static`), and access to `fonts.googleapis.com` at build time.
+
+**1. Frontend and API gateway**
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev                    # http://localhost:3000
 ```
 
-启动后访问：
-
-- Ops 大屏：<http://localhost:3000>
-- 检测队列控制台：<http://localhost:3000/console>
-
-常用脚本：
+Useful scripts:
 
 ```bash
-pnpm typecheck   # tsc --noEmit
+pnpm typecheck              # tsc --noEmit
 pnpm lint
-pnpm build       # 生成 standalone 产物
-pnpm start
+pnpm build && pnpm start    # production build
 ```
 
-> 使用 npm 的用户可执行 `npm install && npm run dev`，但锁文件以 pnpm 为准。
+**2. Python vision worker**
 
-### Docker Compose
+The gateway starts and supervises the worker for you, as long as a Python environment is available. The easiest way is the bundled installer:
 
 ```bash
-cp .env.example .env     # 可选：按需修改变量
-mkdir -p videos          # 放置待分析的监控录像
-docker compose up -d
+pnpm setup:vision           # creates the venv, installs dependencies, downloads weights
+# flags:  --cpu | --gpu | --light | --uv | --skip-weights
 ```
 
-- 访问地址：<http://localhost:3000>
-- 健康检查：`curl http://localhost:3000/api/v1/health`
-- 查看日志：`docker compose logs -f vigil-ai`
-- 停止服务：`docker compose down`（加 `-v` 同时清除 `vigil_storage` 卷）
+To do it by hand:
 
-容器内路径约定：
+```bash
+cd services/vision-worker
+python3.11 -m venv .venv
+source .venv/bin/activate                     # Windows: .venv\Scripts\activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install ftfy regex https://github.com/ultralytics/CLIP/archive/refs/heads/main.zip
 
-| 容器路径 | 来源 | 用途 |
-| --- | --- | --- |
-| `/data/videos` | 绑定挂载 `./videos` | 物理监控录像，在 `/console` 中填写此路径进行目录扫描 |
-| `/tmp/vigil-test` | 命名卷 `vigil_storage` | GMP 基准算例写入目录，容器重建后保留 |
-| `/app/data` | 命名卷 `vigil_data` | 规则库 `rules.json`，新建、修改、删除规则均写入此处，容器重建后保留 |
+# Optional: run the worker on its own for debugging (the gateway normally does this)
+VIGIL_VISION_PORT=1985 VIGIL_EDGE_TOKEN=dev-token python main.py
+```
 
-镜像采用四阶段构建（deps、builder、vision、runner），运行时使用非 root 用户 `nextjs:nodejs`，并通过 `HEALTHCHECK` 探测 `/api/v1/health`。
+> **Weights.** `yolov8s-worldv2.pt` is downloaded automatically by Ultralytics the first time the worker loads the model (and by `pnpm setup:vision`). It is stored in `./models` (override with `VIGIL_MODELS_DIR`). Without PyTorch, weights or the CLIP encoder, the worker still starts in a **degraded motion-only mode** and reports the reason in the console instead of failing.
 
-**视觉环境随镜像固化（0 秒冷启动）**：`vision` 阶段在构建期装好 Python 3.11 虚拟环境（`/opt/vigil-vision/venv`，含 `torch`、`torchvision`、`ultralytics`、`opencv-python-headless` 等全部依赖与 CLIP 文本编码器），并预下载、预热 `yolov8s-worldv2.pt` 权重（`/opt/vigil-vision/models`）。该阶段只依赖 `services/vision-worker/requirements.txt`，业务代码改动不会使其缓存失效，重新部署无需再安装依赖或下载模型。容器启动时不执行任何 `pip install` 或建 venv，镜像内 `VIGIL_PREBAKED_VISION=1` 会同时禁止控制台触发运行时安装。
+**3. go2rtc streaming gateway**
 
-- 默认构建 CPU 版 PyTorch；GPU 主机可用 `docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 .` 构建 CUDA 版。
-- 构建需要能访问 `download.pytorch.org`、`pypi.org` 与 `github.com`（CLIP 与权重）；构建末尾有自检，缺依赖或缺权重会直接让构建失败。
-- 旧版本留在 `vigil_data` 卷里的 `/app/data/vision` 目录不再使用，可手动删除以回收空间。
+```bash
+pnpm setup:engine           # downloads the right single-file binary into ./bin
+```
+
+The gateway generates `data/go2rtc.yaml` and manages the process, so you do not edit it by hand:
+
+```yaml
+# generated, do not edit
+api:    { listen: "127.0.0.1:1984" }
+rtsp:   { listen: "127.0.0.1:8554" }
+webrtc: { listen: "127.0.0.1:8555" }
+ffmpeg: { bin: "<ffmpeg-static path>" }
+log:    { level: warn }
+streams: {}                  # filled from data/streams.json
+```
+
+Already have a binary? Point `GO2RTC_BIN` at it. Manual download: <https://github.com/AlexxIT/go2rtc/releases>.
 
 ---
 
-## 环境变量
+## Configuration
 
-| 变量 | 默认值 | 说明 |
+Copy [`.env.example`](./.env.example) to `.env`. Highlights:
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `3000` | 网关监听端口，Docker 镜像内固定为 3000 |
-| `VIGIL_ALLOWED_ROOTS` | `/data/videos:/tmp:/tmp/vigil-test` | 扫描与抽帧允许访问的目录白名单，Linux 以 `:` 分隔；项目目录与系统临时目录始终允许 |
-| `VIGIL_DATA_DIR` | `<cwd>/data` | 规则库持久化目录，规则保存为其中的 `rules.json`��Docker 内为 `/app/data`，以命名卷 `vigil_data` 挂载，容器重建后保留 |
-| `VIGIL_SCAN_DIR` | 空 | 可选。视频流接口按文件名/相对路径寻址时额外查找的根目录，同时自动加入白名单 |
-| `NEXT_PUBLIC_DEFAULT_VLM_MODEL` | `qwen2.5-vl-72b` | 默认二级研判模型标识 |
-| `VLM_API_URL` | `http://localhost:8000/api/v1/analyze` | VLM 推理网关地址 |
-| `VLM_API_KEY` | 空 | VLM 推理网关密钥，请勿提交到仓库 |
+| `PORT` | `3000` | Gateway port |
+| `VIGIL_DATA_DIR` | `<cwd>/data` | Persistent data (`rules.json`, `streams.json`, `models.json`, alerts, evidence) |
+| `VIGIL_ALLOWED_ROOTS` | `/data/videos:/tmp:/tmp/vigil-test` | Directory allow-list for file scanning and frame extraction |
+| `VIGIL_EDGE_TOKEN` | empty | Bearer token for worker-to-gateway callbacks. **Set it in production.** |
+| `VIGIL_EVIDENCE_RETENTION_DAYS` | `365` | Evidence retention |
+| `VIGIL_VISION_PORT` | `1985` | Worker port (loopback only) |
+| `VIGIL_OPEN_VOCAB_CONF` | `0.30` | Gate 0: floor for open-vocabulary prompts |
+| `VIGIL_CONTEXT_WEAK_CONF` | `0.10` | Gate 0: weak-prior floor for context objects |
+| `VIGIL_RESCUE_CONF` | `0.15` | Gate 0: relaxed floor for the rescue pass (0 disables) |
+| `VIGIL_COAST_SECONDS` / `_FRAMES` / `_HARD_SECONDS` | `1.5` / `3` / `6.0` | Subject coasting window |
+| `VIGIL_HIT_DEDUPE_SECONDS` | `8` | Hit-history de-duplication window |
+| `VIGIL_CPU_MAX_FPS` | `3` | Total CPU inference FPS budget |
+| `ENABLE_STREAM_PATROL` | `false` | Server-side auto patrol (consumes VLM tokens when on) |
+| `VIGIL_DISABLE_VISION_ENGINE` / `VIGIL_DISABLE_STREAM_ENGINE` | empty | Set to `1` to disable the worker / go2rtc |
 
-> 当前版本的 VLM 地址、密钥与模型由控制台"API 配置"面板随请求提交，服务端不会读取 `VLM_API_URL` / `VLM_API_KEY` 作为默认值；这两项在 `.env.example` 中作为部署模板保留。
+> **LLM credentials are not environment variables.** `OPENAI_API_KEY`, `AZURE_OPENAI_*` and similar are **not read**. Add your provider in the console under *Model Gateway*: choose the provider, set **Base URL**, **API key** and **model name** (for example `gpt-4o`), and mark it as default. Profiles are persisted in `data/models.json` (mode 600) and only masked keys are returned by the API. Use *Test connection* to verify RTT and model discovery.
 
-目录白名单是安全边界：所有携带物理路径的接口都会拒绝空字节、`..` 跳转，并在解析符号链接后校验路径落在白名单之内。
+All endpoints that take a physical path reject null bytes and `..`, resolve symlinks, and require the result to be inside the allow-list.
 
 ---
 
-## 接口契约
+## Usage Guide
 
-所有接口前缀为 `/api/v1`，请求与响应均为 JSON（`vlm/analyze` 默认返回 SSE）。错误响应统一为 `{ "error": string, "code": string }` 或 `{ "status": "error", "message": string }`。
+### Step 1: Add a video stream
 
-### 基础与连通性
+Open the console, go to *Core Settings > Streams*, and add a channel:
 
-| 方法 | 路径 | 说明 | 关键参数 |
+| Field | Example |
+| --- | --- |
+| Name | `一楼` / `2楼` (any human-friendly name; this is the **only** label shown anywhere in the UI) |
+| Zone | `Lobby` |
+| Source | `rtsp://admin:password@192.168.1.64:554/Streaming/Channels/102` |
+
+Common RTSP URL patterns:
+
+| Vendor | Main stream | Sub stream (recommended for AI) |
+| --- | --- | --- |
+| Hikvision | `rtsp://user:pass@IP:554/Streaming/Channels/101` | `.../Streaming/Channels/102` |
+| Dahua | `rtsp://user:pass@IP:554/cam/realmonitor?channel=1&subtype=0` | `...&subtype=1` |
+| Generic NVR (ONVIF) | `rtsp://user:pass@IP:554/<vendor path>` | same |
+
+Use the **sub stream** for detection (lower resolution, lower CPU) and keep the main stream for evidence if your NVR allows it. The stream's generated ID is an internal key; rules, hits and alerts are always bound to that ID and displayed by name, so renaming a stream never breaks a rule.
+
+### Step 2: Configure the per-channel perception vocabulary
+
+Each channel has its own Tier-1 vocabulary. Every entry has an English prompt (for YOLO-World) and a role:
+
+| Role | ID | Meaning | Example |
 | --- | --- | --- | --- |
-| `GET` | `/health` | 网关健康检查，返回服务名、版本、时间戳与运行时长 | 无 |
-| `POST` | `/test-connection` | 测试远端 VLM 网关连通性，返回 RTT 与探测到的模型 | `apiUrl`, `apiKey?`, `modelName?` |
+| Anchor | `anchor_person` (`ROLE_ANCHOR`) | The person; gets a Track ID via ByteTrack. Always present. | `person` |
+| Subject | `subject_target` (`ROLE_SUBJECT`) | The initiator of the behaviour. Non-person subjects are protected by the coasting tracker. | `cat`, `dog` |
+| Context | `context_object` (`ROLE_CONTEXT`) | The object or place the behaviour happens at. **Never triggers on its own**; acts as a weak prior. | `pet feeder`, `water dispenser`, `cat litter box` |
+| PPE / Hazard | `required_ppe`, `hazard_target` | Required equipment / dangerous objects | `hard hat`, `lighter` |
 
-### 视频与研判
+Prompt rules that keep CLIP embeddings stable:
 
-| 方法 | 路径 | 说明 | 关键参数 |
-| --- | --- | --- | --- |
-| `POST` | `/scan-folder` | 扫描白名单目录下的视频文件��读取真实元数据 | `folderPath`, `recursive?`, `filterExtensions?` |
-| `POST` | `/extract-frames` | 对指定视频生成 8 帧关键帧与运动评分 | `videoPath`, `fps?` (1 / 2 / 5), `triggerTimestampSec?` |
-| `POST` | `/vlm/analyze` | 多模态研判，SSE 流式返回思考过程与最终结论 | `videoPath?`, `keyframes?`, `apiUrl?`, `apiKey?`, `modelName?`, `ruleScenario?`, `stream?` |
-| `POST` | `/samples/provision` | 将 4 个 GMP 基准算例写入 `/tmp/vigil-test` 并返回文件清单 | 无 |
+- Use **1 to 3 core nouns**: `cat`, `pet feeder`, `water dispenser`, `cat litter box`.
+- **Do not** add colours, materials, shapes or sizes: avoid `yellow open-top U-shaped entry litter box`.
+- Keep the list short (a handful of entries per channel). Long vocabularies dilute the score of every entry.
+- Pick the subject first, then add only the context objects the rule really needs.
 
-### 规则引擎
+### Step 3: Define VLM semantic rules
 
-| 方法 | 路径 | 说明 | 关键参数 |
-| --- | --- | --- | --- |
-| `GET` | `/rules` | 获取全部规则 | 无 |
-| `POST` | `/rules` | 创建自定义规则 | `name`, `prompt`, `sensitivity` (0.6~0.95), `actions` |
-| `PATCH` | `/rules/{id}` | 更新规则 | `enabled?`, `severity?`, `cooldownSeconds?`, `schedule?`, `boundChannels?`, `sensitivity?`, `actions?` |
-| `POST` | `/rules/evaluate` | 评估一次目标是否违规（ROI 多边形 / 绊线 / 语义匹配），并执行冷却窗口去重 | `channelId`, `ruleId?`, `targetCoords?`, `previousCoords?`, `targetClass?`, `confidence`, `scenarioText?` |
-| `GET` / `POST` | `/rules/suppress` | `GET` 读取各通道防抖快照；`POST` 登记一次触发并返回是否被折叠 | `channelId`, `ruleId?` |
-| `POST` | `/rules/simulate-storm` | 模拟告警风暴，验证 60 秒窗口内的折叠效果 | `channelId`, `ruleId?`, `count?` (2~20), `spacingMs?` (0~1500) |
-| `GET` / `POST` | `/rules/cluster` | 跨机位时空聚类；`GET` 可带 `windowSeconds`，`POST` 可传入自定义事件列表 | `events?`, `windowSeconds?` |
+Create a rule in *Rules and Debounce*:
 
-### 调用示例
+1. **Name**: edit inline on the card; changes propagate to alerts and dashboards immediately.
+2. **Positive trigger prompt**: describe what must be true. *"A cat is eating from the feeder or drinking at the water dispenser."*
+3. **Exclusion logic**: describe the causal chains that must veto the hit. *"A person is refilling the bowl"*, *"the cat only walks past"*.
+4. **Bound channels**: tick the specific channels (shown by name). `All sources` is mutually exclusive with individual channels, so a rule can never be half-global.
+5. **Sensitivity, severity, cooldown, schedule**: tune per rule. The default cooldown window is 60 s per channel and rule.
+
+### Step 4: Closed-loop audit and alert handling
+
+- **Hit-history drawer**: every Tier-1 hit with its annotated frame, gate trace and verdict.
+- **Manual escalation**: select a hit (or a multi-frame pre-roll slice) and send it to Tier-2 on demand.
+- **Alert stream**: confirm, dismiss or escalate alerts with one click; duplicates inside the cooldown window are folded into the existing case.
+- **Evidence package**: export a ZIP with key frames, `manifest.json` and SHA-256 checksums for audit trails.
+
+---
+
+## Best Practices
+
+- **One vocabulary per scene.** Do not copy a vocabulary across channels; the second floor needs `cat`, the first floor needs `person`.
+- **Check Gate 0 first when a detection is missing.** Open the gate trace: the raw-output line tells you which prompt scored what and which floor blocked it.
+- **Tune floors with the environment, not by hand-editing prompts.** Lower `VIGIL_OPEN_VOCAB_CONF` for hard subjects (e.g. 0.25) before adding more prompts.
+- **Use the sub stream** for Tier-1 and set `VIGIL_CPU_MAX_FPS` to what your CPU can sustain.
+- **Protect the callback endpoints** with `VIGIL_EDGE_TOKEN` and keep `3000` behind HTTPS.
+- **Keep `ENABLE_STREAM_PATROL` off** unless you explicitly want scheduled VLM calls.
+- **Back up the `vigil_data` volume**; it holds rules, streams, model profiles and evidence.
+
+---
+
+## API Overview
+
+All endpoints live under `/api/v1`. See [`docs/项目说明.md`](./docs/项目说明.md) for the full list (Chinese).
+
+| Area | Endpoints |
+| --- | --- |
+| Health | `GET /health`, `POST /test-connection` |
+| Streams | `GET/POST /streams`, `GET/PATCH/DELETE /streams/{id}`, `/streams/{id}/snapshot`, `/mjpeg`, `/annotated`, `/analyze`, `/test`, `/streams/engine` |
+| Vision (Tier-1) | `GET /vision/engine`, `GET/PUT /vision/config`, `GET/PUT /vision/channel-config`, `GET /vision/gate-traces`, `GET /vision/hits`, `GET /vision/learning`, `GET/PUT /roi-zones` |
+| Reasoning (Tier-2) | `POST /vlm/analyze` (SSE), `POST /incident/trigger` (edge escalation) |
+| Rules | `GET/POST /rules`, `PATCH/DELETE /rules/{id}`, `/rules/evaluate`, `/rules/suppress`, `/rules/simulate-storm`, `/rules/cluster` |
+| Models | `GET/POST /models`, `PATCH/DELETE /models/{id}`, `POST /models/{id}/default` |
+| Alerts | `GET /stream-alerts`, `GET/PATCH /stream-alerts/{alertId}`, `/archive`, `/frames/{index}` |
 
 ```bash
-# 健康检查
 curl http://localhost:3000/api/v1/health
-
-# 注入 GMP 基准算例
-curl -X POST http://localhost:3000/api/v1/samples/provision
-
-# 扫描目录
-curl -X POST http://localhost:3000/api/v1/scan-folder \
-  -H "content-type: application/json" \
-  -d '{"folderPath":"/data/videos","recursive":true}'
-
-# 评估规则（坐标归一化到 0~1000）
-curl -X POST http://localhost:3000/api/v1/rules/evaluate \
-  -H "content-type: application/json" \
-  -d '{"channelId":"CAM-03","confidence":0.92,"targetClass":"person","targetCoords":[500,500]}'
+curl http://localhost:3000/api/v1/streams
+curl -X PATCH http://localhost:3000/api/v1/rules/RULE-04 \
+  -H "content-type: application/json" -d '{"name":"Fire and smoke warning"}'
 ```
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```text
-app/
-  api/v1/            网关接口（health、scan-folder、extract-frames、vlm、rules、samples ...）
-  console/           检测队列控制台
-components/
-  ops/               Ops 大屏：监控矩阵、接入、感知、VLM、规则、处置与审计
-  vigil/             控制台：队列、详情弹窗、API 配置
-lib/
-  ops/               类型、场景数据、客户端请求封装
-  ops/server/        服务端引擎：路径守卫、VLM 适配器与兜底、规则引擎
-Dockerfile           三阶段生产镜像
-docker-compose.yml   单服务编排
+app/                    Next.js App Router (UI + /api/v1 gateway)
+components/ops/         Ops dashboard: matrix, perception, rules, alerts
+components/vigil/       Console: streams, vocabulary, model gateway
+lib/ops/                Rule types, client helpers, rule binding
+lib/ops/server/         Rule engine, VLM adapters, vision compiler, Tier-1 feedback
+lib/vigil/              Vision config, vocabulary, Tier-1 learning
+lib/storage/            File-backed stores (rules, streams, alerts, evidence)
+lib/stream-engine.ts    go2rtc supervisor
+lib/vision-engine.ts    Python worker supervisor and proxy
+services/vision-worker/ FastAPI worker: YOLO-World, ByteTrack, gates
+scripts/                setup-vision.mjs, setup-go2rtc.mjs
+Dockerfile              Four-stage production image
+docker-compose.yml      Single-service stack
 ```
+
+---
+
+## Roadmap
+
+- OpenVINO export path for Intel CPUs (the current worker runs PyTorch on CPU or CUDA).
+- Pluggable local VLM runners with per-channel routing.
+- Prometheus metrics for gate pass rates and Tier-2 spend.
+
+---
+
+## Contributing
+
+Contributions are welcome.
+
+1. **Open an issue first** for anything non-trivial. For bugs include: version / commit, deployment mode (Docker or local), the relevant **gate trace**, a screenshot, and steps to reproduce. For feature requests describe the scene and the expected behaviour.
+2. **Fork and branch** from `main`: `feat/<topic>` or `fix/<topic>`.
+3. **Code style**: TypeScript strict mode, Prettier (`pnpm format`), ESLint (`pnpm lint`). Python follows PEP 8 with type hints. UI uses the existing shadcn/ui components and design tokens; do not hard-code colours.
+4. **Verify** before pushing: `pnpm typecheck` and `pnpm lint` must pass. For worker changes run `python -m py_compile services/vision-worker/main.py`.
+5. **Open a pull request** with a clear description, linked issue and screenshots for UI changes. Keep PRs focused; one concern per PR.
+6. By contributing you agree that your work is licensed under Apache 2.0.
+
+---
+
+## Security and Compliance Disclaimer
+
+Vigil-AI is an **AI-assisted video analysis tool**. Its outputs are probabilistic, can be wrong, and must be reviewed by a qualified human before any disciplinary, legal or safety-critical decision is taken.
+
+Operators are solely responsible for complying with the surveillance, privacy, labour and data-protection laws that apply where the cameras are installed (for example GDPR, CCPA, PIPL), including notice and consent, purpose limitation, retention limits and access control. Do not use this software for covert surveillance, biometric identification without a legal basis, or any unlawful purpose.
+
+Frames sent to a Tier-2 VLM leave your network when you use a hosted model. Use an on-prem model if footage must not leave the site.
+
+The software is provided "AS IS" without warranty of any kind (see the license).
+
+To report a security vulnerability, please open a private security advisory on GitHub instead of a public issue.
 
 ---
 
 ## License
 
-[MIT](./LICENSE)
+Licensed under the [Apache License, Version 2.0](./LICENSE).
+
+Copyright (c) 2026 Vigil-AI Authors / Qianze Blueprint Group & Linkup Tech.
+
+See [`NOTICE`](./NOTICE) for third-party components. Note that Ultralytics YOLO-World is distributed under AGPL-3.0 (or a commercial Enterprise License); you are responsible for complying with it in your own deployment.

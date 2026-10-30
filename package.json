@@ -10,7 +10,8 @@
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
-    "setup:vision": "node scripts/setup-vision.mjs"
+    "setup:vision": "node scripts/setup-vision.mjs",
+    "setup:engine": "node scripts/setup-go2rtc.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

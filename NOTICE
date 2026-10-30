@@ -1,0 +1,18 @@
+Vigil-AI
+Copyright (c) 2026 Vigil-AI Authors / Qianze Blueprint Group & Linkup Tech
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles or downloads the following third-party software at build or
+run time. Each component remains under its own license:
+
+  - go2rtc (MIT)                      https://github.com/AlexxIT/go2rtc
+  - Ultralytics / YOLO-World (AGPL-3.0 / Enterprise)  https://github.com/ultralytics/ultralytics
+  - supervision (MIT)                 https://github.com/roboflow/supervision
+  - OpenAI CLIP, ultralytics fork (MIT)  https://github.com/ultralytics/CLIP
+  - PyTorch (BSD-3-Clause)            https://github.com/pytorch/pytorch
+  - FFmpeg (LGPL/GPL, via ffmpeg-static)  https://ffmpeg.org
+
+Ultralytics is distributed under AGPL-3.0 (or a commercial Enterprise License).
+Operators who deploy Vigil-AI together with Ultralytics weights are responsible for
+complying with that license for their own deployment.
