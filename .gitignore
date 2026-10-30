@@ -31,9 +31,29 @@ pnpm-debug.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+.env
+.env.local
+.env.*.local
 
-# runtime data (rules.json 等本地持久化文件)
-/data/
+# 运行时数据与动态配置（严禁提交：含模型密钥、摄像头凭据、抓拍与审计数据）
+# 先整体忽略 data/ 下的一级内容，再放行示例模板；
+# 不能写成 `/data/`（忽略整个目录后，目录内的 ! 规则无法生效）
+/data/*
+/data/*.json
+/data/*.yaml
+/data/stream-evidence/
+/data/audit/
+/data/rag/
+/data/vision/
+/app/data/
+
+# 保留示例模版（占位符，不含任何真实凭据）
+!/data/*.example.json
+!/data/*.example.yaml
+
+# 运行产物与日志
+runs/
+*.log
 
 # vercel
 .vercel

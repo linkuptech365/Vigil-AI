@@ -11,7 +11,7 @@ const SEED: Array<
 > = [
   {
     protocol: "RTSP",
-    url: "rtsp://admin:Vigil2024@192.168.1.101:554/live/ch0",
+    url: "rtsp://admin:password@192.168.1.101:554/live/ch0",
     resolution: "1080P",
     bitrate: 4.2,
     latency: 68,
