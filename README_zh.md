@@ -170,7 +170,13 @@ git clone https://github.com/linkuptech365/Vigil-AI.git
 cd Vigil-AI
 cp .env.example .env        # 每一项都有安全的默认值；生产环境请设置 VIGIL_EDGE_TOKEN
 mkdir -p videos             # 可选：存放离线录像
+
+# 初始化数据配置文件（运行时数据已被 .gitignore 忽略，仓库只提供 *.example.json 模板）
+cp data/models.example.json data/models.json
+cp data/streams.example.json data/streams.json
 ```
+
+> **Docker 说明。** `.dockerignore` 已排除 `data/`，容器的状态保存在 `vigil_data` 数据卷（`/app/data`）中，因此上面两条 `cp` 主要用于本地开发。使用 Docker 时，启动后直接在控制台「系统核心配置」中添加模型与视频流即可，文件会在数据卷内自动生成。如需用模板预置数据卷，首次启动后执行 `docker cp data/models.json vigil-ai:/app/data/models.json`（`streams.json` 同理），再 `docker compose restart vigil-ai`。
 
 **2. `docker-compose.yml`**（仓库内已提供）
 
@@ -247,8 +253,16 @@ docker exec vigil-ai node scripts/setup-go2rtc.mjs
 
 ```bash
 pnpm install
+
+# 初始化数据配置文件（仅首次；真实数据已被 Git 忽略）
+cp data/models.example.json data/models.json
+cp data/streams.example.json data/streams.json
+# Windows PowerShell：Copy-Item data/models.example.json data/models.json
+
 pnpm dev                    # http://localhost:3000
 ```
+
+> 示例文件只含占位符。真实的模型密钥与摄像头凭据请写入 `data/models.json` / `data/streams.json`（或直接在控制台添加）；这两个文件已被 Git 忽略，切勿提交。
 
 常用脚本：
 

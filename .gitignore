@@ -51,6 +51,11 @@ pnpm-debug.log*
 !/data/*.example.json
 !/data/*.example.yaml
 
+# 流媒体引擎二进制（由 `pnpm setup:engine` 按平台下载，不入库）
+/bin/go2rtc
+/bin/go2rtc.exe
+/bin/*.tmp
+
 # 运行产物与日志
 runs/
 *.log

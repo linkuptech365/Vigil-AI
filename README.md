@@ -171,7 +171,13 @@ git clone https://github.com/linkuptech365/Vigil-AI.git
 cd Vigil-AI
 cp .env.example .env        # every value has a safe default; set VIGIL_EDGE_TOKEN for production
 mkdir -p videos             # optional: put offline recordings here
+
+# Initialise data configuration files (runtime data is git-ignored; only *.example.json ships)
+cp data/models.example.json data/models.json
+cp data/streams.example.json data/streams.json
 ```
+
+> **Docker note.** `data/` is excluded by `.dockerignore` and the container keeps its state in the `vigil_data` volume (`/app/data`), so the two `cp` commands above only matter for local development. In Docker, add models and streams from the console (*Core Settings*) after start-up; the files are created inside the volume. To seed the volume instead, run `docker cp data/models.json vigil-ai:/app/data/models.json` (and `streams.json`) after the first start, then `docker compose restart vigil-ai`.
 
 **2. `docker-compose.yml`** (shipped in the repository)
 
@@ -248,8 +254,16 @@ Then open <http://localhost:3000>.
 
 ```bash
 pnpm install
+
+# Initialise data configuration files (first run only; real data stays git-ignored)
+cp data/models.example.json data/models.json
+cp data/streams.example.json data/streams.json
+# Windows PowerShell: Copy-Item data/models.example.json data/models.json
+
 pnpm dev                    # http://localhost:3000
 ```
+
+> The example files contain placeholders only. Put real model keys and camera credentials in `data/models.json` / `data/streams.json` (or add them in the console); both files are ignored by Git and must never be committed.
 
 Useful scripts:
 
