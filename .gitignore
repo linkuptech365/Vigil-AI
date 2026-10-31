@@ -1,0 +1,73 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+.env
+.env.local
+.env.*.local
+
+# 运行时数据与动态配置（严禁提交：含模型密钥、摄像头凭据、抓拍与审计数据）
+# 先整体忽略 data/ 下的一级内容，再放行示例模板；
+# 不能写成 `/data/`（忽略整个目录后，目录内的 ! 规则无法生效）
+/data/*
+/data/*.json
+/data/*.yaml
+/data/stream-evidence/
+/data/audit/
+/data/rag/
+/data/vision/
+/app/data/
+
+# 保留示例模版（占位符，不含任何真实凭据）
+!/data/*.example.json
+!/data/*.example.yaml
+
+# 流媒体引擎二进制（由 `pnpm setup:engine` 按平台下载，不入库）
+/bin/go2rtc
+/bin/go2rtc.exe
+/bin/*.tmp
+
+# 运行产物与日志
+runs/
+*.log
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# vision worker
+/models/
+services/vision-worker/.venv/
+__pycache__/

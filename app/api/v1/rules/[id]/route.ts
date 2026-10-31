@@ -1,0 +1,164 @@
+import {
+  RULE_NAME_MAX,
+  type DeleteRuleResponse,
+  type UpdateRuleRequest,
+  type UpdateRuleResponse,
+} from "@/lib/ops/rules-api-types"
+import { SCOPE_BINDINGS } from "@/lib/ops/rule-binding"
+import { parsePipeline } from "@/lib/ops/rule-pipeline"
+import { pushConfig } from "@/lib/vision-engine"
+import { COOLDOWN_OPTIONS } from "@/lib/ops/rules-data"
+import type { RuleActionKey, RuleSchedule, RuleSeverity } from "@/lib/ops/rules-types"
+import { deleteRule, isKnownChannel, listRules, updateRule } from "@/lib/ops/server/rule-engine"
+import { isRecord, jsonError, jsonOk, readJsonBody } from "@/lib/ops/server/rule-http"
+
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
+
+const ACTION_KEYS: RuleActionKey[] = ["webhook", "dispatch", "siren"]
+
+const SEVERITIES: RuleSeverity[] = ["INFO", "WARNING", "CRITICAL"]
+const SCHEDULES: RuleSchedule[] = ["24x7", "NIGHT_ONLY", "WORK_HOURS"]
+
+export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params
+
+  const body = await readJsonBody(request)
+  if (!body.ok) return jsonError(400, "INVALID_JSON", body.message)
+
+  const patch: UpdateRuleRequest = {}
+  const { enabled, severity, cooldownSeconds, schedule, boundChannels } = body.value
+
+  const { name } = body.value
+  if (name !== undefined) {
+    const text = typeof name === "string" ? name.trim() : ""
+    if (text.length === 0) return jsonError(400, "INVALID_REQUEST", "规则名称不能为空")
+    if (text.length > RULE_NAME_MAX) {
+      return jsonError(400, "INVALID_REQUEST", `规则名称不能超过 ${RULE_NAME_MAX} 个字符`)
+    }
+    patch.name = text
+  }
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") return jsonError(400, "INVALID_REQUEST", "enabled 必须是布尔值")
+    patch.enabled = enabled
+  }
+  if (severity !== undefined) {
+    if (!SEVERITIES.includes(severity as RuleSeverity)) {
+      return jsonError(400, "INVALID_REQUEST", "severity 必须是 INFO、WARNING 或 CRITICAL")
+    }
+    patch.severity = severity as RuleSeverity
+  }
+  if (cooldownSeconds !== undefined) {
+    if (!(COOLDOWN_OPTIONS as readonly number[]).includes(cooldownSeconds as number)) {
+      return jsonError(400, "INVALID_REQUEST", `cooldownSeconds 必须是 ${COOLDOWN_OPTIONS.join(" / ")} 之一`)
+    }
+    patch.cooldownSeconds = cooldownSeconds as number
+  }
+  if (schedule !== undefined) {
+    if (!SCHEDULES.includes(schedule as RuleSchedule)) {
+      return jsonError(400, "INVALID_REQUEST", `schedule 必须是 ${SCHEDULES.join(" / ")} 之一`)
+    }
+    patch.schedule = schedule as RuleSchedule
+  }
+  if (boundChannels !== undefined) {
+    const valid =
+      Array.isArray(boundChannels) &&
+      boundChannels.every(
+        (channel) =>
+          typeof channel === "string" && (isKnownChannel(channel) || SCOPE_BINDINGS.includes(channel))
+      )
+    if (!valid) {
+      return jsonError(400, "INVALID_REQUEST", "boundChannels 必须是机位 ID 或 ALL / LOCAL 的数组")
+    }
+    patch.boundChannels = Array.from(new Set(boundChannels as string[]))
+  }
+
+  const { description } = body.value
+  if (description !== undefined) {
+    const text = typeof description === "string" ? description.trim() : ""
+    if (text.length < 4 || text.length > 400) {
+      return jsonError(400, "INVALID_REQUEST", "description 必须是 4~400 字的文本")
+    }
+    patch.description = text
+  }
+
+  const { sensitivity, actions } = body.value
+  if (sensitivity !== undefined) {
+    if (typeof sensitivity !== "number" || !Number.isFinite(sensitivity) || sensitivity < 0.3 || sensitivity > 0.99) {
+      return jsonError(400, "INVALID_REQUEST", "sensitivity 必须是 0.3~0.99 之间的数字")
+    }
+    patch.sensitivity = Math.round(sensitivity * 100) / 100
+  }
+  if (actions !== undefined) {
+    if (!isRecord(actions) || ACTION_KEYS.some((key) => typeof actions[key] !== "boolean")) {
+      return jsonError(400, "INVALID_REQUEST", "actions 必须同时包含 webhook / dispatch / siren 三个布尔值")
+    }
+    patch.actions = {
+      webhook: actions.webhook as boolean,
+      dispatch: actions.dispatch as boolean,
+      siren: actions.siren as boolean,
+    }
+  }
+
+  const { pipeline } = body.value
+  if (pipeline !== undefined) {
+    if (pipeline === null) {
+      patch.pipeline = null
+    } else {
+      const parsed = parsePipeline(pipeline)
+      if (!parsed.ok) return jsonError(400, "INVALID_REQUEST", parsed.message)
+      patch.pipeline = parsed.value
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return jsonError(400, "INVALID_REQUEST", "没有可更新的字段")
+  }
+
+  let rule
+  try {
+    rule = updateRule(id, patch)
+  } catch (error) {
+    return persistFailure(error)
+  }
+  if (!rule) return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
+
+  // 管道、启用状态、绑定通道变化后立即热更新到视觉 Worker；内容未变化时会被去重跳过
+  if (
+    patch.pipeline !== undefined ||
+    patch.enabled !== undefined ||
+    patch.boundChannels !== undefined ||
+    patch.name !== undefined
+  ) {
+    await pushConfig().catch(() => null)
+  }
+
+  const response: UpdateRuleResponse = { rule, rules: listRules() }
+  return jsonOk(response)
+}
+
+export const PUT = PATCH
+
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params
+
+  let result
+  try {
+    result = deleteRule(id)
+  } catch (error) {
+    return persistFailure(error)
+  }
+  if (result === "not_found") return jsonError(404, "RULE_NOT_FOUND", `规则 ${id} 不存在`)
+  if (result === "builtin") {
+    return jsonError(409, "BUILTIN_RULE", `${id} 是内置规则，不能删除，只能停用（enabled: false）`)
+  }
+
+  const response: DeleteRuleResponse = { deletedId: id, rules: listRules() }
+  return jsonOk(response)
+}
+
+function persistFailure(error: unknown) {
+  console.error("[rules] 规则写盘失败：", error)
+  return jsonError(500, "PERSIST_FAILED", "规则写入数据目录失败，请检查 VIGIL_DATA_DIR 的写权限")
+}

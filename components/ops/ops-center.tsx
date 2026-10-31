@@ -1,0 +1,123 @@
+"use client"
+
+import * as React from "react"
+import { toast } from "sonner"
+import { Archive, Cable, LayoutGrid, ScanEye, ShieldCheck, Sparkles } from "lucide-react"
+
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { AlertDrawer } from "./alert-drawer"
+import { AuditTrailView } from "./audit/audit-trail-view"
+import { DispatchTab } from "./dispatch/dispatch-tab"
+import { IncidentFeed } from "./incident-feed"
+import { IngestionPipeline } from "./ingestion/ingestion-pipeline"
+import { IngestionProvider } from "./ingestion/ingestion-provider"
+import { MonitorSection } from "./monitor-section"
+import { VideoDetailDialog } from "@/components/vigil/video-detail-dialog"
+import { OpsHeader } from "./ops-header"
+import { OpsProvider, useOps } from "./ops-provider"
+import { PerceptionProvider } from "./perception/perception-provider"
+import { PerceptionTab } from "./perception/perception-tab"
+import { RuleStudioModal } from "./rule-studio-modal"
+import { RulesTab } from "./rules/rules-tab"
+import { VideoSearchBar } from "./video-search-bar"
+import { VlmTab } from "./vlm/vlm-tab"
+import type { LocateOptions } from "@/lib/ops/types"
+import { isChannelId } from "@/lib/ops/video-scenarios"
+
+function OpsShell() {
+  const { locateIncident, focusCamera } = useOps()
+  const [tab, setTab] = React.useState("monitor")
+
+  const locateInMonitor = React.useCallback(
+    (channelId: string, opts?: LocateOptions) => {
+      setTab("monitor")
+      if (isChannelId(channelId)) {
+        locateIncident({ channelId, timestampSec: opts?.timestampSec, title: opts?.label })
+        focusCamera(channelId, { single: true })
+      } else {
+        toast.error(`未找到通道 ${channelId}`)
+      }
+    },
+    [locateIncident, focusCamera]
+  )
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <div className="flex min-h-svh flex-col bg-background lg:h-svh lg:overflow-hidden">
+        <OpsHeader />
+        <Tabs value={tab} onValueChange={setTab} className="min-h-0 flex-1 gap-0">
+          <div className="scrollbar-thin overflow-x-auto border-b border-border px-4 py-2">
+            <TabsList className="h-9">
+              <TabsTrigger value="monitor" className="gap-1.5 px-3">
+                <LayoutGrid aria-hidden="true" />
+                实时监控矩阵
+              </TabsTrigger>
+              <TabsTrigger value="ingestion" className="gap-1.5 px-3">
+                <Cable aria-hidden="true" />
+                接入与预处理
+              </TabsTrigger>
+              <TabsTrigger value="perception" className="gap-1.5 px-3">
+                <ScanEye aria-hidden="true" />
+                一级感知初筛
+              </TabsTrigger>
+              <TabsTrigger value="vlm" className="gap-1.5 px-3">
+                <Sparkles aria-hidden="true" />
+                二级多模态研判
+              </TabsTrigger>
+              <TabsTrigger value="rules" className="gap-1.5 px-3">
+                <ShieldCheck aria-hidden="true" />
+                规则与防抖引擎
+              </TabsTrigger>
+              <TabsTrigger value="dispatch" className="gap-1.5 px-3">
+                <Archive aria-hidden="true" />
+                处置联动与证据归档
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          <TabsContent
+            value="monitor"
+            className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,65fr)_minmax(0,35fr)]"
+          >
+            <div className="scrollbar-thin flex min-h-0 flex-col gap-6 lg:overflow-y-auto lg:pr-2">
+              <MonitorSection />
+              <VideoSearchBar />
+            </div>
+            <IncidentFeed className="lg:h-full" />
+          </TabsContent>
+          <TabsContent value="ingestion" className="flex min-h-0 flex-1 flex-col">
+            <IngestionPipeline />
+          </TabsContent>
+          <TabsContent value="perception" className="flex min-h-0 flex-1 flex-col">
+            <PerceptionTab />
+          </TabsContent>
+          <TabsContent value="vlm" className="flex min-h-0 flex-1 flex-col">
+            <VlmTab onLocate={locateInMonitor} />
+          </TabsContent>
+          <TabsContent value="rules" className="flex min-h-0 flex-1 flex-col">
+            <RulesTab onLocate={locateInMonitor} />
+          </TabsContent>
+          <TabsContent value="dispatch" className="flex min-h-0 flex-1 flex-col">
+            <DispatchTab onLocate={locateInMonitor} />
+          </TabsContent>
+        </Tabs>
+      </div>
+      <AlertDrawer />
+      <RuleStudioModal />
+      <AuditTrailView />
+      <VideoDetailDialog />
+    </TooltipProvider>
+  )
+}
+
+export function OpsCenter() {
+  return (
+    <OpsProvider>
+      <IngestionProvider>
+        <PerceptionProvider>
+          <OpsShell />
+        </PerceptionProvider>
+      </IngestionProvider>
+    </OpsProvider>
+  )
+}

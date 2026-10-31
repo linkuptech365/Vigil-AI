@@ -1,0 +1,26 @@
+services:
+  vigil-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vigil-ai:latest
+    container_name: vigil-ai
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      VIGIL_ALLOWED_ROOTS: /data/videos:/tmp
+      VIGIL_DATA_DIR: /app/data
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./videos:/data/videos
+      - vigil_storage:/tmp/vigil-test
+      - vigil_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vigil_storage:
+  vigil_data:

@@ -1,0 +1,175 @@
+import type { RuleSeverity } from "@/lib/ops/rules-types"
+import type { VlmAnalysisReport } from "@/lib/ops/vlm-api-types"
+import type { ExtractedKeyframe, SamplingFps } from "@/lib/ops/video-types"
+import type { Tier1Sensitivity } from "./sensitivity"
+
+/** 规则库中的规则编号（如 RULE-01、RULE-99），由规则引擎动态下发，不再内置枚举。 */
+export type RuleId = string
+
+export type Severity = RuleSeverity
+
+export type VideoStatus = "pending" | "analyzing" | "safe" | "alert"
+
+export interface Truth {
+  /** 仅离线兜底引擎使用：期望命中的规则库编号；null 表示画面正常 */
+  ruleId: RuleId | null
+  confidence: number
+}
+
+export interface ChunkProgress {
+  /** 正在分析的切片编号，从 1 起 */
+  index: number
+  total: number
+  percent: number
+}
+
+export interface VideoItem {
+  id: string
+  name: string
+  path: string
+  durationSec: number
+  sizeMB: number
+  fps: number
+  recordedAt: string
+  truth: Truth
+  status: VideoStatus
+  ruleId?: RuleId
+  /** 触发预警时规则库中的规则名称快照，规则改名后历史记录仍保持当时的名称 */
+  ruleName?: string
+  ruleSeverity?: RuleSeverity
+  confidence?: number
+  /** 同一事件在防抖冷却窗口内的累计触发次数 */
+  triggerCount?: number
+  /** 被折叠进既有事件证据链的重复触发次数 */
+  suppressedCount?: number
+  incidentId?: string
+  /** 违规发生的视频时间码，如 "00:16"，与证据帧一一对应 */
+  timestamp?: string
+  /** 触发违规的抓拍证据帧（data:image/jpeg;base64,...）；老记录或服务端抽帧时为空 */
+  evidenceFrameBase64?: string
+  /** 证据帧是本次送检的第几张采样帧（从 1 起） */
+  evidenceFrameIndex?: number
+  /** 本次送检的采样帧总数 */
+  evidenceFrameTotal?: number
+  /** 证据帧所属的动作区间，如 "00:11 - 00:21" */
+  motionSegment?: string
+  /** 超长视频分段分析时的实时进度；分析结束后清空 */
+  chunkProgress?: ChunkProgress
+  /** 全片累计触发的预警事件数（按事件 ID 去重，冷却窗口内的重复触发不重复计） */
+  alertEventCount?: number
+  analyzedAt?: string
+  samplingFps?: number
+  frames?: number
+  suppressedReason?: string
+  /** disk: 由服务端真实扫描得到，可调用抽帧接口 */
+  source?: "disk"
+  scanRoot?: string
+  format?: string
+  resolution?: string | null
+  durationEstimated?: boolean
+  keyframes?: ExtractedKeyframe[]
+  keyframeWindow?: { startSec: number; endSec: number }
+  /** 由 /api/v1/vlm/analyze 返回的真实（或离线兜底）研判报告 */
+  vlmReport?: VlmAnalysisReport
+  /** 一级初筛的真实结果（浏览器逐秒像素差分），分析完成前为空 */
+  prescreen?: PrescreenResult
+  /** 分段分析的逐切片记录，是三个标签页共用的单一数据源 */
+  chunks?: ChunkRecord[]
+}
+
+export interface PrescreenSegment {
+  start: string
+  end: string
+  startSeconds: number
+  endSeconds: number
+  peakSeconds?: number
+  peakRate?: number
+}
+
+export interface PrescreenResult {
+  durationSec: number
+  /** 初筛实际耗时（毫秒） */
+  elapsedMs: number
+  motionSegments: PrescreenSegment[]
+  staticRatioPercent: number
+  scanStepSeconds: number
+  scannedAt: string
+  /** 本次初筛使用的灵敏度档位；旧记录没有该字段 */
+  sensitivity?: Tier1Sensitivity
+  motionThresholdPercent?: number
+  grayDiff?: number
+  patrolIntervalSeconds?: number
+}
+
+export type ChunkStatus = "pending" | "analyzing" | "alert" | "safe" | "failed"
+
+export interface ChunkFrame {
+  timestamp: string
+  seconds: number
+  reason?: "baseline" | "motion" | "patrol"
+  /** data:image/jpeg;base64,...；刷新页面后不再持久化，需要时从视频重新抽取 */
+  base64?: string
+}
+
+export interface ChunkRecord {
+  /** 从 1 起 */
+  index: number
+  total: number
+  startSec: number
+  endSec: number
+  startStr: string
+  endStr: string
+  status: ChunkStatus
+  frames: ChunkFrame[]
+  ruleId?: string
+  ruleName?: string
+  confidence?: number
+  /** 本切片的研判报告（含推理文本、规则裁决） */
+  report?: VlmAnalysisReport
+  error?: string
+  analyzedAt?: string
+}
+
+export interface FrameTestState {
+  videoId: string
+  fps: SamplingFps
+  triggerSec: number | null
+  status: "loading" | "ok" | "error"
+  keyframes?: ExtractedKeyframe[]
+  windowRange?: { startSec: number; endSec: number }
+  triggerTimestampSec?: number
+  error?: string
+}
+
+export interface ScanInfo {
+  count: number
+  folder: string
+  truncated: boolean
+}
+
+export type LogLevel = "sys" | "info" | "sample" | "req" | "res" | "ok" | "warn" | "alert"
+
+export interface LogLine {
+  id: number
+  ts: string
+  level: LogLevel
+  text: string
+}
+
+export interface Settings {
+  apiUrl: string
+  presetId: string
+  samplingFps: 1 | 2 | 5
+  threshold: number
+  folderPath: string
+  recursive: boolean
+  formats: string[]
+  /** 一级初筛灵敏度档位，缺省为标准模式 */
+  tier1Sensitivity: Tier1Sensitivity
+}
+
+export type PingState =
+  | { state: "idle" }
+  | { state: "testing" }
+  | { state: "ok"; latency: number; model: string; message: string }
+  | { state: "error"; message: string }

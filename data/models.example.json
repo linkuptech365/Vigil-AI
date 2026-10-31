@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "updatedAt": "2026-01-01T00:00:00.000Z",
+  "profiles": [
+    {
+      "id": "my-openai",
+      "name": "OpenAI (示例)",
+      "provider": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-your-api-key-here",
+      "modelName": "gpt-4o",
+      "enabled": true,
+      "isDefault": true,
+      "builtin": false
+    }
+  ]
+}

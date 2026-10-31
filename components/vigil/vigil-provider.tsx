@@ -1,0 +1,1250 @@
+"use client"
+
+import * as React from "react"
+
+import { useDemoMode } from "@/components/vigil/demo-mode-provider"
+import { toast } from "sonner"
+
+import {
+  DEFAULT_SETTINGS,
+  VIDEO_FORMATS,
+  createInitialQueue,
+  createTestSamples,
+  formatDuration,
+  hashString,
+  truthForLocalFile,
+} from "@/lib/vigil/data"
+import { GMP_AUTOSCAN_KEY, provisionGmpSuite } from "@/lib/ops/gmp-client"
+import { postVideoApi } from "@/lib/ops/video-client"
+import { analyzeVlmOnce, formatTimecode, storeApiKey } from "@/lib/ops/vlm-client"
+import { useServerRules } from "@/components/ops/rules/use-server-rules"
+import {
+  testModelProfile,
+  useModelProfiles,
+  type ProfileTestResult,
+} from "@/components/vigil/config/use-model-profiles"
+import { profileReadiness, type PublicModelProfile } from "@/lib/vigil/model-registry"
+import { matchRulesForSource, ruleDescription, ruleSensitivity } from "@/lib/ops/rule-binding"
+import type { VlmKeyframeInput, VlmPromptRule } from "@/lib/ops/vlm-api-types"
+import type {
+  ExtractFramesRequest,
+  ExtractFramesResponse,
+  SamplingFps,
+  ScanFolderRequest,
+  ScanFolderResponse,
+  ScannedVideoItem,
+} from "@/lib/ops/video-types"
+import { normalizeSeverity } from "@/lib/vigil/rules"
+import type {
+  ChunkFrame,
+  ChunkRecord,
+  FrameTestState,
+  LogLevel,
+  LogLine,
+  PingState,
+  ScanInfo,
+  Settings,
+  VideoItem,
+} from "@/lib/vigil/types"
+import { buildEvidenceChain } from "@/lib/vigil/evidence"
+import { resolveTier1Config } from "@/lib/vigil/sensitivity"
+import { toRequestVideoPath } from "@/lib/vigil/video-path"
+import { getVideoSrc, registerLocalVideo, releaseAllLocalVideos, releaseLocalVideo } from "@/lib/vigil/video-source"
+import {
+  captureChunkFrames,
+  CHUNK_WINDOW_SECONDS,
+  formatClock,
+  openCaptureSession,
+  planVideoChunks,
+  scanVideoMotion,
+  toKeyframeInputs,
+  type CaptureSession,
+  type FrameReason,
+  type MotionScan,
+  type VideoChunk,
+} from "@/lib/client/frame-capture"
+
+export type TabId = "config" | "live" | "queue" | "alerts"
+
+const STORAGE_KEY = "vigil-ai:settings"
+const QUEUE_STORAGE_KEY = "vigil_queue_state"
+
+function isDemoVideo(video: VideoItem) {
+  return video.id.startsWith("seed-") || video.path.startsWith("/data/videos/test_samples") || video.path.includes("/demo")
+}
+const LOGS_STORAGE_KEY = "vigil_pipeline_logs"
+const MAX_LOGS = 200
+/** 一级初筛：采样帧平均变化率低于 2% 视为画面静止，跳过大模型推理。 */
+const STATIC_SCENE_THRESHOLD = 0.02
+const FRAME_REASON_LABEL: Record<FrameReason, string> = {
+  baseline: "基线",
+  motion: "动作",
+  patrol: "巡检",
+}
+
+const LOG_LEVELS: readonly LogLevel[] = ["sys", "info", "sample", "req", "res", "ok", "warn", "alert"]
+
+function readStoredQueue(): VideoItem[] | null {
+  try {
+    const raw = window.localStorage.getItem(QUEUE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) throw new Error("invalid queue cache")
+    const items = parsed.filter(
+      (v): v is VideoItem =>
+        typeof v === "object" &&
+        v !== null &&
+        typeof (v as VideoItem).id === "string" &&
+        typeof (v as VideoItem).name === "string" &&
+        typeof (v as VideoItem).path === "string"
+    )
+    if (items.length === 0) return null
+    // 刷新或跳转时正在进行的分析请求已随页面中断，回退为待分析
+    return items.map((v) => {
+      const { chunkProgress: _chunkProgress, ...rest } = v
+      return v.status === "analyzing" ? { ...rest, status: "pending" as const } : rest
+    })
+  } catch {
+    try {
+      window.localStorage.removeItem(QUEUE_STORAGE_KEY)
+    } catch {
+      // 忽略
+    }
+    return null
+  }
+}
+
+/** 切片帧像素只保留在内存：刷新后按需从视频重新抽取，避免撑爆 localStorage 配额 */
+function stripChunkPixels(queue: VideoItem[]): VideoItem[] {
+  return queue.map((v) =>
+    v.chunks
+      ? {
+          ...v,
+          chunks: v.chunks.map((c) => ({
+            ...c,
+            frames: c.frames.map(({ base64: _base64, ...frame }) => frame),
+          })),
+        }
+      : v
+  )
+}
+
+function writeStoredQueue(rawQueue: VideoItem[]) {
+  const queue = stripChunkPixels(rawQueue)
+  try {
+    if (queue.length === 0) {
+      window.localStorage.removeItem(QUEUE_STORAGE_KEY)
+      return
+    }
+    try {
+      window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(queue))
+    } catch {
+      try {
+        // 配额不足：先丢弃抽帧缩略图，保留证据抓拍帧
+        const withoutKeyframes = queue.map(({ keyframes: _keyframes, ...rest }) => rest)
+        window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(withoutKeyframes))
+      } catch {
+        // 仍然放不下：连证据帧也丢弃，只保留分析结论
+        const slim = queue.map(({ keyframes: _keyframes, evidenceFrameBase64: _evidence, ...rest }) => rest)
+        window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(slim))
+      }
+    }
+  } catch {
+    // 隐私模式或存储已满：仅在当前页面内存中生效
+  }
+}
+
+function readStoredLogs(): LogLine[] {
+  try {
+    const raw = window.localStorage.getItem(LOGS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) throw new Error("invalid log cache")
+    return parsed
+      .filter(
+        (l): l is LogLine =>
+          typeof l === "object" &&
+          l !== null &&
+          typeof (l as LogLine).id === "number" &&
+          typeof (l as LogLine).ts === "string" &&
+          typeof (l as LogLine).text === "string" &&
+          LOG_LEVELS.includes((l as LogLine).level)
+      )
+      .slice(-MAX_LOGS)
+  } catch {
+    try {
+      window.localStorage.removeItem(LOGS_STORAGE_KEY)
+    } catch {
+      // 忽略
+    }
+    return []
+  }
+}
+
+function writeStoredLogs(logs: LogLine[]) {
+  try {
+    if (logs.length === 0) {
+      window.localStorage.removeItem(LOGS_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(logs.slice(-MAX_LOGS)))
+  } catch {
+    // 隐私模式或存储已满：仅在当前页面内存中生效
+  }
+}
+
+interface VigilContextValue {
+  settings: Settings
+  updateSettings: (patch: Partial<Settings>) => void
+  /** 全局默认模型档案；null 表示尚未加载或没有启用的模型 */
+  defaultProfile: PublicModelProfile | null
+  /** 由服务端用档案内的 URL / Key / 模型名发起握手；测试默认模型时同步更新顶部状态灯 */
+  testProfile: (id: string) => Promise<ProfileTestResult>
+  ping: PingState
+  scanning: boolean
+  lastScan: string | null
+  scanInfo: ScanInfo | null
+  scanFolder: () => Promise<void>
+  frameTest: FrameTestState | null
+  openFrameTest: (video: VideoItem) => void
+  runFrameTest: (video: VideoItem, fps: SamplingFps, triggerSec: number | null) => Promise<void>
+  closeFrameTest: () => void
+  importLocalFiles: (files: FileList | null) => Promise<void>
+  queue: VideoItem[]
+  addSamples: () => void
+  loadGmpSuite: () => Promise<void>
+  loadingGmp: boolean
+  clearQueue: () => void
+  removeVideo: (id: string) => void
+  analyzeOne: (video: VideoItem) => Promise<void>
+  /** 写回某个切片的记录（二级研判重跑后同步到单一数据源） */
+  updateChunk: (videoId: string, index: number, patch: Partial<ChunkRecord>) => void
+  /** 从视频重新抽取某切片的帧（刷新页面后帧像素不再持久化） */
+  recaptureChunkFrames: (videoId: string, index: number) => Promise<ChunkFrame[]>
+  /** 当前规则库中适用于本地视频的规则，用于二级研判重跑 */
+  getLocalPromptRules: () => VlmPromptRule[]
+  analyzeAll: () => Promise<void>
+  batchRunning: boolean
+  logs: LogLine[]
+  clearLogs: () => void
+  selectedId: string | null
+  setSelectedId: (id: string | null) => void
+  activeTab: TabId
+  setActiveTab: (tab: TabId) => void
+}
+
+const VigilContext = React.createContext<VigilContextValue | null>(null)
+
+export function useVigil() {
+  const ctx = React.useContext(VigilContext)
+  if (!ctx) throw new Error("useVigil must be used within VigilProvider")
+  return ctx
+}
+
+const MAX_VLM_FRAMES = 16
+
+function toPendingChunk(chunk: VideoChunk): ChunkRecord {
+  return {
+    index: chunk.index,
+    total: chunk.total,
+    startSec: chunk.startTime,
+    endSec: chunk.endTime,
+    startStr: chunk.startStr,
+    endStr: chunk.endStr,
+    status: "pending",
+    frames: [],
+  }
+}
+
+function toVlmFrames(video: VideoItem): VlmKeyframeInput[] {
+  const extracted = video.keyframes
+  if (extracted && extracted.length > 0) {
+    const stride = Math.max(1, Math.ceil(extracted.length / MAX_VLM_FRAMES))
+    return extracted
+      .filter((_, i) => i % stride === 0)
+      .map((k) => ({
+        index: k.index,
+        timestampSec: k.timestampSec,
+        timecode: k.timecode,
+        motionScore: k.motionScore,
+      }))
+  }
+  const count = Math.min(8, Math.max(2, Math.ceil(video.durationSec / 3)))
+  return Array.from({ length: count }, (_, i) => {
+    const timestampSec = Number(((video.durationSec * (i + 0.5)) / count).toFixed(1))
+    return { index: i, timestampSec, timecode: formatTimecode(timestampSec) }
+  })
+}
+
+function toQueueItem(scanned: ScannedVideoItem, scanRoot: string): VideoItem {
+  return {
+    id: scanned.id,
+    name: scanned.name,
+    path: scanned.path,
+    durationSec: scanned.durationSeconds,
+    sizeMB: scanned.sizeBytes / (1024 * 1024),
+    fps: 25,
+    recordedAt: new Date(scanned.lastModified).toLocaleString("zh-CN", { hour12: false }),
+    truth: truthForLocalFile(scanned.name),
+    status: "pending",
+    source: "disk",
+    scanRoot,
+    format: scanned.format,
+    resolution: scanned.resolution,
+    durationEstimated: scanned.durationSource === "estimated",
+  }
+}
+
+function mergeScan(prev: VideoItem[], incoming: VideoItem[], scanRoot: string): VideoItem[] {
+  const known = new Map(prev.map((v) => [v.id, v]))
+  const kept = prev.filter((v) => v.scanRoot !== scanRoot)
+  return [...kept, ...incoming.map((item) => known.get(item.id) ?? item)]
+}
+
+function timestamp() {
+  const d = new Date()
+  const pad = (n: number, l = 2) => String(n).padStart(l, "0")
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
+}
+
+function readVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const fallback = 10 + (hashString(file.name) % 25)
+    const url = URL.createObjectURL(file)
+    const video = document.createElement("video")
+    const finish = (value: number) => {
+      URL.revokeObjectURL(url)
+      video.removeAttribute("src")
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(fallback), 1500)
+    video.preload = "metadata"
+    video.onloadedmetadata = () => {
+      clearTimeout(timer)
+      finish(Number.isFinite(video.duration) ? Math.round(video.duration) : fallback)
+    }
+    video.onerror = () => {
+      clearTimeout(timer)
+      finish(fallback)
+    }
+    video.src = url
+  })
+}
+
+export function VigilProvider({ children }: { children: React.ReactNode }) {
+  const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS)
+  const { enabled: demoEnabled } = useDemoMode()
+  const demoEnabledRef = React.useRef(demoEnabled)
+  demoEnabledRef.current = demoEnabled
+  const [hydrated, setHydrated] = React.useState(false)
+  const [ping, setPing] = React.useState<PingState>({ state: "idle" })
+  const [scanning, setScanning] = React.useState(false)
+  const [loadingGmp, setLoadingGmp] = React.useState(false)
+  const [lastScan, setLastScan] = React.useState<string | null>(null)
+  const [scanInfo, setScanInfo] = React.useState<ScanInfo | null>(null)
+  const [frameTest, setFrameTest] = React.useState<FrameTestState | null>(null)
+  const [queue, setQueue] = React.useState<VideoItem[]>(() => (demoEnabled ? createInitialQueue() : []))
+  const [logs, setLogs] = React.useState<LogLine[]>([])
+  const [batchRunning, setBatchRunning] = React.useState(false)
+  const [selectedId, setSelectedId] = React.useState<string | null>(null)
+  const [activeTab, setActiveTab] = React.useState<TabId>("config")
+
+  const { rules } = useServerRules()
+  const { profiles, defaultProfile } = useModelProfiles()
+  const rulesRef = React.useRef(rules)
+  const settingsRef = React.useRef(settings)
+  const profilesRef = React.useRef(profiles)
+  const defaultProfileRef = React.useRef(defaultProfile)
+  const queueRef = React.useRef(queue)
+  const frameTestToken = React.useRef(0)
+  const busyRef = React.useRef(new Set<string>())
+  const logId = React.useRef(0)
+  const hydrateStarted = React.useRef(false)
+
+  React.useEffect(() => {
+    rulesRef.current = rules
+  }, [rules])
+
+  React.useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+
+  React.useEffect(() => {
+    profilesRef.current = profiles
+    defaultProfileRef.current = defaultProfile
+  }, [profiles, defaultProfile])
+
+  const defaultProfileSignature = defaultProfile
+    ? `${defaultProfile.id}|${defaultProfile.baseUrl}|${defaultProfile.modelName}|${defaultProfile.hasKey}`
+    : ""
+  React.useEffect(() => {
+    setPing((prev) => (prev.state === "testing" ? prev : { state: "idle" }))
+  }, [defaultProfileSignature])
+
+  React.useEffect(() => {
+    queueRef.current = queue
+  }, [queue])
+
+  const pushLog = React.useCallback((level: LogLevel, text: string) => {
+    logId.current += 1
+    const line: LogLine = { id: logId.current, ts: timestamp(), level, text }
+    setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), line])
+  }, [])
+
+  React.useEffect(() => {
+    if (hydrateStarted.current) return
+    hydrateStarted.current = true
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY)
+      if (raw) {
+        const { rules: _legacyRules, ...saved } = JSON.parse(raw) as Partial<Settings> & { rules?: unknown }
+        setSettings((prev) => ({
+          ...prev,
+          ...saved,
+          tier1Sensitivity: resolveTier1Config(saved.tier1Sensitivity).mode,
+        }))
+      }
+    } catch {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
+    // 旧版把 Key 留在浏览器 sessionStorage；现在 Key 只存服务端，顺手清掉残留
+    storeApiKey("")
+
+    const storedQueue = readStoredQueue()
+    if (storedQueue) {
+      const visible = demoEnabledRef.current ? storedQueue : storedQueue.filter((v) => !isDemoVideo(v))
+      queueRef.current = visible
+      setQueue(visible)
+    }
+
+    const storedLogs = readStoredLogs()
+    if (storedLogs.length > 0) {
+      logId.current = storedLogs.reduce((max, l) => Math.max(max, l.id), 0)
+      setLogs(storedLogs)
+    } else {
+      pushLog("sys", "Vigil-AI Sentinel v1.0 初始化完成，等待接入模型 API。")
+      pushLog("sys", "视频推理管线就绪：frame-sampler / vlm-client / rule-engine")
+    }
+    setHydrated(true)
+  }, [pushLog])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    writeStoredQueue(queue)
+  }, [queue, hydrated])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    writeStoredLogs(logs)
+  }, [logs, hydrated])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+  }, [settings, hydrated])
+
+  const updateSettings = React.useCallback((patch: Partial<Settings>) => {
+    setSettings((prev) => ({ ...prev, ...patch }))
+    if (patch.folderPath !== undefined) setScanInfo(null)
+  }, [])
+
+  const requireDefaultModel = React.useCallback((): PublicModelProfile | null => {
+    const profile = defaultProfileRef.current
+    const readiness = profile
+      ? profileReadiness(profile)
+      : { ready: false, reason: "模型配置仍在加载，或没有启用的默认模型" }
+    if (profile && readiness.ready) return profile
+    toast.error("尚未配置可用的默认模型", {
+      id: "model-not-ready",
+      description: profile ? `${profile.name}：${readiness.reason}` : readiness.reason,
+      action: { label: "去配置", onClick: () => setActiveTab("config") },
+    })
+    return null
+  }, [])
+
+  const testProfile = React.useCallback(
+    async (id: string): Promise<ProfileTestResult> => {
+      const profile = profilesRef.current.find((p) => p.id === id)
+      const isDefault = profile?.isDefault === true
+      if (isDefault) setPing({ state: "testing" })
+      pushLog("req", `POST /api/v1/test-connection  profile=${profile?.name ?? id}  model=${profile?.modelName ?? "-"}`)
+
+      const result = await testModelProfile(id)
+      if (result.ok) {
+        if (isDefault) setPing({ state: "ok", latency: result.latency, model: result.model, message: result.message })
+        pushLog("ok", `握手成功  RTT ${result.latency}ms  model=${result.model}  ${result.message}`)
+        toast.success(`API 握手成功 · RTT ${result.latency}ms`, { description: result.message })
+      } else {
+        if (isDefault) setPing({ state: "error", message: result.message })
+        pushLog("warn", `连通失败：${result.message}`)
+        toast.error("API 连通失败", { description: result.message })
+      }
+      return result
+    },
+    [pushLog]
+  )
+
+  const scanFolder = React.useCallback(async () => {
+    const { folderPath, recursive, formats } = settingsRef.current
+    if (!folderPath.trim()) {
+      toast.error("请先填写目标视频目录")
+      return
+    }
+    if (formats.length === 0) {
+      toast.error("请至少选择一种视频格式")
+      return
+    }
+    setScanning(true)
+    pushLog(
+      "req",
+      `POST /api/v1/scan-folder  folderPath=${folderPath.trim()}  recursive=${recursive}  formats=${formats.join(",")}`
+    )
+
+    try {
+      const result = await postVideoApi<ScanFolderRequest, ScanFolderResponse>(
+        "/api/v1/scan-folder",
+        { folderPath: folderPath.trim(), recursive, filterExtensions: formats },
+        30000
+      )
+      const incoming = result.videos.map((v) => toQueueItem(v, result.folderPath))
+      const knownIds = new Set(queueRef.current.map((v) => v.id))
+      const added = incoming.filter((v) => !knownIds.has(v.id)).length
+      setQueue((prev) => mergeScan(prev, incoming, result.folderPath))
+
+      setLastScan(new Date(result.scannedAt).toLocaleString("zh-CN", { hour12: false }))
+      setScanInfo({ count: result.totalFound, folder: result.folderPath, truncated: result.truncated })
+      pushLog(
+        "ok",
+        `200 OK  扫描完成：${result.folderPath} 下发现 ${result.totalFound} 个视频文件，新增入队 ${added} 个。${
+          result.truncated ? "（已达 100 个上限，结果被截断）" : ""
+        }`
+      )
+      if (result.totalFound === 0) {
+        toast.warning("目录已连通，但未发现匹配格式的视频文件")
+      } else {
+        toast.success(`成功同步目录，共发现 ${result.totalFound} 个视频文件`, {
+          action: { label: "查看队列", onClick: () => setActiveTab("queue") },
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "扫描失败"
+      setScanInfo(null)
+      pushLog("warn", `扫描失败：${message}`)
+      toast.error(message)
+    } finally {
+      setScanning(false)
+    }
+  }, [pushLog])
+
+  const importLocalFiles = React.useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0) return
+      const allowed = settingsRef.current.formats.length
+        ? settingsRef.current.formats
+        : VIDEO_FORMATS
+      const candidates = Array.from(files)
+        .filter((f) => allowed.some((ext) => f.name.toLowerCase().endsWith(ext)))
+        .slice(0, 40)
+
+      if (candidates.length === 0) {
+        toast.error("所选文件夹中没有符合格式的视频文件")
+        return
+      }
+
+      const root =
+        (candidates[0] as File & { webkitRelativePath?: string }).webkitRelativePath?.split("/")[0] ||
+        "本机文件夹"
+      pushLog("info", `读取本机目录「${root}」，匹配到 ${candidates.length} 个视频文件。`)
+
+      const durations = await Promise.all(candidates.map(readVideoDuration))
+      const items: VideoItem[] = candidates.map((file, i) => {
+        const rel =
+          (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+        return {
+          id: `local-${rel}-${file.size}`,
+          name: file.name,
+          path: `[本机] ${rel}`,
+          durationSec: durations[i],
+          sizeMB: file.size / (1024 * 1024),
+          fps: 25,
+          recordedAt: new Date(file.lastModified).toLocaleString("zh-CN", { hour12: false }),
+          truth: truthForLocalFile(file.name),
+          status: "pending",
+        }
+      })
+
+      candidates.forEach((file, i) => registerLocalVideo(items[i].id, file))
+      setQueue((prev) => {
+        const known = new Set(prev.map((v) => v.id))
+        return [...prev, ...items.filter((v) => !known.has(v.id))]
+      })
+      setSettings((prev) => ({ ...prev, folderPath: `[本机] ${root}` }))
+      setLastScan(new Date().toLocaleString("zh-CN", { hour12: false }))
+      toast.success(`已从本机载入 ${items.length} 个视频`, {
+        action: { label: "查看队列", onClick: () => setActiveTab("queue") },
+      })
+    },
+    [pushLog]
+  )
+
+  const patchVideo = React.useCallback((id: string, patch: Partial<VideoItem>) => {
+    setQueue((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)))
+  }, [])
+
+  const updateChunk = React.useCallback((videoId: string, index: number, patch: Partial<ChunkRecord>) => {
+    setQueue((prev) =>
+      prev.map((v) =>
+        v.id === videoId && v.chunks
+          ? { ...v, chunks: v.chunks.map((c) => (c.index === index ? { ...c, ...patch } : c)) }
+          : v
+      )
+    )
+  }, [])
+
+  const getLocalPromptRules = React.useCallback((): VlmPromptRule[] => {
+    return matchRulesForSource(rulesRef.current, { kind: "local" }).map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      description: ruleDescription(rule),
+      sensitivity: ruleSensitivity(rule),
+      severity: rule.severity,
+      cooldownSeconds: rule.cooldownSeconds,
+    }))
+  }, [])
+
+  const recaptureChunkFrames = React.useCallback(
+    async (videoId: string, index: number): Promise<ChunkFrame[]> => {
+      const video = queueRef.current.find((v) => v.id === videoId)
+      const chunk = video?.chunks?.find((c) => c.index === index)
+      if (!video || !chunk) throw new Error("找不到对应的切片记录")
+      const src = getVideoSrc(video)
+      if (!src) throw new Error("视频源不可播放，无法重新抽帧")
+      const captured = await captureChunkFrames(src, chunk.startSec, chunk.endSec, chunk.index, {
+        motionSegments: video.prescreen?.motionSegments,
+        totalChunks: chunk.total,
+        patrolIntervalSeconds: video.prescreen?.patrolIntervalSeconds,
+      })
+      const frames: ChunkFrame[] = captured.map((f) => ({
+        timestamp: f.timestamp,
+        seconds: f.seconds,
+        reason: f.reason,
+        base64: f.base64,
+      }))
+      updateChunk(videoId, index, { frames })
+      return frames
+    },
+    [updateChunk]
+  )
+
+  const analyzeOne = React.useCallback(
+    async (video: VideoItem) => {
+      if (busyRef.current.has(video.id)) return
+      const profile = requireDefaultModel()
+      if (!profile) return
+      busyRef.current.add(video.id)
+
+      const s = settingsRef.current
+      const model = profile.modelName
+      const frames = Math.max(1, Math.ceil(video.durationSec * s.samplingFps))
+      const sourceKey = `LOCAL:${video.id}`
+
+      pushLog("info", `[SOURCE] 开始处理视频: ${video.name} (源类型: 本地导入/检索)`)
+
+      const matched = matchRulesForSource(rulesRef.current, { kind: "local" })
+      if (matched.length === 0) {
+        pushLog("warn", "[SCREENING] 当前视频源无生效绑定的激活规则，跳过分析。")
+        toast.warning(`${video.name} 没有生效规则`, {
+          description: "请在「规则与防抖引擎」中启用规则并绑定 ALL 或 LOCAL。",
+        })
+        busyRef.current.delete(video.id)
+        return
+      }
+      pushLog(
+        "info",
+        `[RULE-MATCH] 命中当前视频源的激活规则: ${matched.length} 条 [${matched.map((r) => r.id).join(", ")}]`
+      )
+
+      patchVideo(video.id, {
+        status: "analyzing",
+        ruleId: undefined,
+        ruleName: undefined,
+        ruleSeverity: undefined,
+        confidence: undefined,
+        triggerCount: undefined,
+        suppressedCount: undefined,
+        incidentId: undefined,
+        suppressedReason: undefined,
+        timestamp: undefined,
+        evidenceFrameBase64: undefined,
+        evidenceFrameIndex: undefined,
+        evidenceFrameTotal: undefined,
+        motionSegment: undefined,
+        chunkProgress: undefined,
+        alertEventCount: undefined,
+        analyzedAt: undefined,
+        prescreen: undefined,
+        chunks: undefined,
+      })
+
+      let keyframes: VideoItem["keyframes"]
+      let keyframeWindow: VideoItem["keyframeWindow"]
+      let session: CaptureSession | null = null
+      let alertDispatched = false
+
+      try {
+        let scan: MotionScan | null = null
+        let chunks: VideoChunk[] = []
+        const playableSrc = getVideoSrc(video)
+        if (playableSrc) {
+          try {
+            session = await openCaptureSession(playableSrc)
+            const scanStartedAt = performance.now()
+            scan = await scanVideoMotion(session, {
+              sensitivity: settingsRef.current.tier1Sensitivity,
+              onLog: (message) => pushLog("info", message),
+            })
+            const scanElapsedMs = Math.round(performance.now() - scanStartedAt)
+            chunks = planVideoChunks(session.duration)
+            patchVideo(video.id, {
+              prescreen: {
+                durationSec: session.duration,
+                elapsedMs: scanElapsedMs,
+                motionSegments: scan.motionSegments,
+                staticRatioPercent: scan.staticRatioPercent,
+                scanStepSeconds: scan.scanStepSeconds,
+                scannedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+                sensitivity: scan.sensitivity,
+                motionThresholdPercent: scan.motionThresholdPercent,
+                grayDiff: scan.grayDiff,
+                patrolIntervalSeconds: scan.patrolIntervalSeconds,
+              },
+              chunks: chunks.map(toPendingChunk),
+            })
+            const fullLength = formatClock(session.duration)
+            if (scan.motionSegments.length > 0) {
+              const ranges = scan.motionSegments.map((seg) => `${seg.start}-${seg.end}`).join(", ")
+              pushLog(
+                "info",
+                `[LEVEL-1] 初筛完成：视频全长 ${fullLength}，识别到 ${scan.motionSegments.length} 个动作高危时段 [${ranges}]，静止占比 ${scan.staticRatioPercent}%`
+              )
+            } else {
+              pushLog(
+                "info",
+                `[LEVEL-1] 初筛完成：视频全长 ${fullLength}，全片几乎静止，静止占比 ${scan.staticRatioPercent}%，各切片按 25%/75% 巡检（单切片保留首帧基线，静态违禁品仍需研判，不跳过 VLM）`
+              )
+            }
+            if (chunks.length > 1) {
+              pushLog(
+                "info",
+                `[CHUNK-PLAN] 视频全长 ${fullLength} 超过 ${CHUNK_WINDOW_SECONDS} 秒，切分为 ${chunks.length} 个切片 [${chunks
+                  .map((c) => `${c.startStr}-${c.endStr}`)
+                  .join(", ")}]，串行流式分析，命中即报`
+              )
+            }
+          } catch (error) {
+            session?.dispose()
+            session = null
+            scan = null
+            chunks = []
+            pushLog(
+              "warn",
+              `[PREPROCESS] 浏览器抽帧失败：${error instanceof Error ? error.message : "未知错误"}，回退到服务端抽帧。`
+            )
+          }
+        }
+
+        let legacyFrames: VlmKeyframeInput[] = []
+        if (!session) {
+          if (video.source === "disk") {
+            try {
+              const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
+                "/api/v1/extract-frames",
+                { videoPath: toRequestVideoPath(video), fps: s.samplingFps as SamplingFps }
+              )
+              keyframes = result.keyframes
+              keyframeWindow = result.windowRange
+            } catch (error) {
+              pushLog(
+                "warn",
+                `[PREPROCESS] 抽帧接口失败：${error instanceof Error ? error.message : "未知错误"}，继续以元数据完成分析。`
+              )
+            }
+          }
+          legacyFrames = toVlmFrames({ ...video, keyframes })
+          pushLog(
+            "sample",
+            `[PREPROCESS] 抽取采样帧: ${legacyFrames.length} 帧 (640x360, ${s.samplingFps} FPS, 时长: ${formatDuration(video.durationSec)})`
+          )
+
+          const scores = legacyFrames.flatMap((f) => (typeof f.motionScore === "number" ? [f.motionScore] : []))
+          if (scores.length === legacyFrames.length && scores.length > 0) {
+            const changeRate = scores.reduce((sum, v) => sum + v, 0) / scores.length
+            if (changeRate < STATIC_SCENE_THRESHOLD) {
+              pushLog(
+                "ok",
+                `[LEVEL-1] 画面静止无动态变化 (场景变化率: ${(changeRate * 100).toFixed(1)}% < ${STATIC_SCENE_THRESHOLD * 100}%)，跳过深度推理以节省 Token。`
+              )
+              patchVideo(video.id, {
+                status: "safe",
+                confidence: 1 - changeRate,
+                suppressedReason: `一级初筛：画面静止（变化率 ${(changeRate * 100).toFixed(1)}%），未进入大模型研判`,
+                samplingFps: s.samplingFps,
+                frames,
+                keyframes,
+                keyframeWindow,
+                analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+              })
+              return
+            }
+            pushLog("info", `[LEVEL-1] 动作初筛通过 (场景变化率: ${(changeRate * 100).toFixed(1)}%)`)
+          } else {
+            pushLog("info", "[LEVEL-1] 无逐帧运动特征，初筛放行。")
+          }
+          chunks = [
+            {
+              index: 1,
+              total: 1,
+              startTime: 0,
+              endTime: video.durationSec,
+              startStr: formatClock(0),
+              endStr: formatClock(video.durationSec),
+            },
+          ]
+          patchVideo(video.id, { chunks: chunks.map(toPendingChunk) })
+        }
+
+        const promptRules: VlmPromptRule[] = matched.map((rule) => ({
+          id: rule.id,
+          name: rule.name,
+          description: ruleDescription(rule),
+          sensitivity: ruleSensitivity(rule),
+          severity: rule.severity,
+          cooldownSeconds: rule.cooldownSeconds,
+        }))
+        pushLog(
+          "req",
+          `[LEVEL-2] 动态组装 ${promptRules.length} 条规则语义注入 VLM (${profile.name} · ${model})...`
+        )
+
+        const hintedRule = video.truth.ruleId && promptRules.some((r) => r.id === video.truth.ruleId)
+        const incidentIds = new Set<string>()
+        let bestHitConfidence = -1
+        let lastReport: VideoItem["vlmReport"]
+        let lastConfidence: number | undefined
+        let belowThresholdReason: string | undefined
+        let failedChunks = 0
+
+        for (const chunk of chunks) {
+          const tag = `[CHUNK ${chunk.index}/${chunk.total}]`
+          pushLog("info", `${tag} 开始分析区间 [${chunk.startStr} - ${chunk.endStr}]...`)
+          if (chunk.total > 1) {
+            patchVideo(video.id, {
+              chunkProgress: {
+                index: chunk.index,
+                total: chunk.total,
+                percent: Math.round((chunk.index / chunk.total) * 100),
+              },
+            })
+          }
+
+          updateChunk(video.id, chunk.index, { status: "analyzing" })
+
+          try {
+            let chunkFrames = legacyFrames
+            let frameRecords: ChunkFrame[] = legacyFrames.map((k) => ({
+              timestamp: k.timecode,
+              seconds: k.timestampSec,
+              base64: k.imageUrl,
+            }))
+            if (session && scan) {
+              const captured = await captureChunkFrames(session, chunk.startTime, chunk.endTime, chunk.index, {
+                motionSegments: scan.motionSegments,
+                totalChunks: chunk.total,
+                patrolIntervalSeconds: scan.patrolIntervalSeconds,
+              })
+              chunkFrames = toKeyframeInputs(captured)
+              frameRecords = captured.map((f) => ({
+                timestamp: f.timestamp,
+                seconds: f.seconds,
+                reason: f.reason,
+                base64: f.base64,
+              }))
+              const frameList = captured
+                .map((frame) => `${frame.timestamp}[${FRAME_REASON_LABEL[frame.reason]}]`)
+                .join(", ")
+              pushLog("sample", `${tag} 抽取自适应关键帧: ${captured.length} 帧 (时间戳: ${frameList})，直传 VLM`)
+            }
+
+            const { result, metrics, verdict, reasoning } = await analyzeVlmOnce({
+              videoPath: toRequestVideoPath(video),
+              name: video.name,
+              keyframes: chunkFrames,
+              modelProfileId: profile.id,
+              sourceType: "local",
+              sourceKey,
+              rules: promptRules,
+              simulation: {
+                ruleId: hintedRule ? video.truth.ruleId : null,
+                confidence: video.truth.confidence,
+              },
+            })
+
+            if (metrics.source === "fallback") {
+              pushLog("warn", `${tag} 未使用远端模型：${metrics.fallbackReason ?? "未配置可用端点"}，已切换离线模拟引擎。`)
+            }
+            pushLog(
+              "res",
+              `${tag} [LEVEL-2] 响应完成  ${metrics.rttMs}ms  source=${metrics.source}  tokens=${metrics.promptTokens}+${metrics.outputTokens}`
+            )
+
+            const report: VideoItem["vlmReport"] = { result, metrics, verdict, reasoning }
+            lastReport = report
+            lastConfidence = result.confidence
+            updateChunk(video.id, chunk.index, {
+              status: verdict.triggered && verdict.ruleId ? "alert" : "safe",
+              frames: frameRecords,
+              ruleId: verdict.ruleId ?? undefined,
+              ruleName: verdict.ruleName ?? undefined,
+              confidence: result.confidence,
+              report,
+              error: undefined,
+              analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+            })
+
+            if (verdict.triggered && verdict.ruleId) {
+              const matchedRule = matched.find((r) => r.id === verdict.ruleId)
+              const evidence = buildEvidenceChain(result, chunkFrames, scan?.motionSegments)
+              const threshold = verdict.threshold ?? 0
+              pushLog(
+                "alert",
+                `${tag} [LEVEL-2] 触发 [${verdict.ruleId} ${verdict.ruleName ?? ""}] (置信度 ${result.confidence.toFixed(2)} >= 阈值 ${threshold.toFixed(2)})`
+              )
+              const sup = verdict.suppression
+              if (sup?.suppressed) {
+                pushLog(
+                  "warn",
+                  `[SUPPRESSION] 冷却窗口 ${sup.windowSeconds}s 内重复触发，已折叠进事件 ${sup.incidentId ?? "-"} 证据链 (累计 ${sup.triggerCount} 次，折叠 ${sup.suppressedCount} 次)，窗口从最新触发重新计时`
+                )
+              } else if (sup) {
+                pushLog(
+                  "ok",
+                  `[SUPPRESSION] 规则冷却窗口 ${sup.windowSeconds}s 激活，新预警 ${sup.incidentId ?? ""} 入库并派发至处置联动看板`
+                )
+              }
+              const incidentId = sup?.incidentId ?? video.id
+              const isNewIncident = !incidentIds.has(incidentId)
+              incidentIds.add(incidentId)
+              const segmentLabel = evidence.motionSegment ?? "未落入动作区间"
+              pushLog(
+                evidence.frameBase64 ? "ok" : "warn",
+                `[EVIDENCE] 违规时间锚点: ${evidence.timestamp} (${segmentLabel})，${
+                  evidence.frameBase64 ? "现场证据切片已存证入库" : "本次无像素帧，仅记录时序锚点"
+                } [${incidentId}]`
+              )
+
+              // 随检随报：命中立即把预警写入队列，后续切片继续跑；证据以置信度最高的一次为准
+              const isBest = result.confidence >= bestHitConfidence
+              if (isBest) bestHitConfidence = result.confidence
+              alertDispatched = true
+              patchVideo(video.id, {
+                alertEventCount: incidentIds.size,
+                ...(isBest
+                  ? {
+                      status: "alert" as const,
+                      ruleId: verdict.ruleId,
+                      ruleName: verdict.ruleName ?? verdict.ruleId,
+                      ruleSeverity: normalizeSeverity(matchedRule?.severity ?? result.severity),
+                      confidence: result.confidence,
+                      triggerCount: sup?.triggerCount,
+                      suppressedCount: sup?.suppressedCount,
+                      incidentId: sup?.incidentId ?? undefined,
+                      suppressedReason: undefined,
+                      timestamp: evidence.timestamp,
+                      evidenceFrameBase64: evidence.frameBase64,
+                      evidenceFrameIndex: evidence.frameIndex,
+                      evidenceFrameTotal: evidence.frameTotal,
+                      motionSegment: evidence.motionSegment,
+                      samplingFps: s.samplingFps,
+                      frames,
+                      vlmReport: report,
+                      analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+                    }
+                  : {}),
+              })
+              if (isNewIncident) {
+                toast.error(`${video.name} 触发预警`, {
+                  description: `${verdict.ruleName ?? verdict.ruleId} · ${evidence.timestamp}${
+                    chunk.total > 1 ? `（切片 ${chunk.index}/${chunk.total}，后续切片继续分析）` : ""
+                  }`,
+                  action: { label: "查看预警", onClick: () => setActiveTab("alerts") },
+                })
+              }
+            } else if (verdict.belowThreshold && verdict.ruleId) {
+              const reason = `疑似「${verdict.ruleName ?? verdict.ruleId}」，置信度 ${Math.round(
+                result.confidence * 100
+              )}% 低于阈值 ${Math.round((verdict.threshold ?? 0) * 100)}%，未触发预警`
+              belowThresholdReason ??= reason
+              pushLog("warn", `${tag} [LEVEL-2] ${reason}`)
+            } else {
+              pushLog("ok", `${tag} [LEVEL-2] 区间正常，未触发任何生效规则  ← ${video.name}`)
+            }
+          } catch (error) {
+            failedChunks++
+            const message = error instanceof Error ? error.message : "未知错误"
+            updateChunk(video.id, chunk.index, { status: "failed", error: message })
+            pushLog("warn", `${tag} 切片分析失败：${message}，继续后续切片。`)
+          }
+        }
+
+        const alertCount = incidentIds.size
+        const total = chunks.length
+        const durationStr = formatClock(session?.duration ?? video.durationSec)
+        pushLog(
+          alertCount > 0 ? "alert" : failedChunks > 0 ? "warn" : "ok",
+          `[SUMMARY] 视频全长 ${durationStr} 分析完成 (共 ${total} 个切片)，累计触发 ${alertCount} 起预警事件${
+            failedChunks > 0 ? `，${failedChunks} 个切片分析失败` : ""
+          }`
+        )
+
+        if (alertCount > 0) {
+          patchVideo(video.id, {
+            chunkProgress: undefined,
+            keyframes,
+            keyframeWindow,
+            analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+          })
+        } else if (failedChunks > 0) {
+          patchVideo(video.id, { status: "pending", chunkProgress: undefined })
+          toast.warning(`${video.name} 有 ${failedChunks}/${total} 个切片分析失败`, {
+            description: "未发现违规但覆盖不完整，已回到待分析，请检查网关后重试。",
+          })
+        } else {
+          patchVideo(video.id, {
+            status: "safe",
+            chunkProgress: undefined,
+            confidence: lastConfidence,
+            suppressedReason: belowThresholdReason,
+            samplingFps: s.samplingFps,
+            frames,
+            keyframes,
+            keyframeWindow,
+            vlmReport: lastReport,
+            analyzedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+          })
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "分析失败"
+        // 已经派发过预警的视频保留告警状态，其余回到待分析
+        patchVideo(video.id, { chunkProgress: undefined, ...(alertDispatched ? {} : { status: "pending" as const }) })
+        pushLog("warn", `分析失败：${message}  ← ${video.name}`)
+        toast.error(`${video.name} 分析失败`, { description: message })
+      } finally {
+        session?.dispose()
+        busyRef.current.delete(video.id)
+      }
+    },
+    [requireDefaultModel, patchVideo, updateChunk, pushLog]
+  )
+
+  const runFrameTest = React.useCallback(
+    async (video: VideoItem, fps: SamplingFps, triggerSec: number | null) => {
+      const token = ++frameTestToken.current
+      setFrameTest({ videoId: video.id, fps, triggerSec, status: "loading" })
+      pushLog(
+        "req",
+        `POST /api/v1/extract-frames  videoPath=${video.path}  fps=${fps}${
+          triggerSec !== null ? `  trigger=${triggerSec}s` : ""
+        }`
+      )
+      try {
+        const result = await postVideoApi<ExtractFramesRequest, ExtractFramesResponse>(
+          "/api/v1/extract-frames",
+          {
+            videoPath: toRequestVideoPath(video),
+            fps,
+            ...(triggerSec !== null ? { triggerTimestampSec: triggerSec } : {}),
+          }
+        )
+        if (token !== frameTestToken.current) return
+        setFrameTest({
+          videoId: video.id,
+          fps,
+          triggerSec,
+          status: "ok",
+          keyframes: result.keyframes,
+          windowRange: result.windowRange,
+          triggerTimestampSec: result.triggerTimestampSec,
+        })
+        pushLog(
+          "sample",
+          `200 OK  ${result.totalFramesExtracted} 帧  窗口 [${result.windowRange.startSec}s, ${result.windowRange.endSec}s]  ← ${video.name}`
+        )
+      } catch (error) {
+        if (token !== frameTestToken.current) return
+        const message = error instanceof Error ? error.message : "抽帧失败"
+        setFrameTest({ videoId: video.id, fps, triggerSec, status: "error", error: message })
+        pushLog("warn", `抽帧失败：${message}`)
+      }
+    },
+    [pushLog]
+  )
+
+  const openFrameTest = React.useCallback(
+    (video: VideoItem) => {
+      void runFrameTest(video, settingsRef.current.samplingFps as SamplingFps, null)
+    },
+    [runFrameTest]
+  )
+
+  const closeFrameTest = React.useCallback(() => {
+    frameTestToken.current += 1
+    setFrameTest(null)
+  }, [])
+
+  const analyzeAll = React.useCallback(async () => {
+    const pending = queue.filter((v) => v.status === "pending")
+    if (pending.length === 0) {
+      toast.info("队列中没有待分析的视频")
+      return
+    }
+    setBatchRunning(true)
+    pushLog("sys", `批量分析启动：共 ${pending.length} 个待处理视频，顺序执行。`)
+    for (const video of pending) {
+      await analyzeOne(video)
+    }
+    pushLog("sys", "批量分析结束。")
+    setBatchRunning(false)
+    toast.success("全量分析完成")
+  }, [queue, analyzeOne, pushLog])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    setQueue((prev) => {
+      if (!demoEnabled) return prev.some(isDemoVideo) ? prev.filter((v) => !isDemoVideo(v)) : prev
+      return prev.length === 0 ? createInitialQueue() : prev
+    })
+  }, [demoEnabled, hydrated])
+
+  const addSamples = React.useCallback(() => {
+    const samples = createTestSamples(3)
+    setQueue((prev) => [...prev, ...samples])
+    pushLog("info", `已注入 ${samples.length} 个测试样本。`)
+    toast.success(`已注入 ${samples.length} 个测试样本`)
+  }, [pushLog])
+
+  const loadGmpSuite = React.useCallback(async () => {
+    setLoadingGmp(true)
+    pushLog("req", "POST /api/v1/samples/provision  suite=vaccine-cleanroom-gmp")
+    try {
+      const suite = await provisionGmpSuite()
+      pushLog("ok", `200 OK  已写入 ${suite.cases.length} 个 GMP 算例至 ${suite.directory}，规则���已含 RULE-BIO-01~04。`)
+      settingsRef.current = { ...settingsRef.current, folderPath: suite.directory }
+      updateSettings({ folderPath: suite.directory })
+      setActiveTab("queue")
+      await scanFolder()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "未知错误"
+      pushLog("warn", `GMP 算例载入失败：${message}`)
+      toast.error("GMP 算例载入失败", { description: message })
+    } finally {
+      setLoadingGmp(false)
+    }
+  }, [pushLog, updateSettings, scanFolder])
+
+  React.useEffect(() => {
+    if (!hydrated) return
+    if (window.sessionStorage.getItem(GMP_AUTOSCAN_KEY) !== "1") return
+    window.sessionStorage.removeItem(GMP_AUTOSCAN_KEY)
+    setActiveTab("queue")
+    void scanFolder()
+  }, [hydrated, scanFolder])
+
+  const clearQueue = React.useCallback(() => {
+    queueRef.current = []
+    releaseAllLocalVideos()
+    setQueue([])
+    writeStoredQueue([])
+    pushLog("info", "检测队列已清空。")
+  }, [pushLog])
+
+  const removeVideo = React.useCallback((id: string) => {
+    releaseLocalVideo(id)
+    setQueue((prev) => prev.filter((v) => v.id !== id))
+  }, [])
+
+  const clearLogs = React.useCallback(() => {
+    setLogs([])
+    writeStoredLogs([])
+  }, [])
+
+  const value = React.useMemo<VigilContextValue>(
+    () => ({
+      settings,
+      updateSettings,
+      defaultProfile,
+      testProfile,
+      ping,
+      scanning,
+      lastScan,
+      scanInfo,
+      scanFolder,
+      frameTest,
+      openFrameTest,
+      runFrameTest,
+      closeFrameTest,
+      importLocalFiles,
+      queue,
+      addSamples,
+      loadGmpSuite,
+      loadingGmp,
+      clearQueue,
+      removeVideo,
+      analyzeOne,
+      updateChunk,
+      recaptureChunkFrames,
+      getLocalPromptRules,
+      analyzeAll,
+      batchRunning,
+      logs,
+      clearLogs,
+      selectedId,
+      setSelectedId,
+      activeTab,
+      setActiveTab,
+    }),
+    [
+      settings,
+      updateSettings,
+      defaultProfile,
+      testProfile,
+      ping,
+      scanning,
+      lastScan,
+      scanInfo,
+      scanFolder,
+      frameTest,
+      openFrameTest,
+      runFrameTest,
+      closeFrameTest,
+      importLocalFiles,
+      queue,
+      addSamples,
+      loadGmpSuite,
+      loadingGmp,
+      clearQueue,
+      removeVideo,
+      analyzeOne,
+      updateChunk,
+      recaptureChunkFrames,
+      getLocalPromptRules,
+      analyzeAll,
+      batchRunning,
+      logs,
+      clearLogs,
+      selectedId,
+      activeTab,
+    ]
+  )
+
+  return <VigilContext.Provider value={value}>{children}</VigilContext.Provider>
+}
